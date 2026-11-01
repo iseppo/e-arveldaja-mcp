@@ -6,6 +6,7 @@ import {
   POOL_KEY,
   POOL_STATEMENT_PATH,
   poolDistribution,
+  sourceDigestOf,
   poolJournal,
   rateFetch,
   setupPoolTool,
@@ -351,7 +352,7 @@ describe("book_lightyear_trades — USD→EUR conversions relieve the pool (plan
       buy("27/04/2026 10:00:00", "OR-TESTQ4GB3", "99.80", "0.10"),
     ], ["10/04/2026 10:00:00", "17/04/2026 14:10:12", "21/04/2026 10:00:00", "22/04/2026 10:00:00", "24/04/2026 10:00:00"].map(ts => gain(ts, "60.00", "85.00")));
     const env = tradesTool({
-      pool: [start, poolDistribution("DD-TESTQ4G1", "2026-04-02T10:00:00Z", 60, 52, 601), poolDistribution("DD-TESTQ4G2", "2026-04-06T10:00:00Z", 21, 18, 602)],
+      pool: [start, poolDistribution("DD-TESTQ4G1", "2026-04-02T10:00:00Z", 60, 52, 601, undefined, sourceDigestOf(statementRows, "DD-TESTQ4G1")), poolDistribution("DD-TESTQ4G2", "2026-04-06T10:00:00Z", 21, 18, 602, undefined, sourceDigestOf(statementRows, "DD-TESTQ4G2"))],
       journals: [poolJournal(601, "DD-TESTQ4G1", 52), poolJournal(602, "DD-TESTQ4G2", 18)],
       fetch: rateFetch("1.1500", { "2026-04-10": "1.1706", "2026-04-17": "1.1797", "2026-04-21": "1.1767", "2026-04-22": "1.1733", "2026-04-24": "1.1712", "2026-04-27": "1.1749" }),
     });

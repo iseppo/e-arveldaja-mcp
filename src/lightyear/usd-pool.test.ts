@@ -31,6 +31,7 @@ import {
   type UsdPoolRecord,
 } from "./usd-pool.js";
 import { memoryUsdPoolStore } from "../__fixtures__/usd-pool-store.js";
+import { poolSourceDigest } from "./pool-statement.js";
 
 const NO_STATEMENT = { events: [], rows: [] };
 /** Statement events with a role (row_index by position); sweep rows are priced at exactly 1.00. */
@@ -42,6 +43,10 @@ function statementOf(events: Array<{ ref: string; ts: number; role: StatementPoo
       quantity: 1, price_per_share: 1, gross_amount: 1, fee: 0, net_amount: 1, fx_rate: 0,
     })),
   };
+}
+/** The source digest of the row {@link statementOf} gives a ref (statement-covered events must reproduce it). */
+function sourceDigestOf(ref: string, at: number): string {
+  return poolSourceDigest(statementOf([{ ref, ts: at, role: "distribution_in" }]).rows, ref)!;
 }
 const KEY: PoolKey = { connection_fingerprint: "conn", lightyear_account: "CHZELUU", broker_account: 1020, broker_dimension_id: 11, currency: "USD" };
 
@@ -66,7 +71,7 @@ function event(ref: string, day: string, kind: UsdPoolEvent["kind"], usd: number
   return {
     record: "event", pool_key: KEY, ref, ts: ts(day), kind, usd_cents: usd, eur_cents: eur,
     document_number: `LY:${ref}`, journal_id: journalId, journal_broker_net_cents: brokerNet, state: "committed",
-    postings: brokerPostings(brokerNet), recorded_at: "t",
+    postings: brokerPostings(brokerNet), source_digest: sourceDigestOf(ref, ts(day)), recorded_at: "t",
   };
 }
 
@@ -182,6 +187,15 @@ describe("validateUsdPool", () => {
     expect(result.value.events).toHaveLength(2);
     const [projected] = projectPool(result.value, [{ ref: "OR-BUY", ts: UNTIL.ts, usd_delta_cents: -905, eur: "relief" }]);
     expect(projected).toMatchObject({ ok: true, relief_eur_cents: 805, state_before: { usd_cents: 10905, eur_cents: 9702 } });
+  });
+
+  it("a statement-derived event without its source digest breaks the chain, whatever the statement shows (review r2 #1)", async () => {
+    const journals = [journal(1, "LY:IN-1", 686), journal(2, "LY:DD-1", 116)];
+    for (const kind of ["distribution_in", "sell_in", "buy_relief", "conversion_out"] as const) {
+      const unbound = { ...event("DD-1", "2026-10-02", kind, 130, 116, 2), source_digest: undefined };
+      expect(await base([opening(10000, 8900), event("IN-1", "2026-10-01", "distribution_in", 775, 686, 1), unbound], journals))
+        .toEqual({ ok: false, code: "usd_pool_chain_broken", detail: "LY:DD-1" });
+    }
   });
 
   it("an interleaved later distribution does not block an earlier buy, and is excluded from its state", async () => {
@@ -450,7 +464,8 @@ describe("validateUsdPool — journal-free conversion_out evidence (plan §2, r1
   const free = (overrides: Partial<UsdPoolEvent> = {}, evidence: ConversionEvidence = EVIDENCE): UsdPoolEvent => ({
     record: "event", pool_key: KEY, ref: "CN-FREE", ts: CN_TS, kind: "conversion_out", usd_cents: -37, eur_cents: -31,
     document_number: "LY:CN-FREE", journal_id: null, journal_broker_net_cents: 0, state: "committed", postings: [],
-    source_evidence: evidence, evidence_digest: conversionEvidenceDigest(evidence), recorded_at: "t", ...overrides,
+    source_evidence: evidence, evidence_digest: conversionEvidenceDigest(evidence),
+    source_digest: poolSourceDigest(covering().rows, "CN-FREE")!, recorded_at: "t", ...overrides,
   });
   const covering = (usdGross = -0.37) => ({
     events: [{ ref: "CN-FREE", row_index: 1, ts: CN_TS, role: "conversion_out" as const }],

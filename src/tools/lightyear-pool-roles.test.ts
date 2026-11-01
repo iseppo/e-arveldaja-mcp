@@ -5,6 +5,7 @@ import { lightyearStatementCsv, parseLightyearRowsForTest } from "../__fixtures_
 import {
   POOL_STATEMENT_PATH,
   poolDistribution,
+  sourceDigestOf,
   poolJournal,
   poolOpening,
   setupPoolTool,
@@ -305,7 +306,7 @@ describe("USD pool roles: order-independent 1:1 pairing and complete classificat
 
   it("mixed second (Codex r1 #2): a logged +100 USD / €80 inflow and a 50 USD spend in one second are refused, and so is every later spend", async () => {
     const dividend = ["19/10/2026 14:43:49", "DD-TESTMIX", "AMD", "US0079031078", "Dividend", "0", "USD", "0", "100.00", "0", "0", "100.00", "0"];
-    const pool = [poolOpening(10000, 9000, "1.1111111111"), poolDistribution("DD-TESTMIX", "2026-10-19T14:43:49Z", 10000, 8000, 601, 8330)];
+    const pool = [poolOpening(10000, 9000, "1.1111111111"), poolDistribution("DD-TESTMIX", "2026-10-19T14:43:49Z", 10000, 8000, 601, 8330, sourceDigestOf([dividend], "DD-TESTMIX"))];
     const journals = [poolJournal(601, "DD-TESTMIX", 8000, 8330)];
     load([dividend, fundSell("19/10/2026 14:43:40", "OR-TESTMXSW1", "50.00"), buy("19/10/2026 14:43:49", "OR-TESTMXBY1", "50.00"),
       fundSell("20/10/2026 10:00:00", "OR-TESTMXSW2", "10.00"), buy("20/10/2026 10:00:10", "OR-TESTMXBY2", "10.00")]);

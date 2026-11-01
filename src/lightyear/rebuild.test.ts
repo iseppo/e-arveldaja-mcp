@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resolveFileInput } from "../file-validation.js";
 import { readFileCapped } from "../bounded-read.js";
 import { lightyearStatementCsv } from "../__fixtures__/lightyear-rows.js";
-import { poolDistribution, poolJournal, poolOpening, rateFetch, setupPoolTool, type FetchMock } from "../__fixtures__/lightyear-pool-harness.js";
+import { poolDistribution, poolJournal, sourceDigestOf, poolOpening, rateFetch, setupPoolTool, type FetchMock } from "../__fixtures__/lightyear-pool-harness.js";
 import type { Journal } from "../types/api.js";
 import type { LightyearTradesPayload } from "../tools/lightyear-investments.js";
 import { canonicalPoolPostings, defaultUsdPoolStore, type UsdPoolRecord } from "./usd-pool.js";
@@ -114,7 +114,7 @@ describe("simulateLightyearYear (plan Q5)", () => {
     // Production run: the same statement, the dividends booked first (0.60 / 0.21 USD at 1.1500 → €0.52 / €0.18).
     mockedReadFileCapped.mockImplementation(async (path: string) => Buffer.from(path === GAINS_PATH ? gainsCsv(APRIL_GAINS) : lightyearStatementCsv(APRIL), "utf8"));
     const env = setupPoolTool<LightyearTradesPayload>("book_lightyear_trades", TOOL_ACCOUNTS, {
-      pool: [poolOpening(37, 31, "1.1935", "2026-03-31"), poolDistribution("DD-TESTQ4G1", "2026-04-02T10:00:00Z", 60, 52, 601), poolDistribution("DD-TESTQ4G2", "2026-04-06T10:00:00Z", 21, 18, 602)],
+      pool: [poolOpening(37, 31, "1.1935", "2026-03-31"), poolDistribution("DD-TESTQ4G1", "2026-04-02T10:00:00Z", 60, 52, 601, undefined, sourceDigestOf(APRIL, "DD-TESTQ4G1")), poolDistribution("DD-TESTQ4G2", "2026-04-06T10:00:00Z", 21, 18, 602, undefined, sourceDigestOf(APRIL, "DD-TESTQ4G2"))],
       journals: [poolJournal(601, "DD-TESTQ4G1", 52), poolJournal(602, "DD-TESTQ4G2", 18)],
       fetch: rateFetch("1.1500", APRIL_RATES),
     });
@@ -141,6 +141,7 @@ describe("simulateLightyearYear (plan Q5)", () => {
 
   describe("refusal parity: the rebuild stops where the trades dry run reviews", () => {
     const opening = { as_of: "2025-12-31", usd_cents: 10000, eur_cents: 9000, rate: "1.1111111111" };
+    const MIXED_DIVIDEND = ["19/10/2026 14:43:49", "DD-TESTPMX", "AMD", "US0079031078", "Dividend", "0", "USD", "0", "100.00", "0", "0", "100.00", "0"];
     const cases: Array<[string, string[][], string[], { pool?: UsdPoolRecord[]; journals?: Journal[] }]> = [
       ["unsupported USD deposit", [
         ["01/05/2026 10:00:00", "DT-TESTPDEP", "", "", "Deposit", "0", "USD", "0", "100.00", "0", "0", "100.00", "0"],
@@ -161,10 +162,10 @@ describe("simulateLightyearYear (plan Q5)", () => {
         ...convIn("19/10/2026 10:00:10", "CN-TESTPAC1", "100.00", "90.00"), ...convIn("19/10/2026 10:00:20", "CN-TESTPAC2", "100.00", "80.00"),
       ], ["OR-TESTPAB1", "OR-TESTPAB2"], {}],
       ["mixed second", [
-        ["19/10/2026 14:43:49", "DD-TESTPMX", "AMD", "US0079031078", "Dividend", "0", "USD", "0", "100.00", "0", "0", "100.00", "0"],
+        MIXED_DIVIDEND,
         buy("19/10/2026 14:43:49", "OR-TESTPMXB", "50.00"),
       ], ["OR-TESTPMXB"], {
-        pool: [poolDistribution("DD-TESTPMX", "2026-10-19T14:43:49Z", 10000, 8909, 601)],
+        pool: [poolDistribution("DD-TESTPMX", "2026-10-19T14:43:49Z", 10000, 8909, 601, undefined, sourceDigestOf([MIXED_DIVIDEND], "DD-TESTPMX"))],
         journals: [poolJournal(601, "DD-TESTPMX", 8909)],
       }],
     ];

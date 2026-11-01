@@ -3277,6 +3277,11 @@ async function executeLightyearJournalCommands<C extends {
         ...pending, postings, ...effectiveDate,
         ...(pending.checkpoint ? { checkpoint: { ...pending.checkpoint, postings, ...effectiveDate } } : {}),
       };
+      if (poolEvent && poolEvent.kind !== "revaluation" && typeof poolEvent.source_digest !== "string") {
+        // A statement-derived pool event without its source fingerprint is never written (review r2 #1).
+        createdByIndex.set(index, { status: "failed" });
+        return { outcome: "failed", error_code: "usd_pool_source_unbound", mutation_occurred: false };
+      }
       if (poolEvent && params.pool && poolEvent.source_evidence) {
         // Journal-free conversion_out: no external write, so no intent stage — written once as committed.
         try {
@@ -4739,10 +4744,13 @@ async function routeDistributionPool(params: {
       const usdCents = moneyToSafeCents(d.net_amount);
       const eurCents = moneyToSafeCents(d.net_eur ?? Number.NaN);
       if (usdCents === null || eurCents === null) { review.set(d.row_index, fxReason("distribution_amount_conflict")); continue; }
-      poolEvents.set(d.row_index, withPoolSource({
+      const sourceDigest = poolSourceDigest(poolRows, d.reference);
+      if (sourceDigest === null) { review.set(d.row_index, fxReason("usd_pool_source_unbound")); continue; }
+      poolEvents.set(d.row_index, {
         record: "event", pool_key: key, ref: d.reference, ts, kind: "distribution_in",
         usd_cents: usdCents, eur_cents: eurCents, document_number: `LY:${d.reference}`, journal_broker_net_cents: eurCents,
-      }, poolRows));
+        source_digest: sourceDigest,
+      });
     }
   }
   return {
@@ -4759,7 +4767,11 @@ function toPoolStatementRows(rows: readonly AccountStatementRow[]): PoolStatemen
   }));
 }
 
-/** Bind a pool event to its normalized statement rows (review 2026-11-01 #2): validateUsdPool refuses a later statement that disagrees. */
+/**
+ * Bind a pool event to its normalized statement rows (review 2026-11-01 #2): validateUsdPool refuses a later
+ * statement that disagrees. Planning already held every row without a digest (usd_pool_source_unbound); an
+ * event left unbound here is refused at the write boundary.
+ */
 function withPoolSource(event: PendingPoolEvent, rows: readonly PoolStatementRow[]): PendingPoolEvent {
   const digest = poolSourceDigest(rows, event.ref);
   return digest === null ? event : { ...event, source_digest: digest };
@@ -4972,6 +4984,9 @@ async function valuePoolTrades(params: {
       preBlocked.set(subject.ref, compareOrder(order, openingOrder) <= 0 ? "usd_pool_before_opening" : "usd_pool_backdated_event");
     } else if (mixed !== null && subject.ts >= mixed) {
       preBlocked.set(subject.ref, "usd_pool_ambiguous_order");
+    } else if (poolSourceDigest(statement.rows, subject.ref) === null) {
+      // No exact source fingerprint, no pool event: a later statement could not be checked against it (review r2 #1).
+      preBlocked.set(subject.ref, "usd_pool_source_unbound");
     }
   }
   const open = subjects.filter(subject => !preBlocked.has(subject.ref));

@@ -169,7 +169,8 @@ export type UsdPoolReviewCode =
   | "usd_pool_pairing_ambiguous"
   | "usd_pool_ambiguous_order"
   | "usd_pool_row_unplaceable"
-  | "usd_pool_source_changed";
+  | "usd_pool_source_changed"
+  | "usd_pool_source_unbound";
 
 export const USD_POOL_REVIEW_MESSAGES: Record<UsdPoolReviewCode, string> = {
   usd_pool_unavailable: "The USD cash-fund pool store needs the accounting-rules bundle (not single-file EARVELDAJA_RULES_FILE mode); pool-dependent rows stay in review.",
@@ -197,6 +198,7 @@ export const USD_POOL_REVIEW_MESSAGES: Record<UsdPoolReviewCode, string> = {
   usd_pool_pairing_ambiguous: "Same-day USD trades and conversions of the same amount cannot be paired one to one without guessing; none of them is booked and the USD pool stays blocked until they are booked by hand.",
   usd_pool_ambiguous_order: "One statement second holds both USD arriving in the pool and USD leaving it; the statement's 1-second resolution does not prove their order, so this and every later pool booking is refused.",
   usd_pool_source_changed: "The statement now shows a USD pool row already logged in the USD pool with another time, role or USD amount than when it was logged; this and every later pool booking is refused until the difference is reviewed.",
+  usd_pool_source_unbound: "The statement rows of this USD pool row cannot be fingerprinted exactly (an amount is not a whole number of cents), so a later statement could not be checked against it; it is not booked and later pool bookings wait for it.",
   usd_pool_row_unplaceable: "A USD row of the statement has no valid date and time, so its place in the USD pool's history is unknown; no pool booking or revaluation is made from this statement.",
 };
 
@@ -731,6 +733,10 @@ export async function validateUsdPool(params: ValidateUsdPoolParams): Promise<Us
     for (let index = 0; index < chain.length; index++) {
       const record = chain[index]!;
       if (record.record === "event") {
+        // Every statement-derived event carries its source rows' digest; there is no legacy exception (review r2 #1).
+        if (record.kind !== "revaluation" && typeof record.source_digest !== "string") {
+          return { ok: false, code: "usd_pool_chain_broken", detail: record.document_number };
+        }
         if (record.journal_id === null || record.source_evidence !== undefined) {
           // A journal-free conversion_out stands only on its evidence; evidence never rides on a journal-backed event.
           if (!journalFreeEventProven(record, { usd_cents: usd, eur_cents: eur }, { rows: params.statement.rows, covers }, liveNumbers)) {
@@ -776,7 +782,7 @@ export async function validateUsdPool(params: ValidateUsdPoolParams): Promise<Us
     if (!covers(event.ts)) continue;
     const own = params.statement.events.filter(row => row.ref === event.ref);
     if (own.length === 0 || own.some(row => row.ts !== event.ts || row.role !== event.kind)
-      || (event.source_digest !== undefined && poolSourceDigest(params.statement.rows, event.ref) !== event.source_digest)) {
+      || (event.kind !== "revaluation" && poolSourceDigest(params.statement.rows, event.ref) !== event.source_digest)) {
       return { ok: false, code: "usd_pool_source_changed", detail: event.document_number };
     }
   }

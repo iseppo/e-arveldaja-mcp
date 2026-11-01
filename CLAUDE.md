@@ -641,7 +641,9 @@ compare the journal's posting multiset with it, not only the broker net (a misma
 `usd_pool_uncertain_outcome`, `usd_pool_chain_broken`); a record without postings breaks the chain. Journal-backed records and
 revaluation checkpoints also carry the approved `effective_date`, checked the same way. Each statement-derived
 event carries a `source_digest` of its USD rows (time, type, ticker, quantity, gross/fee/net cents); a later
-statement covering that day that lacks the row, moves it or changes its amounts is `usd_pool_source_changed`. A
+statement covering that day that lacks the row, moves it or changes its amounts is `usd_pool_source_changed`. A row
+whose digest cannot be computed (an amount finer than a cent) is `usd_pool_source_unbound` — never logged, later
+pool commands stop — and a stored statement-derived event without `source_digest` breaks the chain. A
 duplicate found only at create time is read back and committed like a fresh journal, or stops the run.
 Same-second trade commands execute in the pool's (timestamp, reference) valuation order. `validateUsdPool` replays the whole
 chain from the opening against fresh journals; records ordered before the latest committed relief

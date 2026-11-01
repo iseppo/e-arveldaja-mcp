@@ -6,7 +6,9 @@ import type { ApiContext } from "../tools/crud/shared.js";
 import type { Journal } from "../types/api.js";
 import type { EcbFetch, EcbFetchResponse, EcbRateDeps } from "../fx/ecb-rates.js";
 import { endOfDaySeconds, type PoolKey, type UsdPoolCheckpoint, type UsdPoolEvent, type UsdPoolRecord } from "../lightyear/usd-pool.js";
-import { registerLightyearTools } from "../tools/lightyear-investments.js";
+import { lightyearTimestampSeconds, registerLightyearTools } from "../tools/lightyear-investments.js";
+import { poolSourceDigest } from "../lightyear/pool-statement.js";
+import { parseLightyearRowsForTest } from "./lightyear-rows.js";
 
 /**
  * Offline harness for the USD-pool Lightyear tools (synthetic data only).
@@ -38,6 +40,14 @@ export function rateFetch(fallback = "1.1225", rates: Record<string, string> = {
   }) as FetchMock;
 }
 
+/** Placeholder source digest for a logged event whose day the test statement does not cover. */
+export const FIXTURE_SOURCE_DIGEST = "fixture-source-digest";
+
+/** The source digest the tools log for `ref` from synthetic statement CSV rows; {@link FIXTURE_SOURCE_DIGEST} when the rows lack it. */
+export function sourceDigestOf(rows: readonly string[][], ref: string): string {
+  return poolSourceDigest(parseLightyearRowsForTest(rows).map(row => ({ ...row, ts: lightyearTimestampSeconds(row.date) })), ref) ?? FIXTURE_SOURCE_DIGEST;
+}
+
 export function poolOpening(usd: number, eur: number, rate: string, asOf = "2025-12-31", key: PoolKey = POOL_KEY): UsdPoolCheckpoint {
   return {
     record: "checkpoint", pool_key: key, kind: "opening", as_of: asOf, ts: endOfDaySeconds(asOf),
@@ -47,10 +57,10 @@ export function poolOpening(usd: number, eur: number, rate: string, asOf = "2025
 }
 
 /** A committed distribution_in event (statement time `iso`, read as UTC like the statement clock); postings as {@link poolJournal}. */
-export function poolDistribution(ref: string, iso: string, usd: number, eur: number, journalId: number, incomeAccount = 8320): UsdPoolEvent {
+export function poolDistribution(ref: string, iso: string, usd: number, eur: number, journalId: number, incomeAccount = 8320, sourceDigest = FIXTURE_SOURCE_DIGEST): UsdPoolEvent {
   return {
     record: "event", pool_key: POOL_KEY, ref, ts: Date.parse(iso) / 1000, kind: "distribution_in", usd_cents: usd, eur_cents: eur,
-    document_number: `LY:${ref}`, journal_id: journalId, journal_broker_net_cents: eur, state: "committed",
+    document_number: `LY:${ref}`, journal_id: journalId, journal_broker_net_cents: eur, state: "committed", source_digest: sourceDigest,
     postings: [
       { accounts_id: 1120, accounts_dimensions_id: null, type: "D", amount_cents: eur },
       { accounts_id: incomeAccount, accounts_dimensions_id: null, type: "C", amount_cents: eur },

@@ -12,6 +12,7 @@ import {
   poolOpening,
   rateFetch,
   setupPoolTool,
+  sourceDigestOf,
   type CreatedJournal,
 } from "../__fixtures__/lightyear-pool-harness.js";
 import { memoryUsdPoolStore } from "../__fixtures__/usd-pool-store.js";
@@ -204,7 +205,7 @@ describe("book_lightyear_trades — USD sells kept in USD and pool-paid buys (pl
       buy("12/06/2026 13:49:05", "OR-TESTQ3B6", "99.44", "0.10"),
     ]);
     const env = tradesTool({
-      pool: [poolOpening(0, 0, "1.1567", "2026-05-31"), poolDistribution("DD-TESTQ3D6", "2026-06-12T10:00:00Z", 60, 52, 601, 8330)],
+      pool: [poolOpening(0, 0, "1.1567", "2026-05-31"), poolDistribution("DD-TESTQ3D6", "2026-06-12T10:00:00Z", 60, 52, 601, 8330, sourceDigestOf(statementRows, "DD-TESTQ3D6"))],
       journals: [poolJournal(601, "DD-TESTQ3D6", 52, 8330)],
       fetch: rateFetch("1.1567"),
     });
@@ -302,6 +303,30 @@ describe("book_lightyear_trades — USD sells kept in USD and pool-paid buys (pl
     expect(reviewCode(dry.payload, "OR-TESTFCB")).toBe("usd_pool_source_changed");
   });
 
+  it("a pool row whose statement amounts cannot be fingerprinted is a review, never logged without its source (review r2 #1)", async () => {
+    // Gross USD 100.001, net 100, tax 0.001 at ECB 1.25 would log +100 USD / €80 with no source digest; a later
+    // export showing USD 200 / €160 would then pass, and the 150 USD buy would relieve €127.50 instead of €125.
+    const div = ["01/04/2026 10:00:00", "DD-TESTSRCU", "AMD", "US0079031078", "Dividend", "0", "USD", "0", "100.001", "0", "0", "100.00", "0.001"];
+    load([div, B]);
+    const dist = setupPoolTool<{ created?: number; results: Array<{ status?: string; review_reason?: { code: string } }> }>("book_lightyear_distributions",
+      { broker_account: 1120, income_account: 8330, tax_account: 8610, fee_account: 8610, fx_source: "ecb" },
+      { pool: [OPENING], fetch: rateFetch("1.25") });
+    const { dry } = await dist.book();
+    expect(dry.payload.results[0]).toMatchObject({ review_reason: { code: "usd_pool_source_unbound" } });
+    expect(dist.create).not.toHaveBeenCalled();
+    expect(dist.store.records).toEqual([OPENING]);
+    const trades = await fcTool({ store: memoryUsdPoolStore(structuredClone(dist.store.records) as UsdPoolRecord[]) }).run({ dry_run: true });
+    expect(resultFor(trades.payload, "OR-TESTFCB")).toMatchObject({ status: "skipped" });
+    expect(reviewCode(trades.payload, "OR-TESTFCB")).toBe("usd_pool_prerequisite_unbooked");
+  });
+
+  it("a pool buy whose statement amounts cannot be fingerprinted is a review and stops later pool commands (review r2 #1)", async () => {
+    load([buy("15/04/2026 10:00:00", "OR-TESTSRCB", "10.001"), B]);
+    const dry = await fcTool().run({ dry_run: true });
+    expect(reviewCode(dry.payload, "OR-TESTSRCB")).toBe("usd_pool_source_unbound");
+    expect(reviewCode(dry.payload, "OR-TESTFCB")).toBe("usd_pool_prerequisite_failed");
+  });
+
   it("a logged pool journal moved to another effective date breaks the pool for later commands", async () => {
     // Opening 100 USD / €90 (Mar 31); the Apr 1 distribution logs +100 USD / €80. Its journal moved to Jun 1
     // must not still fund an Apr 20 purchase as if it were dated Apr 1.
@@ -389,7 +414,7 @@ describe("book_lightyear_trades — USD sells kept in USD and pool-paid buys (pl
   const committedRelief = (ref: string, iso: string, usd: number, eur: number, journalId: number): { event: UsdPoolEvent; journal: Journal } => ({
     event: {
       record: "event", pool_key: OPENING.pool_key, ref, ts: Date.parse(iso) / 1000, kind: "buy_relief", usd_cents: -usd, eur_cents: -eur,
-      document_number: `LY:${ref}`, journal_id: journalId, journal_broker_net_cents: -eur, state: "committed", recorded_at: "t",
+      document_number: `LY:${ref}`, journal_id: journalId, journal_broker_net_cents: -eur, state: "committed", source_digest: "fixture-source-digest", recorded_at: "t",
       postings: [{ accounts_id: 1120, accounts_dimensions_id: null, type: "C", amount_cents: eur }, { accounts_id: 1550, accounts_dimensions_id: null, type: "D", amount_cents: eur }],
     },
     journal: {
