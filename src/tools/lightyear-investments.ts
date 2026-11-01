@@ -6112,7 +6112,7 @@ export function registerLightyearTools(
   );
 
   registerTool(server, "book_lightyear_fx_revaluation",
-    "Lightyear USD cash-fund pool at the ECB rate. mode \"opening\" (once per pool) replays the statement to as_of (USD cash + ICSUSSDP units at 1.00, from an empty start) and stores the ECB-valued opening checkpoint after approval. mode \"revalue\" (default) revalues the pool's USD at the ECB rate of as_of: the replayed USD must equal expected_usd_holding, and the difference to the carrying value is booked on fx_account (default 8500) as journal LY-FX:<account>:USD:<as_of>; zero difference records a journal-free checkpoint. DRY RUN by default; anything unproven is a review, never a plug.",
+    "Lightyear USD cash-fund pool at the ECB rate. mode \"opening\" (once per pool) replays the statement to as_of (USD cash + ICSUSSDP units at 1.00, from an empty start) and stores the ECB-valued opening checkpoint after approval. The opening books nothing: before approval show the owner the books' USD carrying value (broker account/dimension balance at as_of minus the EUR cash Lightyear shows) next to target_eur and the difference; that one-off difference is shown, not booked, and later revaluations measure from target_eur, so any correction is the owner's separate manual journal. mode \"revalue\" (default) revalues the pool's USD at the ECB rate of as_of: the replayed USD must equal expected_usd_holding, and the difference to the carrying value is booked on fx_account (default 8500) as journal LY-FX:<account>:USD:<as_of>; zero difference records a journal-free checkpoint. DRY RUN by default; anything unproven is a review, never a plug.",
     {
       mode: z.enum(["opening", "revalue"]).optional().describe("\"opening\" sets the pool's opening checkpoint once; \"revalue\" (default) revalues at the reporting date."),
       file_path: z.string().optional().describe("AccountStatement path/base64 input covering the interval since the last checkpoint (from the account's start for mode=opening). Provide exactly one of file_path or file_ref."),
@@ -6392,7 +6392,7 @@ export function registerLightyearTools(
   );
 
   registerTool(server, "lightyear_portfolio_summary",
-    "Compute current holdings and cost basis from a Lightyear account statement. Useful for verifying investment account balance.",
+    "Analytical weighted-average-cost (WAC) estimate of current Lightyear holdings from an account statement. Bookings use Lightyear's FIFO cost basis, so this differs from the registered investment-account balance after any sell; never use it to verify or adjust the FIFO ledger (use compute_account_balance on the investment account for the booked balance).",
     {
       file_path: z.string().optional().describe("AccountStatement path/base64 input. Provide exactly one of file_path or file_ref."),
       file_ref: z.string().optional().describe("Opaque Lightyear AccountStatement file reference."),

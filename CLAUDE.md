@@ -638,7 +638,12 @@ process committed are seen) as intent → create → readback → commit; a read
 leftovers from the ledger and never recreates a journal. Every pool record carries its canonical `postings`
 (account, dimension, side, cents; the opening and journal-free records `[]`): readback, recovery and validation
 compare the journal's posting multiset with it, not only the broker net (a mismatch is `usd_pool_commit_deferred`,
-`usd_pool_uncertain_outcome`, `usd_pool_chain_broken`); a record without postings breaks the chain. `validateUsdPool` replays the whole
+`usd_pool_uncertain_outcome`, `usd_pool_chain_broken`); a record without postings breaks the chain. Journal-backed records and
+revaluation checkpoints also carry the approved `effective_date`, checked the same way. Each statement-derived
+event carries a `source_digest` of its USD rows (time, type, ticker, quantity, gross/fee/net cents); a later
+statement covering that day that lacks the row, moves it or changes its amounts is `usd_pool_source_changed`. A
+duplicate found only at create time is read back and committed like a fresh journal, or stops the run.
+Same-second trade commands execute in the pool's (timestamp, reference) valuation order. `validateUsdPool` replays the whole
 chain from the opening against fresh journals; records ordered before the latest committed relief
 or checkpoint are refused (`usd_pool_backdated_event`). Order: opening once → distributions →
 trades → confirm drafts → period-end revaluation. FX amounts come only from the pool log and the
@@ -656,13 +661,16 @@ conversion, or unique ±60 s edges covering the smaller side); otherwise every m
 refuses that and every later pool command (`usd_pool_ambiguous_order`). `validateUsdPool`, the trades
 valuation and the revaluation run these pure checks. A group still ambiguous after the ±60 s rule pairs only
 when its same-second edges give every trade and conversion exactly one and each is exact to the cent (the only
-matching on same-second edges); a group is never split, so no member gets the 1+1 distance exemption.
+matching on same-second edges); a group is never split, so no member gets the 1+1 distance exemption. A sell kept in the pool
+takes its capital-gains row only when that row's identity (date and time, ticker, quantity, agreeing ISIN) belongs
+to it alone; a 1:1 FX sell outside the 0.1 % proceeds tolerance may take its exact-identity row within 1 % under
+the same ownership rules.
 
 Read-only rebuild (`src/lightyear/rebuild.ts`, script `npm run lightyear:rebuild-compare`): `simulateLightyearYear`
 runs the production planners `extractLightyearDistributions` / `planLightyearDistributions` / `planLightyearTrades`
 (the code `book_lightyear_distributions` and `book_lightyear_trades` run after reading their files) over an
 in-memory ledger and pool store from an asserted opening, so it stops with production's review codes;
-`compareWithBooks` (pure) diffs the proposal with live journals per account/month, `LY:` reference (equal = one
+`compareWithBooks` (pure) diffs the proposal with live journals over the run's inclusive `--from..--to` range per account/month, `LY:` reference (equal = one
 journal, same effective date, same posting multiset) and broker TRANSACTION transfers. The script's `GetOnlyHttpClient` throws on any non-GET before sending; nothing is written.
 
 ## Security Notes
