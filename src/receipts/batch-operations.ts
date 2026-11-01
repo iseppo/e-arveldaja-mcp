@@ -1061,8 +1061,10 @@ class ReceiptBatchOperationsImpl implements ReceiptBatchOperations {
             // the next dry run re-decides it.
             const stillAttached = approved.status !== "already_attached" || (approved.already_attached_to !== undefined &&
               await verifyCurrentAttachment(this.api, approved.already_attached_to.invoice_id, fileSnapshot.sha256) !== undefined);
+            // A changed exclusion is a review item: counted and listed as such, never hidden as already booked.
             results.push(stillAttached ? approved : {
               ...approved,
+              status: "needs_review",
               exclusion_changed_after_review: true,
               notes: [...approved.notes, "The attachment changed after review; nothing was created. Re-run the dry run to decide this file again."],
             });

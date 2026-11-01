@@ -188,7 +188,7 @@ export interface ReceiptBatchFileResult {
   duplicate_file_of?: string;
   /** `already_attached`: the invoice whose current attachment has these exact bytes (fresh check this run). */
   already_attached_to?: { invoice_id: number; base_document_files_id: number };
-  /** Execute only: the reviewed exclusion no longer held at mutation time; nothing was created, the next dry run re-decides. */
+  /** Execute only (status `needs_review`): the reviewed exclusion no longer held at mutation time; nothing was created, the next dry run re-decides. */
   exclusion_changed_after_review?: true;
   notes: string[];
   error?: string;

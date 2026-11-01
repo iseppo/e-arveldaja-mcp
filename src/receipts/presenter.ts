@@ -184,6 +184,8 @@ export function receiptReference(row: PublicReceiptRow): PublicReceiptRow {
     ...(row.referencing_journal_ids !== undefined ? { referencing_journal_ids: row.referencing_journal_ids } : {}),
     ...(row.journal_reference_scan_unavailable ? { journal_reference_scan_unavailable: true } : {}),
     ...(row.duplicate_file_of !== undefined ? { duplicate_file_of: row.duplicate_file_of } : {}),
+    // Nothing was created; the notes carry the re-run instruction.
+    ...(row.exclusion_changed_after_review ? { exclusion_changed_after_review: true, notes: row.notes } : {}),
     ...(createdInvoice !== undefined ? { created_invoice: pickKeys(createdInvoice, ["id", "number", "status", "confirmed"]) } : {}),
     ...(row.bank_partial !== undefined ? { bank_partial: row.bank_partial } : {}),
     ...(row.creation_partial !== undefined ? { creation_partial: row.creation_partial } : {}),
@@ -246,7 +248,7 @@ export interface ReceiptBatchFullPayload {
   approved_manifest: Array<ReceiptApprovedManifestEntry | Record<string, unknown>>;
   plan_handles?: NonNullable<ReceiptBatchResult["planHandles"]>;
   skipped: Array<Record<string, unknown>> | ReceiptBatchResult["scan"]["skipped"];
-  /** `detail: "compact"` (default) leaves already-booked files out. */
+  /** `detail: "compact"` (default) leaves already-booked files out; changed exclusions stay as `needs_review`. */
   results: Array<SanitizedReceiptResult | PublicReceiptRow>;
   already_booked?: ReceiptAlreadyBookedSummary;
   execution: ReturnType<typeof buildReceiptBatchExecution>;
@@ -501,6 +503,13 @@ export function renderReceiptBatchCompact(input: ReceiptBatchCompactInput): { su
       const itemId = wrapUntrustedOcr(row.file.name) ?? "";
       const postingIds = row.possible_duplicate_journal_ids ?? [];
       const referencingIds = row.referencing_journal_ids ?? [];
+      if (row.exclusion_changed_after_review) {
+        return {
+          item_id: itemId,
+          code: "exclusion_changed_after_review",
+          message: "Reviewed as already booked, but its invoice attachment changed before execution; nothing was created. Re-run the dry run to decide this file again.",
+        };
+      }
       if (referencingIds.length > 0) {
         return {
           item_id: itemId,

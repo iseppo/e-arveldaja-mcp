@@ -19,6 +19,7 @@ import { TransactionMaterialDriftError } from "../banking/transaction-material-s
 import { MutationIndeterminateError } from "../mutation-outcome.js";
 import { createTestRuntimeSafetyContext } from "../__fixtures__/runtime-safety.js";
 import { createReceiptBatchOperations } from "./batch-operations.js";
+import { renderReceiptBatchCompact, renderReceiptBatchFull } from "./presenter.js";
 import { createExecutionPlanPageHandler } from "../plan-tools.js";
 import { parseMcpResponse } from "../mcp-json.js";
 import { stripSandboxMarkers } from "../sandbox-markers.js";
@@ -2432,11 +2433,41 @@ describe("#4 receipts already in e-arveldaja (attached bytes, exact earlier book
     if (!dry.ok) throw new Error("dry run failed");
     const executed = await ops.runBatch({ ...baseRun, executionMode: "create_and_confirm", dryRun: false, approvedManifest: dry.value.manifest, planHandle: dry.value.planHandles!.create_and_confirm });
     if (!executed.ok) throw new Error(`execute failed: ${executed.error.code}`);
-    expect(executed.value.results[0]).toMatchObject({ status: "already_attached", exclusion_changed_after_review: true });
+    expect(executed.value.results[0]).toMatchObject({ status: "needs_review", exclusion_changed_after_review: true });
     expect(spies.createAndSetTotals).not.toHaveBeenCalled();
     expect(spies.uploadDocument).not.toHaveBeenCalled();
     expect(spies.confirmWithTotals).not.toHaveBeenCalled();
     expect(vi.mocked(resolveSupplierInternal).mock.calls.filter(call => call[3] === true)).toHaveLength(0);
+  });
+
+  it("a changed exclusion is reported as a review item with the rerun instruction, never as already booked", async () => {
+    primeFolder(["a.pdf"]);
+    seedRecord();
+    const { api } = apiWith([invoice801()], (_id, call) => call <= 2 ? bytesOf("a.pdf") : undefined);
+    const { ops } = makeOperationsWithContext(api);
+    const dry = await ops.runBatch({ ...baseRun, executionMode: "dry_run", dryRun: true });
+    if (!dry.ok) throw new Error("dry run failed");
+    const executed = await ops.runBatch({ ...baseRun, executionMode: "create", dryRun: false, approvedManifest: dry.value.manifest, planHandle: dry.value.planHandles!.create });
+    if (!executed.ok) throw new Error(`execute failed: ${executed.error.code}`);
+    const rerun = "Re-run the dry run to decide this file again.";
+
+    const full = renderReceiptBatchFull({
+      result: executed.value, accountsDimensionsId: 1, workflowFolderPath: "/receipts", publicFile: file => ({ display_name: file.name }),
+    });
+    expect(full.already_booked).toBeUndefined();
+    expect(full.summary).toMatchObject({ needs_review: 1, created: 0 });
+    expect(full.summary).not.toHaveProperty("already_attached");
+    expect(full.results).toEqual([expect.objectContaining({ status: "needs_review", exclusion_changed_after_review: true })]);
+    for (const reference of [full.workflow.needs_review[0], full.execution.needs_review[0]]) {
+      expect(reference).toMatchObject({ status: "needs_review", exclusion_changed_after_review: true, notes: expect.arrayContaining([expect.stringContaining(rerun)]) });
+    }
+    expect(full.execution.skipped).toEqual([]);
+
+    const { summary } = renderReceiptBatchCompact({ result: executed.value, accountsDimensionsId: 1, executionMode: "create", workflowFolderPath: "/receipts" });
+    expect(summary.counts).toMatchObject({ needs_review: 1, created: 0 });
+    expect(summary.warnings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "exclusion_changed_after_review", message: expect.stringContaining("nothing was created") }),
+    ]));
   });
 
   it("an approved create whose command changes at mutation time stops before any supplier or invoice write", async () => {
