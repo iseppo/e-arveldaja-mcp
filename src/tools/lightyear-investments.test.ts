@@ -893,6 +893,48 @@ describe("lightyear investments tools", () => {
     }
   });
 
+  it("does not take a gains row by identity when another sell of that day could claim it", async () => {
+    // A 10:00 (EUR1000), B and C 11:00 (EUR1005, EUR1007), all AMD x10. GA (10:00,
+    // proceeds 1005, basis 900) is A's by time but B's by proceeds; GB (11:00, 1006,
+    // basis 800). The proceeds pass is greedy, so A must not depend on what it left.
+    const sell = (ref: string, ts: string, usd: string) =>
+      [ts, ref, "AMD", "US0079031078", "Sell", "10", "USD", "110", usd, "", "0", usd, ""];
+    const conv = (ref: string, ts: string, eur: string, usd: string) => [
+      [ts, ref, "EUR", "", "Conversion", "", "EUR", "", eur, "1.1", "", eur, ""],
+      [ts, ref, "USD", "", "Conversion", "", "USD", "", `-${usd}`, "0.90909", "0", `-${usd}`, ""],
+    ];
+    const convs = [
+      ...conv("CN-GRDC", "13/07/2026 11:00:30", "1007.00", "1107.70"),
+      ...conv("CN-GRDB", "13/07/2026 11:00:20", "1005.00", "1105.50"),
+      ...conv("CN-GRDA", "13/07/2026 10:00:10", "1000.00", "1100.00"),
+    ];
+    const a = sell("OR-GRDA", "13/07/2026 10:00:00", "1100.00");
+    const b = sell("OR-GRDB", "13/07/2026 11:00:00", "1105.50");
+    const c = sell("OR-GRDC", "13/07/2026 11:00:00", "1107.70");
+    const gainsRows = [
+      ["13/07/2026 10:00:00", "AMD", "AMD", "US0079031078", "United States", "equity", "0", "10", "900", "1005", "105"],
+      ["13/07/2026 11:00:00", "AMD", "AMD", "US0079031078", "United States", "equity", "0", "10", "800", "1006", "206"],
+    ];
+    for (const rows of [[...convs, c, b, a], [...convs, b, c, a]]) {
+      const payload = await bookRows(rows, gainsRows);
+      expect(payload.results.find(r => r.reference?.includes("OR-GRDA"))?.status).toBe("skipped");
+      expect((payload.warnings ?? []).join("\n")).not.toContain("FIFO match by exact identity");
+    }
+  });
+
+  it("does not take a gains row by identity when its ISIN names another security", async () => {
+    const rows = [
+      ["13/07/2026 10:00:10", "CN-ISINX", "EUR", "", "Conversion", "", "EUR", "", "1000.00", "1.1", "", "1000.00", ""],
+      ["13/07/2026 10:00:10", "CN-ISINX", "USD", "", "Conversion", "", "USD", "", "-1100.00", "0.90909", "0", "-1100.00", ""],
+      ["13/07/2026 10:00:00", "OR-ISINX", "AMD", "US0079031078", "Sell", "10", "USD", "110", "1100.00", "", "0", "1100.00", ""],
+    ];
+    const gainsRow = (isin: string) => [["13/07/2026 10:00:00", "AMD", "AMD", isin, "United States", "equity", "0", "10", "600", "1005", "405"]];
+    const conflicting = await bookRows(rows, gainsRow("US0378331005"));
+    expect(conflicting.results.find(r => r.reference?.includes("OR-ISINX"))?.status).toBe("skipped");
+    const same = await bookRows(rows, gainsRow("US0079031078"));
+    expect(same.results.find(r => r.reference?.includes("OR-ISINX"))).toEqual(expect.objectContaining({ cost_basis: 600 }));
+  });
+
   type SameSecondPayload = { results: Array<{ reference?: string; status?: string; cost_basis?: number }>; warnings?: string[] };
   async function bookRows(rows: string[][], gainsRows: string[][]): Promise<SameSecondPayload> {
     const statement = buildStatementCsv(rows);

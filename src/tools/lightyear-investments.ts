@@ -2911,8 +2911,8 @@ export function withinProceedsTolerance(
 /**
  * A gains row outside the proceeds tolerance still names a non-EUR sell when the
  * sell's exact statement identity (date and time to the second, ticker, quantity)
- * belongs to that one gains row and that one sell, nothing stronger claimed the
- * row first, and the proceeds are within IDENTITY_PROCEEDS_RELATIVE_BOUND.
+ * belongs to that one gains row (no conflicting ISIN), no other sell of that day,
+ * ticker and quantity could claim the row, and the proceeds are within IDENTITY_PROCEEDS_RELATIVE_BOUND.
  * Lightyear values gains-file proceeds at its own reference rate, while the booked
  * consideration is the EUR actually received through the paired conversion (dealt
  * rate, conversion fee) — on larger sells that spread is 0.2–0.4 %. The bound keeps
@@ -2921,6 +2921,18 @@ export function withinProceedsTolerance(
  */
 function sameSellIdentity(gain: CapitalGainsRow, sell: InvestmentTrade): boolean {
   return gain.date.trim() === sell.datetime.trim() && gain.ticker === sell.ticker &&
+    Math.abs(gain.quantity - sell.quantity) < 0.000001 && !conflictingIsin(gain, sell);
+}
+
+function conflictingIsin(gain: CapitalGainsRow, sell: InvestmentTrade): boolean {
+  const a = gain.isin.trim().toUpperCase();
+  const b = sell.isin.trim().toUpperCase();
+  return a !== "" && b !== "" && a !== b;
+}
+
+/** Any sell the proceeds pass could also have weighed against this gains row (same day, ticker, quantity). */
+function sameDayCandidate(gain: CapitalGainsRow, sell: InvestmentTrade): boolean {
+  return parseLightyearDate(gain.date) === sell.date && gain.ticker === sell.ticker &&
     Math.abs(gain.quantity - sell.quantity) < 0.000001;
 }
 
@@ -3011,9 +3023,12 @@ function matchSellsToCapitalGains(
   for (const { sell, consideration } of outsideTolerance) {
     const identityRows = normalizedCurrency(sell.ccy) === "EUR" ? [] :
       gains.flatMap((gain, i) => (sameSellIdentity(gain, sell) ? [i] : []));
-    // Owners are counted against the gains row itself: two sells whose quantities
-    // both fall within the row's tolerance, though not each other's, both own it.
-    const owners = identityRows.length === 1 ? sells.filter(other => sameSellIdentity(gains[identityRows[0]!]!, other)).length : 0;
+    // The row must belong to this sell alone: no other sell of that day, ticker and
+    // quantity (counted against the row itself, so overlapping quantity tolerances
+    // count too) could have claimed it in the order-dependent proceeds pass above.
+    // That makes the fallback independent of statement order and of what that pass
+    // consumed.
+    const owners = identityRows.length === 1 ? sells.filter(other => sameDayCandidate(gains[identityRows[0]!]!, other)).length : 0;
     const idx = identityRows.length === 1 && owners === 1 && !consumedGains.has(identityRows[0]!) ? identityRows[0]! : null;
     if (idx !== null && withinProceedsTolerance(consideration, gains[idx]!.proceeds_eur, 0.02, IDENTITY_PROCEEDS_RELATIVE_BOUND)) {
       const gain = gains[idx]!;
