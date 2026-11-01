@@ -10,6 +10,7 @@ import {
   bankReferenceLookupKey,
   findRepeatedBankReferences,
   journalDocumentReferenceKeys,
+  isTrustedCamtDescriptionMetadata,
   normalizeOptionalReference,
   storedBankReferenceLookupKey,
 } from "./duplicate-identity.js";
@@ -364,10 +365,17 @@ export function findCamtNativeImportMatch(
   return { transaction_id: transactionId, journal_id: journal.id! };
 }
 
-/** The row moves `-expectedNet`: a signed marker the other way, or exactly one registration journal posting that net. */
+/**
+ * The row moves `-expectedNet`: a checksum-verified CAMT marker the other
+ * way, or exactly one registration journal posting that net. A marker that
+ * does not verify (a Wise tag, a corrupted or legacy CAMT signature) is no
+ * proof, and one that contradicts the journal keeps the row a twin.
+ */
 function provenOppositeMovement(transaction: Transaction, expectedNet: number, context: CamtJournalCoverageContext): boolean {
+  const opposite = expectedNet > 0 ? "outgoing" : "incoming";
   const direction = bankTransactionDirection(transaction);
-  if (direction !== "unknown") return direction === (expectedNet > 0 ? "outgoing" : "incoming");
+  if (direction !== "unknown" && isTrustedCamtDescriptionMetadata(transaction)) return direction === opposite;
+  if (direction !== "unknown" && direction !== opposite) return false;
   const registrations = new Map<number, Journal>();
   for (const journal of [...context.journals, ...context.registrationJournals.get(transaction.id!) ?? []]) {
     if (journal.registered === true && journal.operation_type === "TRANSACTION" && journal.operations_id === transaction.id) {

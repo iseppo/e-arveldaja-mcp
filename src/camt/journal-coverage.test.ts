@@ -10,6 +10,7 @@ import {
 import type { ParsedCamtEntry, Transaction } from "./types.js";
 import { computeCamtImportProjection } from "./projection.js";
 import { buildCamtDescriptionWithMetadata } from "./duplicate-identity.js";
+import { withSignedCamtMarker } from "../__fixtures__/camt-marker.js";
 import { summarizeEntries } from "./parser.js";
 import { camtNormalizedArgs, camtPlanFingerprint } from "./executor.js";
 
@@ -632,10 +633,20 @@ describe("a row e-arveldaja's own bank import created (camt_native_import_match)
       expect(projection.skipped.map(item => item.skip_code)).toEqual(["camt_native_import_match", "camt_native_import_match"]);
     });
 
-    it("an opposite row with a signed outgoing marker and no journal yet is no twin", async () => {
-      const signedOut = row(9311, outgoingTwin, { status: "PROJECT", description: "WISE:TEST-1 laen [source_direction=OUT]" });
+    it("an opposite row with a checksum-verified outgoing CAMT marker and no journal yet is no twin", async () => {
+      const signedOut = withSignedCamtMarker(row(9311, outgoingTwin, { status: "PROJECT" }), "DBIT");
       const projection = await project([row(9310, incoming), signedOut], [inJournal], [incoming]);
       expect(projection.skipped).toEqual([expect.objectContaining({ bank_reference: "STMT-IN-900", skip_code: "camt_native_import_match" })]);
+    });
+
+    it("a same-direction PROJECT twin with a corrupted opposite CAMT marker still counts as a twin → review", async () => {
+      const signed = withSignedCamtMarker(row(9311, incoming, { status: "PROJECT", bank_account_name: "Muu" }), "DBIT");
+      // Flip one hex digit of the signature: the marker no longer verifies.
+      const corrupted = { ...signed, description: signed.description!.replace(/((?:sig|s)=)([0-9a-f])/, (_m, key: string, first: string) => `${key}${first === "0" ? "1" : "0"}`) };
+      expect(corrupted.description).not.toBe(signed.description);
+      const projection = await project([row(9310, incoming), corrupted], [inJournal], [incoming]);
+      expect(projection.skipped.find(item => item.bank_reference === "STMT-IN-900")).toMatchObject({ review_code: "camt_journal_posting_review" });
+      expect(projection.skipped.some(item => item.skip_code === "camt_native_import_match")).toBe(false);
     });
 
     it.each([
@@ -644,6 +655,7 @@ describe("a row e-arveldaja's own bank import created (camt_native_import_match)
       ["is booked in the SAME direction", [row(9311, outgoingTwin)], [inJournal, booked(9501, 9311, "D", p(1410, LOAN_DIM, "C", 900))]],
       ["has two registration journals", [row(9311, outgoingTwin)], [inJournal, outJournal, { ...outJournal, id: 9504 }]],
       ["carries a signed INCOMING marker", [row(9311, outgoingTwin, { description: "WISE:TEST-2 [source_direction=IN]" })], [inJournal, outJournal]],
+      ["carries only an unverified (Wise) outgoing marker", [row(9311, outgoingTwin, { status: "PROJECT", description: "WISE:TEST-1 laen [source_direction=OUT]" })], [inJournal]],
     ])("a same-day same-amount row that %s still counts as a twin → review", async (_name, twins, journals) => {
       const projection = await project([row(9310, incoming), ...twins as Transaction[]], journals as Journal[], [incoming]);
       expect(projection.skipped.find(item => item.bank_reference === "STMT-IN-900")).toMatchObject({ review_code: "camt_journal_posting_review" });
