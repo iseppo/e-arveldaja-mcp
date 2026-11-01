@@ -3313,6 +3313,11 @@ async function executeLightyearJournalCommands<C extends {
       }
       if (outcome.status === "duplicate") {
         createdByIndex.set(index, { journal_id: outcome.journal_id, status: "duplicate" });
+        // A journal that appeared after `prepare` holds this command's pool intent: it counts only when it is
+        // exactly the approved one (read back and committed); otherwise the intent stays and later commands stop.
+        if (poolEvent && params.pool && !await commitPoolEvent(api, params.pool, poolEvent, outcome.journal_id)) {
+          return { outcome: "indeterminate", error_code: "usd_pool_commit_deferred" };
+        }
         return { outcome: "completed" };
       }
       const committed = poolEvent && params.pool ? await commitPoolEvent(api, params.pool, poolEvent, outcome.journal_id) : true;

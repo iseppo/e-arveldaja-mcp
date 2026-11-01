@@ -322,6 +322,40 @@ describe("book_lightyear_trades — USD sells kept in USD and pool-paid buys (pl
     expect(reviewCode(moved.payload, "OR-TESTFCB")).toBe("usd_pool_event_mismatch");
   });
 
+  it("a pool journal that appears between prepare and create counts only when it is the approved one", async () => {
+    // S logs +100 USD / €80 and B relieves €127.50 assuming it. A same-reference S journal created by someone else
+    // after S's prepare must be read back: carrying €60 it leaves S's intent open and B is never created.
+    load([S, B], [S_GAIN]);
+    const reference = fcTool();
+    await reference.book(withGains);
+    const approved = { ...reference.created[0]!, id: 777, registered: false, is_deleted: false } as unknown as Journal;
+    for (const [variant, intervening] of [
+      ["other", { ...approved, postings: approved.postings!.map(p => p.accounts_id === 1120 ? { ...p, amount: 60 } : p) }],
+      ["approved", approved],
+    ] as const) {
+      const env = fcTool();
+      const dry = await env.run({ ...withGains, dry_run: true });
+      let injected = false;
+      env.api.journals.listAll.mockImplementation(async () => {
+        if (!injected && env.store.records.some(r => r.record === "event" && r.ref === "OR-TESTFCS" && r.state === "intent")) {
+          env.ledger.set(777, intervening as Journal);
+          injected = true;
+        }
+        return [...env.ledger.values()];
+      });
+      await env.run({ ...withGains, dry_run: false, plan_handle: dry.payload.plan_handle });
+      expect(injected).toBe(true);
+      const sEvent = poolEvents(env).find(event => event.ref === "OR-TESTFCS");
+      if (variant === "other") {
+        expect(sEvent).toMatchObject({ state: "intent" });
+        expect(env.create).not.toHaveBeenCalled();
+      } else {
+        expect(sEvent).toMatchObject({ state: "committed", journal_id: 777 });
+        expect(journal(env, "OR-TESTFCB")).toBeDefined();
+      }
+    }
+  });
+
   it("T-FC3: with no pool key (account not in the file name) a pool sell is a review and nothing is written", async () => {
     load([S, B], [S_GAIN]);
     const env = fcTool();
