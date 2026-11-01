@@ -1044,18 +1044,11 @@ const ESTONIAN_NONPROFIT_FORM_RE =
 const NONPROFIT_EXCLUDED_ROLE_LABEL_RE =
   /^(?:maksja|ostja|arve\s+saaja|saaja|klient|buyer|bill\s+to|invoice\s+to|recipient|client|haldaja|haldur|haldus|valitseja|administrator|manager|property\s+manager)\b/iu;
 
-// Payment details ("Luminor Bank AS IBAN EE…", "SWIFT …", "a/a …"): a name on
-// such a line is the account's bank, never the supplier, unless a supplier
-// label introduces it ("Makse saaja: Näidis OÜ, IBAN …").
-const PAYMENT_DETAILS_RE = /(?<![\p{L}\d])(?:iban|swift|bic|a\/a|arveldusarve|pangakonto|bank\s+account|account\s+(?:no|nr|number))(?![\p{L}\d])/iu;
-
 function cleanSupplierCandidate(raw: string): string | undefined {
   let candidate = raw
     .replace(SUPPLIER_LABEL_RE, "")
     .replace(/\s+/g, " ")
     .trim();
-
-  if (!SUPPLIER_LABEL_RE.test(raw.trim()) && (PAYMENT_DETAILS_RE.test(candidate) || extractIban(candidate))) return undefined;
 
   candidate = candidate.replace(new RegExp(`\\s+${BUYER_SECTION_RE.source}.*$`, "i"), "").trim();
 
@@ -3078,30 +3071,6 @@ function extractSupplierNameFromText(
   const generalCompanyPattern = /\b(OÜ|OU|AS|MTÜ|FIE|UAB|SIA|LLC|LTD|GMBH|OY|AB|INC|LIMITED|TMI)(?![A-Za-zÀ-ž0-9])/i;
   const inExcludedRole = (index: number) =>
     [index, index - 1, index - 2].some(at => at >= 0 && NONPROFIT_EXCLUDED_ROLE_LABEL_RE.test(rows[at]!.line));
-  // A legal-form name heading the selected supplier registry code's block —
-  // the same whitespace column, a few lines above the labelled code — is the
-  // supplier (a right-column seller block beside a left-column buyer:
-  // "Rg-kood 14417608      Näidis OÜ" … "Rg-kood 12345678"). Exactly one
-  // such name, outside a buyer or manager block; otherwise the order below.
-  if (supplierRegCode) {
-    const anchoredNames = new Set<string>();
-    rows.forEach((row, index) => {
-      for (const match of row.raw.matchAll(REG_CODE_LABEL_RE)) {
-        if (match[1] !== supplierRegCode) continue;
-        const codeStart = match.index;
-        const codeEnd = codeStart + match[0].length;
-        for (let at = index - 1; at >= Math.max(0, index - 6); at--) {
-          if (inExcludedRole(at)) continue;
-          for (const segment of rows[at]!.raw.matchAll(/\S+(?:\s\S+)*/g)) {
-            if (segment.index >= codeEnd || segment.index + segment[0].length <= codeStart) continue;
-            const candidate = clean(segment[0]);
-            if (candidate && (generalCompanyPattern.test(candidate) || ESTONIAN_NONPROFIT_FORM_RE.test(candidate))) anchoredNames.add(candidate);
-          }
-        }
-      }
-    });
-    if (anchoredNames.size === 1) return [...anchoredNames][0];
-  }
   const anchoredNonprofitRows = new Set<number>();
   if (supplierRegCode) {
     rows.forEach((row, index) => {

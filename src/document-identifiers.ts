@@ -901,7 +901,6 @@ function reclassifyByCoordinates<Rationale extends RegCodeRationale | VatNoRatio
   textItems: readonly LayoutTextItem[],
   markers: MarkerPosition[],
   exclude: Set<string>,
-  labeled: readonly string[] = [],
 ): { value?: string; rationale?: Rationale; supplierSide?: boolean } {
   const isValid = kind === "reg_code" ? isValidEeRegistryCode : isValidEeVatNumber;
   const confirmed = "coordinate_confirmed" as Rationale;
@@ -932,21 +931,6 @@ function reclassifyByCoordinates<Rationale extends RegCodeRationale | VatNoRatio
       // it as a firmly coordinate-confirmed supplier identifier.
       if (hasSupplierOccurrence(textItems, value, markers, item ? layoutPageNum(item) : undefined)) {
         return { value, rationale: confirmedEcho };
-      }
-      // No labelled value precedes the buyer label ("Arve saaja" heading the
-      // page) and the chosen one is in the buyer column: exactly one other
-      // labelled value with no buyer-column occurrence is the supplier's (a
-      // right-column seller block). Selected by elimination, so it keeps the
-      // weak text-order rationale.
-      if (rationale !== "labeled") {
-        const outsideBuyer = [...new Set(labeled)].filter(candidate =>
-          candidate !== value &&
-          !exclude.has(candidate) &&
-          isValid(candidate) &&
-          findAllItemsForCandidate(textItems, candidate).length > 0 &&
-          findAllItemsForCandidate(textItems, candidate).every(candidateItem =>
-            classifyByPosition({ x: candidateItem.x, y: candidateItem.y, pageNum: candidateItem.pageNum }, markers) !== "buyer"));
-        if (outsideBuyer.length === 1) return { value: outsideBuyer[0], rationale, supplierSide: true };
       }
       return { rationale: rejected };
     }
@@ -1007,7 +991,6 @@ export function extractIdentifiers(text: string, options?: ExtractIdentifiersOpt
         textItems,
         markers,
         excludeReg,
-        regCode.labeled,
       );
       reg_code = reclassifiedRegCode.value;
       reg_code_rationale = reclassifiedRegCode.rationale;
