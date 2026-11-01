@@ -4427,23 +4427,20 @@ async function valueFundedTrades(params: {
 
 // ---- USD pool FX revaluation (C5) --------------------------------------------------
 
-/** Cash delta of a statement row in its own currency (Lightyear Net = Gross − Fee). */
+/**
+ * Opening replay rows: the cash delta is the statement's own cash rule
+ * ({@link getStatementRowCashDelta}) — a USD→EUR conversion takes its gross,
+ * fee included, out of the USD balance.
+ */
 function openingReplayRows(rows: readonly AccountStatementRow[]): OpeningReplayRow[] {
-  return rows.map(row => {
-    let cash: number | null;
-    switch (row.type) {
-      case "Buy": cash = -Math.abs(row.gross_amount); break;
-      case "Sell": cash = Math.abs(row.net_amount); break;
-      case "Conversion": cash = row.net_amount; break;
-      case "Withdrawal": cash = -Math.abs(row.net_amount); break;
-      default: cash = Math.abs(row.net_amount);
-    }
-    return {
-      ts: lightyearTimestampSeconds(row.date), row_index: row.row_index, type: row.type, ticker: row.ticker,
-      ccy: row.ccy, quantity: row.quantity, price_per_share: row.price_per_share, cash_delta: cash,
-    };
-  });
+  return rows.map(row => ({
+    ts: lightyearTimestampSeconds(row.date), row_index: row.row_index, type: row.type, ticker: row.ticker,
+    ccy: row.ccy, quantity: row.quantity, price_per_share: row.price_per_share,
+    cash_delta: getStatementRowCashDelta(row)?.amount ?? null,
+  }));
 }
+
+export { openingReplayRows as openingReplayRowsForTesting, getStatementRowCashDelta as statementRowCashDeltaForTesting };
 
 function revaluationDocKey(lightyearAccount: string, asOf: string): DocKey {
   return { ns: "LY-FX", id: `${lightyearAccount}:USD:${asOf}` };
