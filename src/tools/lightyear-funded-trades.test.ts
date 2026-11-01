@@ -407,6 +407,29 @@ describe("book_lightyear_trades — buys funded from the USD cash fund (C4)", ()
     expect(reviewCode(full.payload, "OR-TESTBUYGAP")).toBe("usd_pool_prerequisite_unbooked");
     expect(env.create).not.toHaveBeenCalled();
   });
+
+  const poolBuy = (day: string, n: string, usd: string): string[][] => [
+    [`${day}/10/2026 10:00:00`, `OR-TESTSWP${n}`, "ICSUSSDP", "IE00B44QSF52", "Sell", usd, "USD", "1", usd, "0", "0", usd, "0"],
+    [`${day}/10/2026 10:00:10`, `OR-TESTBUY${n}`, "NVDA", "US67066G1040", "Buy", String(Number(usd) / 200), "USD", "200", usd, "0", "0", usd, "0"],
+  ];
+
+  it("review wpc 5: a held earlier spend stops the later one instead of being assumed (€31.50 vs €34.75)", async () => {
+    // Opening 100 USD / €89. The Oct 20 50 USD buy is held (its reference is booked on Oct 21: date mismatch);
+    // a +100 USD / €50 distribution is logged on Oct 21; the Oct 22 buy spends 50 USD. Assuming the held buy
+    // consumed €44.50 would relieve €31.50; the logged state (200 USD / €139) requires €34.75. It must not book €31.50.
+    loadStatement([...poolBuy("20", "M1", "50.00"), ...poolBuy("22", "M2", "50.00")]);
+    const mismatched = { id: 701, document_number: "OR-TESTBUYM1", effective_date: "2026-10-21", registered: true, is_deleted: false, postings: [] } as unknown as Journal;
+    const env = setup({
+      pool: [opening(10000, 8900, "1.1236"), poolEvent("DD-TESTMID01", "2026-10-21T10:00:00Z", 10000, 5000, 601)],
+      journals: [poolJournal(601, "DD-TESTMID01", 5000), mismatched],
+    });
+    const dry = await env.run({ dry_run: true });
+    expect(resultFor(dry.payload, "OR-TESTBUYM1")).toMatchObject({ status: "skipped", candidate_journal_ids: [701] });
+    expect(resultFor(dry.payload, "OR-TESTBUYM2")).toMatchObject({ status: "skipped" });
+    expect(resultFor(dry.payload, "OR-TESTBUYM2")!.funding).toBeUndefined();
+    expect(reviewCode(dry.payload, "OR-TESTBUYM2")).toBe("usd_pool_prerequisite_failed");
+    expect(dry.payload.created).toBe(0);
+  });
 });
 
 function parseRowsForTest(rows: string[][]) {

@@ -3173,6 +3173,36 @@ interface TradesProjectionParams {
   poolKey?: PoolKey | null;
 }
 
+/** Statement content of a trade row: same-reference rows collapse only when it is identical. */
+function tradeContent(t: InvestmentTrade): string {
+  return JSON.stringify([
+    t.datetime, t.ticker, t.isin, t.type, t.quantity, t.ccy, t.price_per_share, t.gross_amount_ccy, t.fee_eur,
+  ]);
+}
+
+/**
+ * Funded buys the projection will route away before booking (C4 readiness):
+ * same-reference rows with differing content (`reference_conflict`) and own
+ * references booked on another date (`reference_journal_date_mismatch`).
+ * Identical same-reference copies collapse to their first row. The pool
+ * projection runs only over the rest; a held buy stops every later pool spend.
+ */
+function fundedTradeReadiness(
+  funded: readonly InvestmentTrade[],
+  ownRefCandidates: ReadonlyMap<string, number[]>,
+): { funded: InvestmentTrade[]; held: Map<string, FxReviewCode> } {
+  const byRef = new Map<string, InvestmentTrade[]>();
+  for (const trade of funded) byRef.set(trade.reference, [...(byRef.get(trade.reference) ?? []), trade]);
+  const held = new Map<string, FxReviewCode>();
+  const kept: InvestmentTrade[] = [];
+  for (const [reference, group] of byRef) {
+    if (group.some(t => tradeContent(t) !== tradeContent(group[0]!))) held.set(reference, "reference_conflict");
+    else if (ownRefCandidates.has(reference)) held.set(reference, "reference_journal_date_mismatch");
+    kept.push(group[0]!);
+  }
+  return { funded: kept, held };
+}
+
 function computeTradesProjection(params: TradesProjectionParams): TradesProjection {
   const {
     trades, gainsMap, existingRefs, investment_account, investment_dimension_id,
@@ -3184,9 +3214,6 @@ function computeTradesProjection(params: TradesProjectionParams): TradesProjecti
   // ready, so a review-required copy never blocks a bookable one. Differing
   // same-reference rows cannot share one `LY:{ref}` journal, so all go to review.
   const warnings: string[] = [...params.seedWarnings];
-  const tradeContent = (t: InvestmentTrade) => JSON.stringify([
-    t.datetime, t.ticker, t.isin, t.type, t.quantity, t.ccy, t.price_per_share, t.gross_amount_ccy, t.fee_eur,
-  ]);
   const byRef = new Map<string, InvestmentTrade[]>();
   for (const t of trades) {
     if (existingRefs.has(t.reference)) continue;
@@ -4304,6 +4331,8 @@ async function valueFundedTrades(params: {
   fundingTickers: ReadonlySet<string>;
   fxOutcomes: FrozenFxOutcomes;
   inLock: boolean;
+  /** Funded buys the projection routes away (conflict / date mismatch): never valued, they block later spends. */
+  held: ReadonlyMap<string, FxReviewCode>;
   /** Statement period from the file name, when it carries one. */
   period: { from: string; to: string } | null;
 }): Promise<void> {
@@ -4335,7 +4364,7 @@ async function valueFundedTrades(params: {
     const outcome = replayFrozenFx(params.fxOutcomes, "USD", trade.date);
     const poolEcbCents = outcome.ok ? usdCentsToEurCents(funding.pool_usd_cents, outcome.rate.rate) : null;
     prepared.set(trade.reference, { trade, ecb: outcome.ok ? outcome.rate : null, poolEcbCents });
-    const blocked = !outcome.ok ? outcome.code : poolEcbCents === null ? "trade_amount_conflict" : undefined;
+    const blocked = params.held.get(trade.reference) ?? (!outcome.ok ? outcome.code : poolEcbCents === null ? "trade_amount_conflict" : undefined);
     return { ref: trade.reference, ts: funding.ts, spend_usd_cents: funding.pool_usd_cents, ...(blocked !== undefined ? { blocked } : {}) };
   });
   for (const projected of projectPool(snapshot, commands)) {
@@ -4875,7 +4904,10 @@ export function registerLightyearTools(
         // ones for skipped tickers and already-booked references, and count them.
         const suppressedWarnings = { already_booked: 0, skipped_ticker: 0 };
         // C4: value the funded buys still to book (ECB rate frozen at the dry run, pool relief).
-        const funded = trades.filter(t => t.funding !== undefined && !existingRefs.has(t.reference) && isStrictDate(t.date));
+        const readiness = fundedTradeReadiness(
+          trades.filter(t => t.funding !== undefined && !existingRefs.has(t.reference) && isStrictDate(t.date)), ownRefCandidates,
+        );
+        const funded = readiness.funded;
         const keyResolution = resolveLightyearPoolKey(api, statementSnapshot, file_path, lightyear_account, broker_account, broker_dimension_id);
         if (!keyResolution.ok) {
           return { error: toolError({ error: keyResolution.error, category: "invalid_arguments", retry: "never", mutation_occurred: false }) };
@@ -4884,7 +4916,7 @@ export function registerLightyearTools(
           ? await resolveFrozenFxOutcomes(new Set(funded.map(t => fxOutcomeKey("USD", t.date))), deps.ecb)
           : {});
         await valueFundedTrades({
-          api, store: usdPoolStore, key: keyResolution.key, rows, extraction, funded, fundingTickers, fxOutcomes, inLock,
+          api, store: usdPoolStore, key: keyResolution.key, rows, extraction, funded, fundingTickers, fxOutcomes, inLock, held: readiness.held,
           period: statementPeriodFromFileName(statementSnapshot.canonicalPath() ?? file_path),
         });
         const fundedRefs = new Set(funded.map(t => t.reference));
@@ -4894,7 +4926,8 @@ export function registerLightyearTools(
           return !fundedRefs.has(warning.reference);
         });
         for (const trade of funded) {
-          if (trade.fx_review_reason !== null) relevantFxWarnings.push({ reference: trade.reference, ticker: trade.ticker, text: fxReviewWarning(trade.reference, trade.fx_review_reason, trade.conversion_ref ?? undefined) });
+          // A held buy gets its conflict / date-mismatch warning from the projection itself.
+          if (trade.fx_review_reason !== null && !readiness.held.has(trade.reference)) relevantFxWarnings.push({ reference: trade.reference, ticker: trade.ticker, text: fxReviewWarning(trade.reference, trade.fx_review_reason, trade.conversion_ref ?? undefined) });
         }
         const projection = computeTradesProjection({
           trades, gainsMap, existingRefs, ownRefCandidates,
