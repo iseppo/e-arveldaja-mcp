@@ -10,6 +10,7 @@ import {
   checkMixedSeconds,
   checkStatementCompleteness,
   checkSweeps,
+  poolSourceDigest,
   type PoolStatementRow,
   type StatementPoolEvent,
 } from "./pool-statement.js";
@@ -85,6 +86,8 @@ export interface UsdPoolEvent {
   /** Journal-free conversion_out only: the proof captured at approval (plan §2, r1 #5). */
   source_evidence?: ConversionEvidence;
   evidence_digest?: string;
+  /** Normalized source rows at logging (poolSourceDigest): a later statement covering the day must reproduce them. */
+  source_digest?: string;
   recorded_at: string;
 }
 
@@ -161,7 +164,8 @@ export type UsdPoolReviewCode =
   | "usd_pool_before_opening"
   | "usd_pool_pairing_ambiguous"
   | "usd_pool_ambiguous_order"
-  | "usd_pool_row_unplaceable";
+  | "usd_pool_row_unplaceable"
+  | "usd_pool_source_changed";
 
 export const USD_POOL_REVIEW_MESSAGES: Record<UsdPoolReviewCode, string> = {
   usd_pool_unavailable: "The USD cash-fund pool store needs the accounting-rules bundle (not single-file EARVELDAJA_RULES_FILE mode); pool-dependent rows stay in review.",
@@ -188,6 +192,7 @@ export const USD_POOL_REVIEW_MESSAGES: Record<UsdPoolReviewCode, string> = {
   usd_pool_before_opening: "This USD pool row is dated on or before the USD pool's approved opening, which already holds its effect; a new journal for it now would leave books and pool apart. Nothing is booked — book such rows before storing the opening, or correct them by hand.",
   usd_pool_pairing_ambiguous: "Same-day USD trades and conversions of the same amount cannot be paired one to one without guessing; none of them is booked and the USD pool stays blocked until they are booked by hand.",
   usd_pool_ambiguous_order: "One statement second holds both USD arriving in the pool and USD leaving it; the statement's 1-second resolution does not prove their order, so this and every later pool booking is refused.",
+  usd_pool_source_changed: "The statement now shows a USD pool row already logged in the USD pool with another time, role or USD amount than when it was logged; this and every later pool booking is refused until the difference is reviewed.",
   usd_pool_row_unplaceable: "A USD row of the statement has no valid date and time, so its place in the USD pool's history is unknown; no pool booking or revaluation is made from this statement.",
 };
 
@@ -634,7 +639,7 @@ function checkpointDigestFields(c: UsdPoolCheckpoint) {
 }
 
 function eventDigestFields(e: UsdPoolEvent) {
-  return [e.kind, e.ref, e.ts, e.usd_cents, e.eur_cents, e.journal_id, e.document_number, e.journal_broker_net_cents, e.postings ?? null, e.evidence_digest ?? null];
+  return [e.kind, e.ref, e.ts, e.usd_cents, e.eur_cents, e.journal_id, e.document_number, e.journal_broker_net_cents, e.postings ?? null, e.evidence_digest ?? null, e.source_digest ?? null];
 }
 
 /** Statement day of a pool timestamp (statement clock read as UTC). */
@@ -759,6 +764,16 @@ export async function validateUsdPool(params: ValidateUsdPoolParams): Promise<Us
     }
   } catch {
     return { ok: false, code: "usd_pool_validation_unavailable" };
+  }
+
+  // Every logged event the statement covers still shows its time, role and USD amounts (review 2026-11-01 #2).
+  for (const event of view.events) {
+    if (!covers(event.ts)) continue;
+    const own = params.statement.events.filter(row => row.ref === event.ref);
+    if (own.length === 0 || own.some(row => row.ts !== event.ts || row.role !== event.kind)
+      || (event.source_digest !== undefined && poolSourceDigest(params.statement.rows, event.ref) !== event.source_digest)) {
+      return { ok: false, code: "usd_pool_source_changed", detail: event.document_number };
+    }
   }
 
   // Completeness: every statement pool row since the opening and before `until`.

@@ -110,6 +110,7 @@ import {
 import {
   checkMixedSeconds,
   classifyStatementPool,
+  poolSourceDigest,
   type PoolPairing,
   type PoolStatementRow,
 } from "../lightyear/pool-statement.js";
@@ -4714,6 +4715,7 @@ async function routeDistributionPool(params: {
     const frontier = poolFrontier(loaded.records.filter(record => poolKeyId(record.pool_key) === poolKeyId(key)));
     const openingOrder = view.opening ? checkpointOrder("opening", view.opening.as_of) : null;
     const rowsByIndex = new Map(params.rows.map(row => [row.row_index, row]));
+    const poolRows = toPoolStatementRows(params.rows);
     for (const d of candidates) {
       const ts = lightyearTimestampSeconds(rowsByIndex.get(d.row_index)?.date ?? "");
       if (ts === null) { review.set(d.row_index, fxReason("invalid_date")); continue; }
@@ -4726,16 +4728,30 @@ async function routeDistributionPool(params: {
       const usdCents = moneyToSafeCents(d.net_amount);
       const eurCents = moneyToSafeCents(d.net_eur ?? Number.NaN);
       if (usdCents === null || eurCents === null) { review.set(d.row_index, fxReason("distribution_amount_conflict")); continue; }
-      poolEvents.set(d.row_index, {
+      poolEvents.set(d.row_index, withPoolSource({
         record: "event", pool_key: key, ref: d.reference, ts, kind: "distribution_in",
         usd_cents: usdCents, eur_cents: eurCents, document_number: `LY:${d.reference}`, journal_broker_net_cents: eurCents,
-      });
+      }, poolRows));
     }
   }
   return {
     distributions: params.distributions.map(d => review.has(d.row_index) ? { ...d, fx_review_reason: review.get(d.row_index)! } : d),
     poolEvents,
   };
+}
+
+function toPoolStatementRows(rows: readonly AccountStatementRow[]): PoolStatementRow[] {
+  return rows.map((row): PoolStatementRow => ({
+    row_index: row.row_index, reference: row.reference, ts: lightyearTimestampSeconds(row.date), type: row.type,
+    ticker: row.ticker, ccy: row.ccy, quantity: row.quantity, price_per_share: row.price_per_share,
+    gross_amount: row.gross_amount, fee: row.fee, net_amount: row.net_amount, fx_rate: row.fx_rate,
+  }));
+}
+
+/** Bind a pool event to its normalized statement rows (review 2026-11-01 #2): validateUsdPool refuses a later statement that disagrees. */
+function withPoolSource(event: PendingPoolEvent, rows: readonly PoolStatementRow[]): PendingPoolEvent {
+  const digest = poolSourceDigest(rows, event.ref);
+  return digest === null ? event : { ...event, source_digest: digest };
 }
 
 /**
@@ -4749,11 +4765,7 @@ export function statementPoolEvents(
   distributions: DistributionExtractionResult,
   fundingTickers: ReadonlySet<string>,
 ): { events: StatementPoolEvent[]; rows: PoolStatementRow[] } {
-  const poolRows = rows.map((row): PoolStatementRow => ({
-    row_index: row.row_index, reference: row.reference, ts: lightyearTimestampSeconds(row.date), type: row.type,
-    ticker: row.ticker, ccy: row.ccy, quantity: row.quantity, price_per_share: row.price_per_share,
-    gross_amount: row.gross_amount, fee: row.fee, net_amount: row.net_amount, fx_rate: row.fx_rate,
-  }));
+  const poolRows = toPoolStatementRows(rows);
   const convertedDistributionRows = new Set(distributions.distributions
     .filter(d => d.fx_provenance?.source === "statement_conversion").map(d => d.row_index));
   const events = classifyStatementPool(poolRows, {
@@ -5274,6 +5286,8 @@ export async function planLightyearTrades(input: LightyearTradesPlanInput): Prom
     ...input.accounts, poolKey: input.poolKey, conversions,
   });
   projection.suppressedWarnings = suppressedWarnings;
+  const poolRows = toPoolStatementRows(rows);
+  for (const command of projection.commands) if (command.poolEvent) command.poolEvent = withPoolSource(command.poolEvent, poolRows);
   return { projection, fxOutcomes };
 }
 

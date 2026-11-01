@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { compareOrder, eventOrder, type PoolOrder, type UsdPoolResult } from "./usd-pool.js";
 
 /**
@@ -103,6 +104,29 @@ function roleOf(row: PoolStatementRow, input: ClassifyStatementPoolInput): PoolR
     if (input.convertedDistributionRows.has(row.row_index)) return "pass_through";
   }
   return "unsupported";
+}
+
+/**
+ * Normalized source evidence of one pool event (review 2026-11-01 #2): the
+ * timestamp and USD quantities of every USD statement row of `ref`, sorted by
+ * content (row indexes differ between exports). Stored on the event when it is
+ * logged; a later statement covering its day must reproduce it. Null when the
+ * statement has no USD row of `ref` or an amount is not whole cents.
+ */
+export function poolSourceDigest(rows: readonly PoolStatementRow[], ref: string): string | null {
+  const own: Array<Array<string | number | null>> = [];
+  for (const row of rows) {
+    if (row.reference !== ref || !isUsd(row.ccy)) continue;
+    const amounts = [row.gross_amount, row.fee, row.net_amount].map(value => {
+      const scaled = Math.round(value * 100);
+      return Number.isFinite(value) && Math.abs(value * 100 - scaled) < 1e-6 ? scaled : null;
+    });
+    if (amounts.some(value => value === null)) return null;
+    own.push([row.ts, row.type, row.ticker, String(row.quantity), ...amounts]);
+  }
+  if (own.length === 0) return null;
+  own.sort((a, b) => (JSON.stringify(a) < JSON.stringify(b) ? -1 : 1));
+  return createHash("sha256").update(JSON.stringify([ref, own])).digest("hex");
 }
 
 /** Roles that must be booked through the pool log. */

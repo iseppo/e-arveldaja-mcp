@@ -279,6 +279,29 @@ describe("book_lightyear_trades — USD sells kept in USD and pool-paid buys (pl
     }
   });
 
+  it("a logged pool event whose USD amount a later statement changes stops later pool commands (usd_pool_source_changed)", async () => {
+    // Opening 100 USD / €90; DIV logged as +100 USD / €80 (ECB 1.25). A later export shows DIV as 200 USD:
+    // the 150 USD buy must not relieve €127.50 from the logged state as if nothing changed.
+    const div = (net: string): string[] => ["01/04/2026 10:00:00", "DD-TESTSRC1", "AMD", "US0079031078", "Dividend", "0", "USD", "0", net, "0", "0", net, "0"];
+    load([div("100.00"), B]);
+    const dist = setupPoolTool<{ created?: number }>("book_lightyear_distributions",
+      { broker_account: 1120, income_account: 8330, tax_account: 8610, fee_account: 8610, fx_source: "ecb" },
+      { pool: [OPENING], fetch: rateFetch("1.25") });
+    await dist.book();
+    expect(poolTotals(dist, 10000, 9000)).toEqual({ usd: 20000, eur: 17000 });
+    const journals = [...dist.ledger.values()].map(j => ({ ...j, registered: true }));
+
+    const same = fcTool({ store: memoryUsdPoolStore(structuredClone(dist.store.records) as UsdPoolRecord[]), journals });
+    const unchanged = await same.run({ dry_run: true });
+    expect(resultFor(unchanged.payload, "OR-TESTFCB")).toMatchObject({ status: "would_create", pool: { relief_eur: 127.5 } });
+
+    load([div("200.00"), B]);
+    const changed = fcTool({ store: memoryUsdPoolStore(structuredClone(dist.store.records) as UsdPoolRecord[]), journals });
+    const dry = await changed.run({ dry_run: true });
+    expect(resultFor(dry.payload, "OR-TESTFCB")).toMatchObject({ status: "skipped" });
+    expect(reviewCode(dry.payload, "OR-TESTFCB")).toBe("usd_pool_source_changed");
+  });
+
   it("T-FC3: with no pool key (account not in the file name) a pool sell is a review and nothing is written", async () => {
     load([S, B], [S_GAIN]);
     const env = fcTool();

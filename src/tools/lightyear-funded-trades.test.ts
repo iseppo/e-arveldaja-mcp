@@ -270,7 +270,7 @@ describe("book_lightyear_trades — buys paid from the USD pool (C4, generalised
   });
 
   it("ECB failure → ecb_rate_unavailable", async () => {
-    loadStatement([FUNDING_SELL, ...CONVERSION, FUNDED_BUY]);
+    loadStatement([...DISTRIBUTIONS, FUNDING_SELL, ...CONVERSION, FUNDED_BUY]);
     const dry = await setup({ journals: WORKED_JOURNALS, fetch: vi.fn(async () => ecbResponse("", 503)) as FetchMock }).run({ dry_run: true });
     expect(reviewCode(dry.payload, "OR-TESTBUY001")).toBe("ecb_rate_unavailable");
   });
@@ -414,7 +414,7 @@ describe("book_lightyear_trades — buys paid from the USD pool (C4, generalised
     // Opening 100 USD / €89. The Oct 20 50 USD buy is held (its reference is booked on Oct 21: date mismatch);
     // a +100 USD / €50 distribution is logged on Oct 21; the Oct 22 buy spends 50 USD. Assuming the held buy
     // consumed €44.50 would relieve €31.50; the logged state (200 USD / €139) requires €34.75. It must not book €31.50.
-    loadStatement([...poolBuy("20", "M1", "50.00"), ...poolBuy("22", "M2", "50.00")]);
+    loadStatement([...poolBuy("20", "M1", "50.00"), ["21/10/2026 10:00:00", "DD-TESTMID01", "NVDA", "US67066G1040", "Dividend", "0", "USD", "0", "100.00", "0", "0", "100.00", "0"], ...poolBuy("22", "M2", "50.00")]);
     const mismatched = { id: 701, document_number: "OR-TESTBUYM1", effective_date: "2026-10-21", registered: true, is_deleted: false, postings: [] } as unknown as Journal;
     const env = setup({
       pool: [opening(10000, 8900, "1.1236"), poolEvent("DD-TESTMID01", "2026-10-21T10:00:00Z", 10000, 5000, 601)],
@@ -461,6 +461,7 @@ describe("book_lightyear_trades — buys paid from the USD pool (C4, generalised
     loadStatement([
       ...poolBuy("20", "C1", "50.00"),
       ["20/10/2026 11:00:00", "OR-TESTBUYC1", "VWCE", "IE00BK5BQT80", "Buy", "0.51", "EUR", "100", "51.00", "1", "0", "51.00", "0"],
+      ["21/10/2026 10:00:00", "DD-TESTMID02", "NVDA", "US67066G1040", "Dividend", "0", "USD", "0", "100.00", "0", "0", "100.00", "0"],
       ...poolBuy("22", "C2", "50.00"),
     ]);
     const env = setup({
