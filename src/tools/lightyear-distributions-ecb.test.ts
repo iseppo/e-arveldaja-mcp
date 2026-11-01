@@ -269,15 +269,25 @@ describe("book_lightyear_distributions fx_source=ecb", () => {
     expect(env.fetch).not.toHaveBeenCalled();
   });
 
-  it("without a resolvable Lightyear account the ECB rows still book, with usd_pool_not_logged", async () => {
+  it("review wpc 3: without a resolvable Lightyear account a retained 100 USD / €80 distribution is a review, nothing booked", async () => {
     mockedResolveFileInput.mockResolvedValue({ path: "/tmp/statement.csv" });
-    loadStatement([NVDA_DIVIDEND]);
-    const env = setup();
+    loadStatement([["01/10/2026 10:00:00", "DD-TESTNOACCT", "NVDA", "US67066G1040", "Dividend", "0", "USD", "0", "100.00", "0", "0", "100.00", "0"]]);
+    const env = setup({ fetch: rateFetch([["2026-10-01", "1.25"], ["2026-10-02", "1.25"]]) });
     const dry = await env.run({ file_path: "/tmp/statement.csv", fx_source: "ecb", dry_run: true });
-    expect(dry.payload.usd_pool_notes?.[0]).toContain("usd_pool_not_logged");
-    await env.run({ file_path: "/tmp/statement.csv", fx_source: "ecb", dry_run: false, plan_handle: dry.payload.plan_handle });
-    expect(env.create).toHaveBeenCalledTimes(1);
+    expect(dry.payload.results[0]).toMatchObject({ status: "manual_review", review_reason: { code: "usd_pool_account_unknown" } });
+    expect(dry.payload.usd_pool_notes).toBeUndefined();
+    const exec = await env.run({ file_path: "/tmp/statement.csv", fx_source: "ecb", dry_run: false, plan_handle: dry.payload.plan_handle });
+    expect(exec.payload.results[0]).toMatchObject({ status: "manual_review", review_reason: { code: "usd_pool_account_unknown" } });
+    expect(env.create).not.toHaveBeenCalled();
     expect(env.store.records).toEqual([]);
+  });
+
+  it("single-file rules mode: a retained USD distribution is usd_pool_unavailable, not booked unlogged", async () => {
+    loadStatement([NVDA_DIVIDEND]);
+    const env = setup({ store: memoryUsdPoolStore([], { unavailable: true }) });
+    const dry = await env.run({ fx_source: "ecb", dry_run: true });
+    expect(dry.payload.results[0]).toMatchObject({ status: "manual_review", review_reason: { code: "usd_pool_unavailable" } });
+    expect(env.create).not.toHaveBeenCalled();
   });
 
   it("a lightyear_account that contradicts the file name is refused", async () => {

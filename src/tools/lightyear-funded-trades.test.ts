@@ -384,6 +384,29 @@ describe("book_lightyear_trades — buys funded from the USD cash fund (C4)", ()
       expect(postings.every(p => Number.isInteger(Math.round(p.amount * 100)) && Math.abs(p.amount * 100 - Math.round(p.amount * 100)) < 1e-6)).toBe(true);
     }
   });
+
+  it("review wpc 3: a statement that does not reach back to the checkpoint is usd_pool_statement_gap", async () => {
+    // Opening 100 USD / €90 on 2026-09-30; an unlogged 100 USD / €80 distribution on Oct 1 sits outside a
+    // shorter Oct 15–30 statement holding only a 100 USD fund-paid buy. Valued from the pool alone the buy
+    // would relieve €90 (not €85) and book a €10 FX loss at ECB 1.25 (not €5): it must stay in review.
+    const rows = [
+      ["19/10/2026 14:43:15", "OR-TESTSWGAP", "ICSUSSDP", "IE00B44QSF52", "Sell", "100", "USD", "1", "100.00", "0", "0", "100.00", "0"],
+      ["19/10/2026 14:43:49", "OR-TESTBUYGAP", "NVDA", "US67066G1040", "Buy", "0.5", "USD", "200", "100.00", "0", "0", "100.00", "0"],
+    ];
+    const short = "/tmp/AccountStatement-LY-TESTACCT1-2026-10-15_2026-10-30_en.csv";
+    mockedResolveFileInput.mockResolvedValue({ path: short });
+    loadStatement(rows);
+    const env = setup({ pool: [opening(10000, 9000, "1.1111111111")], fetch: rateFetch("1.25") });
+    const dry = await env.run({ file_path: short, dry_run: true });
+    expect(reviewCode(dry.payload, "OR-TESTBUYGAP")).toBe("usd_pool_statement_gap");
+    expect(resultFor(dry.payload, "OR-TESTBUYGAP")).toMatchObject({ status: "skipped" });
+    // The full statement shows the unlogged distribution and blocks on it instead.
+    mockedResolveFileInput.mockResolvedValue({ path: STATEMENT_PATH });
+    loadStatement([["01/10/2026 10:00:00", "DD-TESTUNLOG", "NVDA", "US67066G1040", "Dividend", "0", "USD", "0", "100.00", "0", "0", "100.00", "0"], ...rows]);
+    const full = await env.run({ dry_run: true });
+    expect(reviewCode(full.payload, "OR-TESTBUYGAP")).toBe("usd_pool_prerequisite_unbooked");
+    expect(env.create).not.toHaveBeenCalled();
+  });
 });
 
 function parseRowsForTest(rows: string[][]) {

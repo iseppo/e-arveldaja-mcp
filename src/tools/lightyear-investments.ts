@@ -4179,8 +4179,9 @@ async function loadPoolRecords(
  * A row dated after the opening is logged as `distribution_in` unless a later
  * state-dependent record (buy relief, checkpoint) is already committed — then
  * it is a review (`usd_pool_backdated_event`). A row on or before the opening
- * is inside the opening quantity and is not logged. Without a pool key or
- * store the rows still book, with a note.
+ * is inside the opening quantity and is not logged. Without a pool key
+ * (`usd_pool_account_unknown`) or store (`usd_pool_unavailable`) the rows are
+ * reviews: a retained USD distribution is never booked without its pool log.
  */
 async function routeDistributionPool(params: {
   api: ApiContext;
@@ -4195,19 +4196,11 @@ async function routeDistributionPool(params: {
   const candidates = params.distributions.filter(d =>
     d.currency === "USD" && d.fx_provenance?.source === "ecb" && isBookableDistribution(d));
   if (candidates.length === 0) return { distributions: params.distributions, poolEvents, notes };
-  if (params.key === null) {
-    notes.push("usd_pool_not_logged: the Lightyear account is unknown (no AccountStatement-LY-<ACCOUNT>-… file name, no lightyear_account), so the retained USD distributions book without a USD pool log. Open the pool later from a statement that includes them.");
-    return { distributions: params.distributions, poolEvents, notes };
-  }
-  const key = params.key;
-  const loaded = await loadPoolRecords(params.api, params.store, key, params.inLock);
-  if (!loaded.ok && loaded.code === "usd_pool_unavailable") {
-    notes.push("usd_pool_not_logged: the USD pool store needs bundle storage (single-file rules mode); the retained USD distributions book without a pool log.");
-    return { distributions: params.distributions, poolEvents, notes };
-  }
   const review = new Map<number, FxReviewReason>();
-  if (!loaded.ok) {
-    for (const d of candidates) review.set(d.row_index, fxReason(loaded.code));
+  const key = params.key;
+  const loaded = key === null ? { ok: false as const, code: "usd_pool_account_unknown" as const } : await loadPoolRecords(params.api, params.store, key, params.inLock);
+  if (!loaded.ok || key === null) {
+    for (const d of candidates) review.set(d.row_index, fxReason(loaded.ok ? "usd_pool_account_unknown" : loaded.code));
   } else {
     const view = poolRecordsFor(loaded.records, key);
     const frontier = poolFrontier(loaded.records.filter(record => poolKeyId(record.pool_key) === poolKeyId(key)));
@@ -4273,6 +4266,22 @@ export function statementPoolEvents(
   return events;
 }
 
+/**
+ * Statement coverage since a pool checkpoint (C4/C5): the file-name period runs
+ * contiguously from the day after the checkpoint through `throughDay`; without
+ * a period, the statement holds a row at or before the checkpoint.
+ */
+function statementCoversPoolSince(
+  period: { from: string; to: string } | null,
+  rows: readonly AccountStatementRow[],
+  base: UsdPoolCheckpoint,
+  throughDay: string,
+): boolean {
+  return period !== null
+    ? period.from <= nextDay(base.as_of) && period.to >= throughDay
+    : rows.some(row => { const ts = lightyearTimestampSeconds(row.date); return ts !== null && ts <= base.ts; });
+}
+
 /** Half-up integer division for non-negative cents (BigInt, exact). */
 function divideHalfUp(numerator: bigint, denominator: bigint): number {
   return Number((2n * numerator + denominator) / (2n * denominator));
@@ -4294,6 +4303,8 @@ async function valueFundedTrades(params: {
   fundingTickers: ReadonlySet<string>;
   fxOutcomes: FrozenFxOutcomes;
   inLock: boolean;
+  /** Statement period from the file name, when it carries one. */
+  period: { from: string; to: string } | null;
 }): Promise<void> {
   const { funded } = params;
   if (funded.length === 0) return;
@@ -4313,6 +4324,9 @@ async function valueFundedTrades(params: {
   });
   if (!validated.ok) return reviewAll(validated.code);
   const snapshot = validated.value;
+  // The statement must cover the whole interval from the last checkpoint through the last funded buy.
+  const lastBuyDay = funded.reduce((latest, trade) => trade.date > latest ? trade.date : latest, funded[0]!.date);
+  if (!statementCoversPoolSince(params.period, params.rows, snapshot.base, lastBuyDay)) return reviewAll("usd_pool_statement_gap");
 
   const prepared = new Map<string, { trade: InvestmentTrade; ecb: EcbRateRecord | null; poolEcbCents: number | null }>();
   const commands: PoolSpendCommand[] = funded.map(trade => {
@@ -4870,6 +4884,7 @@ export function registerLightyearTools(
           : {});
         await valueFundedTrades({
           api, store: usdPoolStore, key: keyResolution.key, rows, extraction, funded, fundingTickers, fxOutcomes, inLock,
+          period: statementPeriodFromFileName(statementSnapshot.canonicalPath() ?? file_path),
         });
         const fundedRefs = new Set(funded.map(t => t.reference));
         const relevantFxWarnings = extraction.warnings.filter(warning => {
@@ -5409,10 +5424,7 @@ export function registerLightyearTools(
         if (!validated.ok) return review(validated.code, validated.detail);
         const snapshotState = validated.value;
         const base = snapshotState.base;
-        const covered = period !== null
-          ? period.from <= nextDay(base.as_of) && period.to >= as_of
-          : rows.some(row => { const ts = lightyearTimestampSeconds(row.date); return ts !== null && ts <= base.ts; });
-        if (!covered) return review("usd_pool_statement_gap");
+        if (!statementCoversPoolSince(period, rows, base, as_of)) return review("usd_pool_statement_gap");
         // 4. Quantity proof against the Lightyear holding.
         const state = poolStateAtEnd(snapshotState);
         if (state.usd_cents !== expectedCents) return review("usd_pool_quantity_mismatch", `replayed ${(state.usd_cents / 100).toFixed(2)} USD`);
