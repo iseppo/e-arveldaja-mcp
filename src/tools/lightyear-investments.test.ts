@@ -781,32 +781,30 @@ describe("lightyear investments tools", () => {
     expect(payload.unhandled?.count ?? 0).toBe(0);
   });
 
-  it("still cannot book that sell, because the capital-gains cross-check is on another basis", async () => {
-    // Companion to the pairing test above, kept honest: pairing is necessary but not
-    // sufficient. The capital-gains row below is the real one for this disposal.
-    // Lightyear states `Proceeds (EUR)` as the sell GROSS at the ECB rate
-    // (2068.16 USD -> 1817.04). The match now runs on the same consideration basis
-    // (1803.66 EUR received + 6.33 FX fee + 0.91 trade fee = 1810.90 at the dealt
-    // rate), but the 6.14 EUR rate gap still exceeds the 0.1% cross-check tolerance
-    // (1.82), so the row is skipped.
-    //
-    // That gap is structural (ECB vs dealt rate). If it is ever addressed, this
-    // test should start failing rather than quietly keep asserting a skip.
+  // Lightyear states `Proceeds (EUR)` as the sell gross at its own reference rate
+  // (2068.16 USD -> 1817.04), while the booked consideration is what the paired
+  // conversion actually delivered at the dealt rate (1803.66 EUR + 6.33 FX fee +
+  // 0.91 trade fee = 1810.90). The 6.14 EUR gap (0.34 %) exceeds the 0.1 % proceeds
+  // tolerance, but the gains row carries the sell's exact statement identity (date
+  // and time to the second, ticker, quantity), so it still supplies the cost basis.
+  const realJuly13BrkGains = (proceeds = "1817.044808232594728362410000000", datetime = "13/07/2026 13:41:07"): string[][] => [[
+    datetime, "BRK.B", "Berkshire Hathaway", "US0846707026", "United States", "equity",
+    "0.91372331128", "4.143531051",
+    "1722.571827425825851481982000000", proceeds, "94.472980806768876880428000000",
+  ]];
+
+  type July13Payload = { results: Array<{ reference?: string; status?: string }>; warnings?: string[] };
+  async function bookJuly13Brk(gainsRows: string[][]): Promise<July13Payload> {
     const statement = buildStatementCsv(realJuly13Rows());
-    const gains = buildCapitalGainsCsv([[
-      "13/07/2026 13:41:07", "BRK.B", "Berkshire Hathaway", "US0846707026", "United States", "equity",
-      "0.91372331128", "4.143531051",
-      "1722.571827425825851481982000000", "1817.044808232594728362410000000", "94.472980806768876880428000000",
-    ]]);
+    const gains = buildCapitalGainsCsv(gainsRows);
     // Both reads resolve to the same path under the harness, so the two files can
-    // only be told apart by call order. The call count is asserted below so a
-    // change in the read pattern fails loudly instead of silently swapping them.
+    // only be told apart by call order. The call count is asserted so a change in
+    // the read pattern fails loudly instead of silently swapping them.
     const reads: string[] = [];
     mockedReadFile.mockImplementation(async () => {
       reads.push("read");
       return (reads.length === 1 ? statement : gains) as any;
     });
-
     const { handler } = setupLightyearTool("book_lightyear_trades");
     const payload = parseMcpResponse((await handler({
       file_path: "/tmp/lightyear.csv",
@@ -814,14 +812,42 @@ describe("lightyear investments tools", () => {
       investment_account: 1550,
       broker_account: 1120,
       dry_run: true,
-    })).content[0]!.text) as any;
-
+    })).content[0]!.text) as July13Payload;
     expect(reads).toHaveLength(2);
-    const brk = payload.results.find((r: any) => r.reference?.includes("OR-FA2LM3FYJQ"));
-    expect(brk.status).toBe("skipped");
-    // Positively the proceeds cross-check, not a missing conversion pair.
+    return payload;
+  }
+
+  it("books a real FX sell whose gains row matches its exact identity despite the rate gap", async () => {
+    const payload = await bookJuly13Brk(realJuly13BrkGains());
+    const brk = payload.results.find((r) => r.reference?.includes("OR-FA2LM3FYJQ"));
+    expect(brk?.status).not.toBe("skipped");
+    // Cost from Lightyear's FIFO row; the gain balances against the EUR received.
+    expect(brk).toEqual(expect.objectContaining({ eur_amount: 1810.9, cost_basis: 1722.57, gain_loss: 88.33 }));
+    const warnings = (payload.warnings ?? []).join("\n");
+    expect(warnings).toContain("FIFO match by exact identity for sell OR-FA2LM3FYJQ");
+    expect(warnings).not.toContain("outside proceeds tolerance");
+    expect(warnings).not.toContain("invalid_conversion_pair");
+  });
+
+  it("still skips that FX sell when the gains row's time differs, even by a second", async () => {
+    const payload = await bookJuly13Brk(realJuly13BrkGains(undefined, "13/07/2026 13:41:08"));
+    const brk = payload.results.find((r) => r.reference?.includes("OR-FA2LM3FYJQ"));
+    expect(brk?.status).toBe("skipped");
     expect((payload.warnings ?? []).join("\n")).toContain("outside proceeds tolerance");
-    expect((payload.warnings ?? []).join("\n")).not.toContain("invalid_conversion_pair");
+  });
+
+  it("still skips that FX sell when the identity matches but proceeds differ by more than 1 %", async () => {
+    // 1810.90 received vs 1830.00 stated: a 1.04 % gap is no rate spread.
+    const payload = await bookJuly13Brk(realJuly13BrkGains("1830.00"));
+    const brk = payload.results.find((r) => r.reference?.includes("OR-FA2LM3FYJQ"));
+    expect(brk?.status).toBe("skipped");
+    expect((payload.warnings ?? []).join("\n")).toContain("outside proceeds tolerance");
+  });
+
+  it("still skips that FX sell when two gains rows carry its exact identity", async () => {
+    const payload = await bookJuly13Brk([...realJuly13BrkGains(), ...realJuly13BrkGains("1818.00")]);
+    const brk = payload.results.find((r) => r.reference?.includes("OR-FA2LM3FYJQ"));
+    expect(brk?.status).toBe("skipped");
   });
 
   it("drops the FIFO tolerance warning for a sell that is already booked", async () => {

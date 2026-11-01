@@ -2884,6 +2884,9 @@ async function findLegacyDistributionCandidates(
  * - Shaped matches outside the proceeds tolerance → SKIP with an actionable
  *   manual-review warning.
  */
+/** Largest proceeds gap accepted when the gains row matches the sell's exact statement identity. */
+export const IDENTITY_PROCEEDS_RELATIVE_BOUND = 0.01;
+
 export function withinProceedsTolerance(
   actual: number,
   expected: number,
@@ -2903,6 +2906,29 @@ export function withinProceedsTolerance(
 
   const difference = Math.abs(actual - expected);
   return difference <= Math.max(absolute, Math.abs(expected) * relative);
+}
+
+/**
+ * A gains row outside the proceeds tolerance still names the sell when it is the
+ * only candidate with the sell's exact statement identity (date and time to the
+ * second, ticker, quantity) and its proceeds are within
+ * IDENTITY_PROCEEDS_RELATIVE_BOUND. Lightyear values gains-file proceeds at its own
+ * reference rate, while the booked consideration is the EUR actually received
+ * through the paired conversion (dealt rate, conversion fee) — on larger sells that
+ * spread is 0.2–0.4 %. The bound keeps a gains file from another account out.
+ * EUR sells have no rate between the two figures and keep the H18 tolerance.
+ */
+function identityMatchOutsideTolerance(
+  sell: InvestmentTrade,
+  consideration: number,
+  gains: CapitalGainsRow[],
+  candidates: number[],
+): number | null {
+  if (sell.ccy === "EUR") return null;
+  const identity = candidates.filter(i => gains[i]!.date.trim() === sell.datetime.trim());
+  if (identity.length !== 1) return null;
+  const idx = identity[0]!;
+  return withinProceedsTolerance(consideration, gains[idx]!.proceeds_eur, 0.02, IDENTITY_PROCEEDS_RELATIVE_BOUND) ? idx : null;
 }
 
 function matchSellsToCapitalGains(
@@ -2960,6 +2986,9 @@ function matchSellsToCapitalGains(
     }
 
     const eligibleMatches = [...exactMatches, ...tolerantMatches];
+    const identityIdx = eligibleMatches.length === 0 && outsideMatches.length > 0
+      ? identityMatchOutsideTolerance(sell, consideration, gains, outsideMatches)
+      : null;
 
     if (eligibleMatches.length === 1) {
       const idx = eligibleMatches[0]!;
@@ -2980,6 +3009,16 @@ function matchSellsToCapitalGains(
         `Skipping — verify cost basis manually and book the journal by hand.`
       );
       // Don't book — ambiguous cost basis is worse than missing it.
+    } else if (identityIdx !== null) {
+      const idx = identityIdx;
+      const gain = gains[idx]!;
+      warnings.push(
+        `FIFO match by exact identity for sell ${sell.reference} (${sell.ticker} x${sell.quantity} at ${sell.datetime}): ` +
+        `proceeds differ beyond rounding (sell ${roundMoney(consideration)} EUR vs gains ${roundMoney(gain.proceeds_eur)} EUR — ` +
+        `Lightyear's gains rate vs the conversion's dealt rate). Cost basis taken from that row; the gain uses the EUR received.`
+      );
+      result.set(sell.reference, gain);
+      consumedGains.add(idx);
     } else if (outsideMatches.length > 0) {
       warnings.push(
         `FIFO candidates for sell ${sell.reference} (${sell.ticker} x${sell.quantity} on ${sell.date}, ` +
