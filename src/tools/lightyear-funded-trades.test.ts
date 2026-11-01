@@ -430,6 +430,32 @@ describe("book_lightyear_trades — buys funded from the USD cash fund (C4)", ()
     expect(reviewCode(dry.payload, "OR-TESTBUYM2")).toBe("usd_pool_prerequisite_failed");
     expect(dry.payload.created).toBe(0);
   });
+
+  it("review wpc 6: a relief read back as €44 instead of €45 stops the next pool purchase", async () => {
+    // From 100 USD / €90: the 50 USD buy expects €45 relief; readback shows €44. The 25 USD buy would post €22.50
+    // although the carrying value left would need €23 — it must not be created; the first journal id and intent are reported.
+    loadStatement([...poolBuy("20", "R1", "50.00"), ...poolBuy("22", "R2", "25.00")]);
+    const env = setup({ pool: [opening(10000, 9000, "1.1111111111")] });
+    const dry = await env.run({ dry_run: true });
+    expect(resultFor(dry.payload, "OR-TESTBUYR1")!.funding!.relief_eur).toBe(45);
+    expect(resultFor(dry.payload, "OR-TESTBUYR2")!.funding!.relief_eur).toBe(22.5);
+    const get = env.api.journals.get.getMockImplementation()!;
+    env.api.journals.get.mockImplementation(async (id: number) => {
+      const journal = await get(id);
+      if (id !== 9001) return journal;
+      return { ...journal, postings: journal.postings!.map(p => p.accounts_id === 1120 ? { ...p, amount: 44 } : p) };
+    });
+    const exec = await env.run({ dry_run: false, plan_handle: dry.payload.plan_handle });
+    expect(env.create).toHaveBeenCalledTimes(1);
+    expect(exec.payload.execution_report).toMatchObject({
+      status: "partial_execution",
+      stop_reason: { code: "usd_pool_commit_deferred" },
+      known_object_ids: [expect.objectContaining({ entity_id: 9001, outcome: "created" })],
+    });
+    expect(resultFor(exec.payload, "OR-TESTBUYR1")).toMatchObject({ journal_id: 9001 });
+    expect(exec.payload.usd_pool_notes?.[0]).toContain("journal 9001");
+    expect(env.store.records.filter(record => record.record === "event")).toMatchObject([{ ref: "OR-TESTBUYR1", state: "intent" }]);
+  });
 });
 
 function parseRowsForTest(rows: string[][]) {

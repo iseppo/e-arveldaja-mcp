@@ -2930,14 +2930,18 @@ function dropPoolIntent<C>(pool: LightyearPoolExecution<C>, event: PendingPoolEv
   }
 }
 
-/** Read the created journal back and mark its pool event committed; any doubt leaves the intent. */
-async function commitPoolEvent<C>(api: ApiContext, pool: LightyearPoolExecution<C>, event: PendingPoolEvent, journalId: number): Promise<void> {
+/**
+ * Read the created journal back and mark its pool event committed; any doubt
+ * leaves the intent and returns false, so the caller stops every later
+ * pool-dependent command (their valuation assumed this commit).
+ */
+async function commitPoolEvent<C>(api: ApiContext, pool: LightyearPoolExecution<C>, event: PendingPoolEvent, journalId: number): Promise<boolean> {
   try {
     api.journals.invalidateListCache();
     const journal = await api.journals.get(journalId);
     if (journal.document_number !== event.document_number || journalBrokerNetCents(journal, pool.key) !== event.journal_broker_net_cents) {
       pool.notes.push(`usd_pool_commit_deferred: journal ${journalId} (${event.document_number}) read back with other postings; the pool stays blocked until the next run's recovery checks it.`);
-      return;
+      return false;
     }
     if (event.kind === "revaluation" && event.checkpoint) {
       // Checkpoint first: if removing the intent then fails, recovery finds both and only drops the intent.
@@ -2946,8 +2950,10 @@ async function commitPoolEvent<C>(api: ApiContext, pool: LightyearPoolExecution<
     } else {
       pool.store.upsert([{ ...event, state: "committed", journal_id: journalId, recorded_at: new Date().toISOString() }]);
     }
+    return true;
   } catch {
     pool.notes.push(`usd_pool_commit_deferred: journal ${journalId} (${event.document_number}) was created but its pool record was not committed; the next run's recovery commits it without a second journal.`);
+    return false;
   }
 }
 
@@ -3029,7 +3035,7 @@ async function executeLightyearJournalCommands<C extends {
         createdByIndex.set(index, { journal_id: outcome.journal_id, status: "duplicate" });
         return { outcome: "completed" };
       }
-      if (poolEvent && params.pool) await commitPoolEvent(api, params.pool, poolEvent, outcome.journal_id);
+      const committed = poolEvent && params.pool ? await commitPoolEvent(api, params.pool, poolEvent, outcome.journal_id) : true;
       logAudit({
         tool: params.tool, action: "CREATED", entity_type: "journal",
         entity_id: outcome.journal_id,
@@ -3037,7 +3043,10 @@ async function executeLightyearJournalCommands<C extends {
         details: params.auditDetails(command),
       });
       createdByIndex.set(index, { journal_id: outcome.journal_id, status: "created" });
-      return { outcome: "completed", known_objects: [{ entity_type: "journal", entity_id: outcome.journal_id, outcome: "created" }] };
+      const known = [{ entity_type: "journal", entity_id: outcome.journal_id, outcome: "created" as const }];
+      // An uncommitted pool event: the journal exists, the intent stays; later commands are not attempted.
+      if (!committed) return { outcome: "indeterminate", error_code: "usd_pool_commit_deferred", known_objects: known };
+      return { outcome: "completed", known_objects: known };
     },
   })));
   return { executionReport, createdByIndex };
