@@ -59,6 +59,20 @@ describe("mixed VAT rates are read as a breakdown (#5c)", () => {
     expect(prepared.ok).toBe(false);
   });
 
+  it.each([
+    ["above the breakdown", 8],
+    ["below the breakdown", 11],
+  ])("money before a labelled net (Ettemaks 10,00 Netosumma 200,00 %s) is no item row: the conflict holds", (_where, at) => {
+    const lines = breakdownText().split("\n");
+    const extracted = extractedOf([...lines.slice(0, at), "Ettemaks 10,00 Netosumma 200,00", ...lines.slice(at)].join("\n"));
+    expect(extracted.mixed_vat_rates?.proven).toBe(true);
+    expect(extracted.amount_consistency_issues).toEqual(
+      expect.arrayContaining(["explicit_trio_mismatch", "explicit_net_overridden", "vat_rate_implausible"]),
+    );
+    const prepared = prepareReceiptInvoiceItems(vatContext, extracted, suggestion, "Haldus");
+    expect(prepared.ok).toBe(false);
+  });
+
   it("a labelled net equal to the computed taxable net is explained by the breakdown", () => {
     const lines = breakdownText().split("\n");
     const extracted = extractedOf([...lines.slice(0, 11), "Netosumma 162,45", ...lines.slice(11)].join("\n"));

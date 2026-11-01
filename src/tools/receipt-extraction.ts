@@ -2490,12 +2490,14 @@ function extractAmountsFromTextWithMetadata(text: string): ExtractedAmountsWithM
       };
     }
 
-    // A net-labelled summary row: an item row prints money before its own
-    // "KM-ta" ("Remondifond … 17.70 0.00 KM-ta 17.70", the #5c rule) and is
-    // no document net.
+    // A net-labelled summary row. Only a positively identified item row is
+    // left out: its own money immediately followed by its own exempt marker
+    // ("Remondifond … 17.70 0.00 KM-ta 17.70", the #5c item line). Any other
+    // money before the label ("Ettemaks 10,00 Netosumma 200,00") keeps it.
     const netLabel = classified.hasNetLikeLabel ? RECEIPT_NET_LABEL_RE.exec(classified.line) : null;
-    if (!classified.blockedAsReference && netLabel && classified.amounts.length > 0 &&
-      !MIXED_VAT_MONEY_BEFORE_RE.test(classified.line.slice(0, netLabel.index))) {
+    const isExemptItemRow = netLabel !== null && MIXED_VAT_EXEMPT_ITEM_MARKER_RE.test(netLabel[0]) &&
+      MIXED_VAT_MONEY_IMMEDIATELY_BEFORE_RE.test(classified.line.slice(0, netLabel.index));
+    if (!classified.blockedAsReference && netLabel && classified.amounts.length > 0 && !isExemptItemRow) {
       netLabelAmounts.push(Math.max(...classified.amounts));
     }
 
@@ -4328,6 +4330,9 @@ const MIXED_VAT_AMOUNT = String.raw`(?:€|eur)?\s*(-?\d[\d ]*[.,]\d{2})\s*(?:�
 const MIXED_VAT_ZERO_LINE_RE = new RegExp(String.raw`(?:^|\s)(?:käibemaksuta|km-ta)\s*:?\s*` + MIXED_VAT_AMOUNT, "i");
 const MIXED_VAT_RATED_LINE_RE = new RegExp(String.raw`(?:^|\s)käibemaksuga\s*(\d{1,2}(?:[.,]\d{1,2})?)\s*%\s*:?\s*` + MIXED_VAT_AMOUNT, "i");
 const MIXED_VAT_MONEY_BEFORE_RE = /\d[.,]\d{2}(?!\d)/;
+// An item line's exempt marker directly after its own money ("17.70 0.00 KM-ta").
+const MIXED_VAT_EXEMPT_ITEM_MARKER_RE = /^(?:km-ta|\(km-ta\)|käibemaksuta)$/i;
+const MIXED_VAT_MONEY_IMMEDIATELY_BEFORE_RE = /\d[.,]\d{2}\s*$/;
 
 /**
  * A per-rate VAT breakdown printed under an invoice (#5c): a non-taxed subtotal line, one or more
