@@ -3,7 +3,7 @@ import {
   RECEIPT_DETAIL_HINT,
   renderReceiptBatchCompact,
   renderReceiptBatchFull,
-  type ReceiptAlreadyBookedSummary,
+  type ReceiptBatchFullPayload,
   type ReceiptBatchCompactInput,
   type ReceiptBatchDetail,
 } from "./presenter.js";
@@ -699,12 +699,12 @@ describe("#4 receipts already in e-arveldaja", () => {
   });
 
   it("compact leaves them out of results and summarizes them; full lists them", () => {
-    const compact = renderFull(batch()) as { results: Array<{ status: string }>; already_booked: ReceiptAlreadyBookedSummary; summary: { already_attached: number; likely_already_booked: number }; execution: { skipped: Array<{ status: string }> } };
+    const compact = renderFull(batch()) as ReceiptBatchFullPayload;
     expect(compact.results.map(row => row.status)).toEqual(["dry_run_preview"]);
     expect(compact.already_booked).toEqual({ already_attached_count: 1, likely_already_booked_count: 1, ids: [801, 802] });
     expect(compact.summary).toMatchObject({ already_attached: 1, likely_already_booked: 1 });
     expect(compact.execution.skipped.map(row => row.status)).toEqual(["already_attached", "likely_already_booked"]);
-    const full = renderFull(batch(), "full") as { results: Array<{ status: string }>; already_booked?: unknown };
+    const full = renderFull(batch(), "full") as ReceiptBatchFullPayload;
     expect(full.results.map(row => row.status)).toEqual(["dry_run_preview", "already_attached", "likely_already_booked"]);
     expect(full.already_booked).toBeUndefined();
   });

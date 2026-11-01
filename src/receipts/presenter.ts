@@ -17,6 +17,7 @@ import type {
   ReceiptBatchExecutionMode,
   ReceiptBatchFileResult,
   ReceiptBatchResult,
+  ReceiptBatchSummary,
   ReceiptFileInfo,
 } from "./types.js";
 
@@ -233,12 +234,30 @@ export function receiptReviewReference(row: PublicReceiptRow): PublicReceiptRow 
   };
 }
 
+/** The FULL receipt-batch envelope (`process_receipt_batch`; `receipt_batch` `result` on standard/full). */
+export interface ReceiptBatchFullPayload {
+  mode: ReceiptBatchResult["mode"];
+  execution_mode: ReceiptBatchExecutionMode;
+  folder_path: unknown;
+  file_ref?: string;
+  accounts_dimensions_id: number;
+  summary: ReceiptBatchSummary;
+  workflow: ReturnType<typeof buildReceiptBatchWorkflow>;
+  approved_manifest: Array<ReceiptApprovedManifestEntry | Record<string, unknown>>;
+  plan_handles?: NonNullable<ReceiptBatchResult["planHandles"]>;
+  skipped: Array<Record<string, unknown>> | ReceiptBatchResult["scan"]["skipped"];
+  /** `detail: "compact"` (default) leaves already-booked files out. */
+  results: Array<SanitizedReceiptResult | PublicReceiptRow>;
+  already_booked?: ReceiptAlreadyBookedSummary;
+  execution: ReturnType<typeof buildReceiptBatchExecution>;
+}
+
 /**
  * Build the FULL receipt-batch envelope object (before toMcpJson). Byte-identical
  * to the pre-refactor process_receipt_batch handler's payload, including exact
  * key order, so the standard/full public surface is unchanged.
  */
-export function renderReceiptBatchFull(input: ReceiptBatchFullInput): Record<string, unknown> {
+export function renderReceiptBatchFull(input: ReceiptBatchFullInput): ReceiptBatchFullPayload {
   const { result, accountsDimensionsId, fileRef } = input;
   const scan = result.scan;
   const summary = result.summary;

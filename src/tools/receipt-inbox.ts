@@ -77,6 +77,7 @@ import {
   type ReceiptBatchCompactInput,
   type ReceiptBatchDetail,
   type ReceiptBatchFileRefProjection,
+  type ReceiptBatchFullPayload,
 } from "../receipts/presenter.js";
 import { createClassificationOperations } from "../receipts/classification-operations.js";
 import type { CounterpartyHistoryResult, CounterpartyHistorySuggestion } from "../receipts/counterparty-booking-history.js";
@@ -1410,7 +1411,7 @@ export function registerReceiptInboxTools(
     approved_manifest?: ReceiptManifestInputEntry[];
     plan_handle?: string;
     detail: ReceiptBatchDetail;
-  }): Promise<{ ok: true; fullObj: Record<string, unknown>; compactInput: ReceiptBatchCompactInput } | { ok: false; error: CallToolResult }> {
+  }): Promise<{ ok: true; fullObj: ReceiptBatchFullPayload; compactInput: ReceiptBatchCompactInput } | { ok: false; error: CallToolResult }> {
     const { mode: executionMode, legacyExecuteCreate } = resolveReceiptBatchExecutionMode(
       args.execute,
       args.execution_mode,

@@ -1,7 +1,7 @@
 {
   "by_code": {
     "ANY": 1520,
-    "UNTYPED_PAYLOAD": 181
+    "UNTYPED_PAYLOAD": 179
   },
   "errors": {
     "src/__fixtures__/document-reading/legacy-draft.ts": {
@@ -244,7 +244,7 @@
     },
     "src/tools/receipt-batch-failure.test.ts": {
       "ANY": 50,
-      "UNTYPED_PAYLOAD": 17
+      "UNTYPED_PAYLOAD": 15
     },
     "src/tools/receipt-folded-live-regression.test.ts": {
       "ANY": 23
@@ -298,6 +298,6 @@
       "ANY": 9
     }
   },
-  "total": 1701,
+  "total": 1699,
   "version": 1
 }

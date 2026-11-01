@@ -13,7 +13,8 @@ import {
 } from "./receipt-extraction.js";
 import { resolveSupplierInternal } from "./supplier-resolution.js";
 import { registerReceiptInboxTools } from "./receipt-inbox.js";
-import { parseMcpResponse } from "../__fixtures__/mcp-response.js";
+import { parseMcpResponse, parseToolPayload } from "../__fixtures__/mcp-response.js";
+import type { ReceiptBatchFullPayload } from "../receipts/presenter.js";
 import { resetAccountingRulesCache } from "../accounting-rules.js";
 import { HttpError } from "../http-client.js";
 import { fixturePurchaseReadback } from "../__fixtures__/purchase-readback.js";
@@ -220,7 +221,7 @@ async function dryRunApproval(
   handler: (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>,
   args: Record<string, unknown>,
 ): Promise<{ approved_manifest: unknown; plan_handles: { create: string; create_and_confirm: string } }> {
-  const dry = parseMcpResponse((await handler({ ...args, execution_mode: "dry_run" })).content[0]!.text);
+  const dry = parseToolPayload<ReceiptBatchFullPayload>((await handler({ ...args, execution_mode: "dry_run" })).content[0]!.text);
   if (!dry.approved_manifest || !dry.plan_handles) throw new Error("dry_run did not mint a plan handle");
   return { approved_manifest: dry.approved_manifest, plan_handles: dry.plan_handles };
 }
@@ -279,7 +280,7 @@ describe("process_receipt_batch rollback handling", () => {
       accounts_dimensions_id: 100,
       execute: false,
     });
-    const payload = parseMcpResponse(result.content[0]!.text);
+    const payload = parseToolPayload<ReceiptBatchFullPayload>(result.content[0]!.text);
 
     expect(payload.results[0]!.booking_suggestion).toMatchObject({
       source: "local_rules",
