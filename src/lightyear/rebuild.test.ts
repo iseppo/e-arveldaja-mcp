@@ -209,7 +209,7 @@ describe("simulateLightyearYear (plan Q5)", () => {
 });
 
 describe("compareWithBooks (plan Q5)", () => {
-  const scope = { year: "2026", accounts: [1120, 1550, 8320, 8330, 8335, 8500], broker_account: 1120, broker_dimension_id: 7, investment_account: 1550 };
+  const scope = { from: "2026-01-01", to: "2026-12-31", accounts: [1120, 1550, 8320, 8330, 8335, 8500], broker_account: 1120, broker_dimension_id: 7, investment_account: 1550 };
   const posting = (accounts_id: number, type: "D" | "C", amount: number, dimension?: number) =>
     ({ accounts_id, type, amount, ...(dimension !== undefined ? { accounts_dimensions_id: dimension } : {}) });
   const live = (id: number, documentNumber: string | null, date: string, postings: ReturnType<typeof posting>[], extra: Partial<Journal> = {}): Journal =>
@@ -247,8 +247,21 @@ describe("compareWithBooks (plan Q5)", () => {
     expect(cell(8335, "2026-04")).toMatchObject({ books_cents: 400, proposed_cents: 0, diff_cents: -400 });
   });
 
+  it("compares books over the same inclusive --from..--to range as the simulation", () => {
+    const lines = [posting(1100, "D", 100), posting(1020, "C", 100)];
+    const accounts = { accounts: [1020, 1100], broker_account: 1020, investment_account: 1100 };
+    // April only: a booked March purchase is outside the run, not books_only with ±€100 differences.
+    const april = compareWithBooks([], [live(1, "LY:OR-TESTRMAR", "2026-03-15", lines)], { ...accounts, from: "2026-04-01", to: "2026-04-30" });
+    expect(april.byRef.books_only).toEqual([]);
+    expect(april.byAccountMonth).toEqual([]);
+    // December–January: January's booked journal is compared, not dropped with the start year.
+    const span = compareWithBooks([proposed("LY:OR-TESTRJAN", "2027-01-05", lines)], [live(2, "LY:OR-TESTRJAN", "2027-01-05", lines)], { ...accounts, from: "2026-12-01", to: "2027-01-31" });
+    expect(span.byRef.matched_equal).toEqual(["LY:OR-TESTRJAN"]);
+    expect(span.byAccountMonth.every(entry => entry.diff_cents === 0)).toBe(true);
+  });
+
   it("Codex #5: identical D1100 €100 / C1020 €100 proposed on April 1 but booked on April 2 is matched_different", () => {
-    const dated = { year: "2026", accounts: [1020, 1100], broker_account: 1020, investment_account: 1100 };
+    const dated = { from: "2026-01-01", to: "2026-12-31", accounts: [1020, 1100], broker_account: 1020, investment_account: 1100 };
     const lines = [posting(1100, "D", 100), posting(1020, "C", 100)];
     const result = compareWithBooks([proposed("LY:OR-TESTCDT", "2026-04-01", lines)], [live(1, "LY:OR-TESTCDT", "2026-04-02", lines)], dated);
     expect(result.byRef).toMatchObject({ matched_equal: [], matched_different: ["LY:OR-TESTCDT"] });

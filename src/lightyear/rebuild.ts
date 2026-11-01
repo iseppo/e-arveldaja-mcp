@@ -286,7 +286,9 @@ export async function simulateLightyearYear(params: SimulateParams): Promise<Sim
 // ---- comparison with the books ---------------------------------------------------
 
 export interface CompareScope {
-  year: string;
+  /** Inclusive YYYY-MM-DD bounds, the same as the simulation's --from..--to (proposals, books and transfers alike). */
+  from: string;
+  to: string;
   /** Accounts compared (the broker and investment accounts are limited to their dimensions when given). */
   accounts: number[];
   broker_account: number;
@@ -332,7 +334,7 @@ function signed(posting: ScopedPosting): number {
   return posting.type === "D" ? posting.amount_cents : -posting.amount_cents;
 }
 
-/** Compare the proposed journals with the live books for one year (pure). */
+/** Compare the proposed journals with the live books over one inclusive date range (pure). */
 export function compareWithBooks(
   proposed: readonly ProposedJournal[],
   liveJournals: readonly Journal[],
@@ -350,7 +352,8 @@ export function compareWithBooks(
     return entry;
   };
   const transfers = new Map<string, number>();
-  const books = liveJournals.filter(journal => journal.is_deleted !== true && journal.effective_date.startsWith(`${scope.year}-`));
+  const inRange = (day: string) => day.slice(0, 10) >= scope.from && day.slice(0, 10) <= scope.to;
+  const books = liveJournals.filter(journal => journal.is_deleted !== true && inRange(journal.effective_date));
   const booksByNumber = new Map<string, Journal[]>();
   const claimed = new Set<Journal>();
   for (const journal of books) {
@@ -370,7 +373,7 @@ export function compareWithBooks(
     if (journal.document_number) booksByNumber.set(journal.document_number, [...(booksByNumber.get(journal.document_number) ?? []), journal]);
   }
   const byRef: CompareResult["byRef"] = { matched_equal: [], matched_different: [], proposed_only: [], books_only: [] };
-  for (const journal of proposed) {
+  for (const journal of proposed.filter(entry => inRange(entry.date))) {
     for (const posting of journal.postings.filter(p => inScope(p, scope))) cell(posting, journal.date.slice(0, 7)).proposed_cents += signed(posting);
     if (journal.journal_free) continue;
     const matches = booksByNumber.get(journal.document_number) ?? [];
@@ -389,7 +392,7 @@ export function compareWithBooks(
     if (canonicalPoolPostings(journal.postings ?? []).some(posting => inScope(posting, scope))) byRef.books_only.push({ id: journal.id ?? null, document_number: null, date: journal.effective_date });
   }
   for (const entry of cells.values()) entry.diff_cents = entry.proposed_cents - entry.books_cents;
-  const months = new Set([...transfers.keys(), ...statementTransfers.map(row => row.month)]);
+  const months = new Set([...transfers.keys(), ...statementTransfers.filter(row => row.month >= scope.from.slice(0, 7) && row.month <= scope.to.slice(0, 7)).map(row => row.month)]);
   return {
     byAccountMonth: [...cells.values()].sort((a, b) => a.month.localeCompare(b.month) || a.account - b.account || (a.dimension ?? 0) - (b.dimension ?? 0)),
     byRef,

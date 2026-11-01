@@ -82,7 +82,7 @@ async function main(): Promise<void> {
     }
     const journals = await new JournalsApi(new GetOnlyHttpClient(selected.config)).listAllWithPostings();
     compare = compareWithBooks(sim.journals, journals, {
-      year: args.from.slice(0, 4), accounts: COMPARED_ACCOUNTS,
+      from: args.from, to: args.to, accounts: COMPARED_ACCOUNTS,
       broker_account: accounts.broker_account, investment_account: accounts.investment_account,
       ...(accounts.broker_dimension_id !== undefined ? { broker_dimension_id: accounts.broker_dimension_id } : {}),
       ...(accounts.investment_dimension_id !== undefined ? { investment_dimension_id: accounts.investment_dimension_id } : {}),
