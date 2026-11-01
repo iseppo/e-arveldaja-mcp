@@ -37,6 +37,8 @@ export interface CamtReviewAcknowledgementCandidate {
   date: string;
   amount: number;
   direction: "CRDT" | "DBIT";
+  /** Digest of the statement the candidate came from; prepare/execute need its inbox-scan context. */
+  statement_digest?: string;
   /** Present when the row cannot be acknowledged as it stands. */
   refused?: CamtAckRefusalCode;
 }
@@ -76,6 +78,7 @@ export function parseCamtReviewAcknowledgementCandidate(value: unknown): CamtRev
   if (typeof record.amount !== "number" || !Number.isFinite(record.amount) || record.amount <= 0) return undefined;
   if (record.direction !== "CRDT" && record.direction !== "DBIT") return undefined;
   const refused = typeof record.refused === "string" ? record.refused as CamtAckRefusalCode : undefined;
+  if (record.statement_digest !== undefined && (typeof record.statement_digest !== "string" || !/^[0-9a-f]{64}$/.test(record.statement_digest))) return undefined;
   return {
     accounts_dimensions_id: dimension,
     movement_identity: record.movement_identity,
@@ -84,6 +87,7 @@ export function parseCamtReviewAcknowledgementCandidate(value: unknown): CamtRev
     date: record.date,
     amount: record.amount,
     direction: record.direction,
+    ...(record.statement_digest !== undefined ? { statement_digest: record.statement_digest } : {}),
     ...(refused !== undefined ? { refused } : {}),
   };
 }

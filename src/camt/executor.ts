@@ -392,6 +392,7 @@ export async function buildImportProjection(
     reportProgress: (index, total) => reportProgress(index, total),
     reviewAcknowledgements: readCamtReviewAcknowledgements(),
     skipInterAccountLegs,
+    ...(statementDigest !== undefined ? { statementDigest } : {}),
     ...(hasRetainedCamtStatement(statementDigest)
       ? { otherStatementOccurrences: (identity: string) => retainedCamtMovementOccurrences(identity, statementDigest) }
       : {}),

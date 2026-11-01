@@ -166,6 +166,8 @@ interface CamtProjectionInput {
    * retained this statement: then no acknowledgement applies (fail closed).
    */
   readonly otherStatementOccurrences?: (movementIdentity: string) => number;
+  /** SHA-256 of the statement file; bound into each acknowledgement candidate. */
+  readonly statementDigest?: string;
 }
 
 export const CAMT_INTER_ACCOUNT_OTHER_SIDE_KEPT = "inter_account_other_side_kept";
@@ -198,6 +200,7 @@ function applyReviewAcknowledgements(
   accountsDimensionsId: number,
   records: readonly CamtReviewAcknowledgementRecord[],
   otherStatementOccurrences: ((movementIdentity: string) => number) | undefined,
+  statementDigest: string | undefined,
 ): void {
   const occurrences = new Map<string, number>();
   for (const entry of entries) {
@@ -242,6 +245,7 @@ function applyReviewAcknowledgements(
       date: source.entry.date,
       amount: source.entry.amount,
       direction: source.entry.direction,
+      ...(statementDigest !== undefined ? { statement_digest: statementDigest } : {}),
       ...(refused !== undefined ? { refused } : {}),
     };
   });
@@ -476,7 +480,7 @@ export async function computeCamtImportProjection(input: CamtProjectionInput): P
     seenBatchDuplicateKeys.add(batchDuplicateKey);
   }
 
-  applyReviewAcknowledgements(skipped, acknowledgeable, parsed.entries, accountsDimensionsId, input.reviewAcknowledgements ?? [], input.otherStatementOccurrences);
+  applyReviewAcknowledgements(skipped, acknowledgeable, parsed.entries, accountsDimensionsId, input.reviewAcknowledgements ?? [], input.otherStatementOccurrences, input.statementDigest);
 
   return {
     parsed,

@@ -199,6 +199,24 @@ describe("CAMT journal-review acknowledgements in the projection (#10b)", () => 
     expect(await acknowledged()).toBe(false);
   });
 
+  it("review wpc 9: the preview binds the statement digest into the acknowledgement candidate", async () => {
+    const statement = [entry()];
+    const api = {
+      transactions: { listAll: vi.fn(async () => []) },
+      journals: { listAllWithPostings: vi.fn(async () => [manual(901)]) },
+      readonly: {
+        getAccountDimensions: vi.fn(async () => [{ id: DIM, accounts_id: 1020, is_deleted: false }] as AccountDimension[]),
+        getBankAccounts: vi.fn(async () => []),
+      },
+    } as unknown as ApiContext;
+    const loaded = { entries: statement, summary: summarizeEntries(statement), statement_metadata: { iban: "EE000", period: {} } };
+    const own = "e".repeat(64);
+    recordRetainedCamtStatements([own], new Map([[own, [camtMovementIdentity(statement[0]!)]]]));
+    const projection = await buildImportProjection(api, loaded, DIM, undefined, undefined, false, "none", own);
+    expect(projection.skipped[0]!.acknowledgement).toMatchObject({ statement_digest: own });
+    expect(projection.skipped[0]!.acknowledgement!.refused).toBeUndefined();
+  });
+
   describe("B3b r2: no scan context → fail closed; context is connection-scoped", () => {
     const refless = entry({ bank_reference: undefined });
     const apiOf = (journals: Journal[]) => ({
@@ -310,9 +328,12 @@ describe("CAMT journal-review acknowledgements in the projection (#10b)", () => 
 
 describe("acknowledging a CAMT journal review via prepare_action / execute_review_action (#10b)", () => {
   const e = entry();
+  const STATEMENT = "c".repeat(64);
+  // An inbox scan in this process kept the candidate's statement (B3b context).
+  beforeEach(() => recordRetainedCamtStatements([STATEMENT], new Map([[STATEMENT, [camtMovementIdentity(e)]]])));
   const candidate = (o: Partial<CamtReviewAcknowledgementCandidate> = {}): CamtReviewAcknowledgementCandidate => ({
     accounts_dimensions_id: DIM, movement_identity: camtMovementIdentity(e), review_code: "camt_journal_posting_review",
-    journal_ids: [901], date: DATE, amount: 50, direction: "CRDT", ...o,
+    journal_ids: [901], date: DATE, amount: 50, direction: "CRDT", statement_digest: STATEMENT, ...o,
   });
   const item = (o: Partial<CamtReviewAcknowledgementCandidate> = {}) => ({
     review_type: "camt_journal_review",
@@ -391,6 +412,24 @@ describe("acknowledging a CAMT journal review via prepare_action / execute_revie
       .toMatchObject({ status: "error", error_code: "camt_ack_nonunique_movement" });
   });
 
+  it("review wpc 9: a candidate prepared before a restart is refused camt_ack_needs_inbox_scan at execute, nothing recorded", async () => {
+    const context = createTestRuntimeSafetyContext();
+    const api = apiWith(() => manual(901));
+    const prepared = payloadOf(await buildCamtReviewAcknowledgementPrepareResponse(item(), api, context)) as Extract<CamtReviewAcknowledgementPayload, { status: "ready_for_approval" }>;
+    expect(prepared.status).toBe("ready_for_approval");
+    resetRetainedCamtStatements(); // restart: the in-process scan registry is empty
+    expect(payloadOf(await buildCamtReviewAcknowledgementExecuteResponse(item(), prepared.plan_handle, api, context)))
+      .toMatchObject({ status: "error", error_code: "camt_ack_needs_inbox_scan" });
+    expect(camtReviewAcknowledgementStore.read()).toEqual([]);
+    expect(payloadOf(await buildCamtReviewAcknowledgementPrepareResponse(item(), api, createTestRuntimeSafetyContext())))
+      .toMatchObject({ status: "error", error_code: "camt_ack_needs_inbox_scan" });
+    // A candidate without a statement digest (no scan context at preview) is refused the same way.
+    recordRetainedCamtStatements([STATEMENT], new Map([[STATEMENT, [camtMovementIdentity(e)]]]));
+    const { statement_digest: _digest, ...digestless } = candidate();
+    expect(payloadOf(await buildCamtReviewAcknowledgementPrepareResponse({ review_type: "camt_journal_review", item: { code: "camt_journal_review", acknowledgement: digestless } }, api, createTestRuntimeSafetyContext())))
+      .toMatchObject({ status: "error", error_code: "camt_ack_needs_inbox_scan" });
+  });
+
   it("a journal that does not move the row's amount in its direction → refused", async () => {
     const outgoing = manual(901, 50, { postings: [p(1020, DIM, "C", 50), p(1410, LOAN, "D", 50)] });
     expect(payloadOf(await buildCamtReviewAcknowledgementPrepareResponse(item(), apiWith(() => outgoing), createTestRuntimeSafetyContext())))
@@ -425,13 +464,15 @@ describe("continue_accounting_workflow routes a camt_journal_review item to the 
     registerAccountingInboxTools(server, api, context);
     const handler = getRegisteredToolHandler(server, "continue_accounting_workflow");
     const e = entry();
+    const statement = "d".repeat(64);
+    recordRetainedCamtStatements([statement], new Map([[statement, [camtMovementIdentity(e)]]]));
     const reviewItem = {
       review_type: "camt_journal_review",
       item: {
         code: "camt_journal_review",
         acknowledgement: {
           accounts_dimensions_id: DIM, movement_identity: camtMovementIdentity(e), review_code: "camt_journal_posting_review",
-          journal_ids: [901], date: DATE, amount: 50, direction: "CRDT",
+          journal_ids: [901], date: DATE, amount: 50, direction: "CRDT", statement_digest: statement,
         },
       },
     };

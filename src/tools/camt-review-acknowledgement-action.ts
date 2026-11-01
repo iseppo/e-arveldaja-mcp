@@ -14,7 +14,7 @@ import {
   type CamtReviewAcknowledgementRecord,
 } from "../camt/review-acknowledgement.js";
 import { camtReviewAcknowledgementStore, verifyCamtAcknowledgementJournal } from "../camt/review-acknowledgement-store.js";
-import { retainedCamtMovementOccurrences } from "../camt/statement-context.js";
+import { hasRetainedCamtStatement, retainedCamtMovementOccurrences } from "../camt/statement-context.js";
 
 export const CAMT_REVIEW_ACKNOWLEDGEMENT_DOMAIN = "camt_review_acknowledgement";
 
@@ -80,6 +80,10 @@ async function prepareCandidate(reviewItem: Record<string, unknown>, api: ApiCon
   }
   const refusal = checkCamtAcknowledgementCandidate(candidate, records);
   if (refusal) return { ok: false, result: error(refusal.code, refusal.message) };
+  // B3b: only a statement an inbox scan in this process kept for this connection (also for a candidate saved before a restart).
+  if (!hasRetainedCamtStatement(candidate.statement_digest)) {
+    return { ok: false, result: error("camt_ack_needs_inbox_scan", refusalMessage("camt_ack_needs_inbox_scan")) };
+  }
   // B3b: the movement must also be unique across the statements the inbox retained.
   if (retainedCamtMovementOccurrences(candidate.movement_identity) > 1) {
     return { ok: false, result: error("camt_ack_nonunique_movement", refusalMessage("camt_ack_nonunique_movement")) };

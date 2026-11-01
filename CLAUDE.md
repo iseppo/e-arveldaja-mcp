@@ -495,7 +495,9 @@ legitimate identical payments are possible).
   unscanned statement the row stays a review, `camt_ack_needs_inbox_scan`), the
   movement is unique in the statement and across that connection's kept
   statements, and the one journal still moves exactly the row's amount; never a
-  booking.
+  booking. The candidate carries its statement digest, and prepare and execute
+  refuse `camt_ack_needs_inbox_scan` unless that digest has scan context for the
+  active connection (also for a candidate saved before a restart).
 
 ## Architecture
 
