@@ -12,6 +12,8 @@ import { renderCamtImportCompact, renderCamtImportPayload, renderCamtImportSlim,
 import { camtReviewAcknowledgementStore } from "./review-acknowledgement-store.js";
 import { recordRetainedCamtStatements, resetRetainedCamtStatements, retainedCamtMovementOccurrences } from "./statement-context.js";
 import type { CamtReviewAcknowledgementCandidate, CamtReviewAcknowledgementRecord } from "./review-acknowledgement.js";
+import { refusalMessage } from "./review-acknowledgement.js";
+import { initAccountingRulesConnection } from "../accounting-rules.js";
 import {
   buildCamtReviewAcknowledgementExecuteResponse,
   buildCamtReviewAcknowledgementPrepareResponse,
@@ -58,7 +60,8 @@ const project = (
   journals: Journal[],
   entries: ParsedCamtEntry[],
   acks: CamtReviewAcknowledgementRecord[] = [],
-  otherStatementOccurrences?: (identity: string) => number,
+  // Default: a statement an inbox scan retained alone (B3b); null = no scan context.
+  otherStatementOccurrences: ((identity: string) => number) | null = () => 0,
 ) => computeCamtImportProjection({
   loaded: { entries, summary: summarizeEntries(entries), statement_metadata: { iban: "EE000", period: {} } },
   accountsDimensionsId: DIM, dateFrom: undefined, dateTo: undefined, ledgerTransactions: [] as Transaction[],
@@ -194,6 +197,61 @@ describe("CAMT journal-review acknowledgements in the projection (#10b)", () => 
     // Another retained statement holds the same movement: the review returns.
     recordRetainedCamtStatements([other], new Map([[other, [camtMovementIdentity(refless)]]]));
     expect(await acknowledged()).toBe(false);
+  });
+
+  describe("B3b r2: no scan context → fail closed; context is connection-scoped", () => {
+    const refless = entry({ bank_reference: undefined });
+    const apiOf = (journals: Journal[]) => ({
+      transactions: { listAll: vi.fn(async () => []) },
+      journals: { listAllWithPostings: vi.fn(async () => journals) },
+      readonly: {
+        getAccountDimensions: vi.fn(async () => [{ id: DIM, accounts_id: 1020, is_deleted: false }] as AccountDimension[]),
+        getBankAccounts: vi.fn(async () => []),
+      },
+    } as unknown as ApiContext);
+    const loadedOf = (statement: ParsedCamtEntry[]) =>
+      ({ entries: statement, summary: summarizeEntries(statement), statement_metadata: { iban: "EE000", period: {} } });
+    const journals = [manual(901), manual(905, 12, { effective_date: "2026-09-28" }), manual(906, 30, { effective_date: "2026-10-02" })];
+    const statementX = [refless, entry({ date: "2026-09-28", amount: 12, bank_reference: "STMT-X-12" })];
+    const statementY = [{ ...refless }, entry({ date: "2026-10-02", amount: 30, bank_reference: "STMT-Y-30" })];
+    const [digestX, digestY] = ["e".repeat(64), "f".repeat(64)];
+    const rowOf = async (statement: ParsedCamtEntry[], digest: string) =>
+      (await buildImportProjection(apiOf(journals), loadedOf(statement), DIM, undefined, undefined, false, "none", digest))
+        .skipped.find(row => row.movement_identity === camtMovementIdentity(refless))!;
+    afterEach(() => initAccountingRulesConnection(() => ({ name: "default", stableIdentity: "default" })));
+
+    it("restart (empty registry), direct previews of [M, X] and [M, Y] → neither acknowledged, plain inbox-scan note", async () => {
+      camtReviewAcknowledgementStore.upsert([ackOf(refless, [901])]);
+      for (const [statement, digest] of [[statementX, digestX], [statementY, digestY]] as const) {
+        const row = await rowOf([...statement], digest);
+        expect(row.skip_code).not.toBe("camt_review_acknowledged");
+        expect(row).toMatchObject({ review_code: "camt_journal_posting_review", acknowledgement: { refused: "camt_ack_needs_inbox_scan" } });
+        expect(row.reason).toContain("run an inbox scan first");
+      }
+      expect(refusalMessage("camt_ack_needs_inbox_scan")).toContain("run an inbox scan first");
+    });
+
+    it("a scanned single statement → the acknowledgement applies", async () => {
+      camtReviewAcknowledgementStore.upsert([ackOf(refless, [901])]);
+      recordRetainedCamtStatements([digestX], new Map([[digestX, statementX.map(camtMovementIdentity)]]));
+      expect((await rowOf([...statementX], digestX)).skip_code).toBe("camt_review_acknowledged");
+      // A statement the scan did not retain still has no context.
+      expect((await rowOf([...statementY], digestY)).acknowledgement?.refused).toBe("camt_ack_needs_inbox_scan");
+    });
+
+    it("another connection's retained statements never count, and never give context", async () => {
+      initAccountingRulesConnection(() => ({ name: "b", stableIdentity: "company-b" }));
+      recordRetainedCamtStatements([digestX, digestY], new Map([[digestX, statementX.map(camtMovementIdentity)], [digestY, statementY.map(camtMovementIdentity)]]));
+      initAccountingRulesConnection(() => ({ name: "a", stableIdentity: "company-a" }));
+      camtReviewAcknowledgementStore.reset();
+      camtReviewAcknowledgementStore.upsert([ackOf(refless, [901])]);
+      expect(retainedCamtMovementOccurrences(camtMovementIdentity(refless))).toBe(0);
+      // Company B's scan of the same digest is no context for company A.
+      expect((await rowOf([...statementX], digestX)).acknowledgement?.refused).toBe("camt_ack_needs_inbox_scan");
+      // Company A's own scan of X alone: B's copy of the movement (in Y) does not make it non-unique.
+      recordRetainedCamtStatements([digestX], new Map([[digestX, statementX.map(camtMovementIdentity)]]));
+      expect((await rowOf([...statementX], digestX)).skip_code).toBe("camt_review_acknowledged");
+    });
   });
 
   it("a second acknowledgement binding the same journal is refused (camt_ack_journal_already_claimed)", async () => {

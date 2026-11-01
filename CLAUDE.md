@@ -489,9 +489,13 @@ legitimate identical payments are possible).
   statement row" check (`continue_accounting_workflow` prepare/execute on a
   `camt_journal_review` item) is stored in `camt-review-acknowledgements.json`
   (same store factory; off in single-file mode). The CAMT projection applies one
-  only when its full key matches, the movement is unique in the statement (and
-  across the CAMT statements the last inbox scan kept for import) and
-  the one journal still moves exactly the row's amount; never a booking.
+  only when its full key matches, an inbox scan in this server process kept the
+  statement for import for the active connection (in-memory registry keyed by
+  connection + statement digest; after a restart or on a direct import of an
+  unscanned statement the row stays a review, `camt_ack_needs_inbox_scan`), the
+  movement is unique in the statement and across that connection's kept
+  statements, and the one journal still moves exactly the row's amount; never a
+  booking.
 
 ## Architecture
 

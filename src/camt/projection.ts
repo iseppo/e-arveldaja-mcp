@@ -160,7 +160,11 @@ interface CamtProjectionInput {
   readonly reviewAcknowledgements?: readonly CamtReviewAcknowledgementRecord[];
   /** #11: leave out own-account transfer legs of this direction (default "none"). */
   readonly skipInterAccountLegs?: CamtSkipInterAccountLegs;
-  /** B3b: occurrences of a movement identity in the OTHER statements an inbox scan retained. */
+  /**
+   * B3b: occurrences of a movement identity in the OTHER statements an inbox
+   * scan retained for this connection. Absent when no scan in this process
+   * retained this statement: then no acknowledgement applies (fail closed).
+   */
   readonly otherStatementOccurrences?: (movementIdentity: string) => number;
 }
 
@@ -180,7 +184,8 @@ function interAccountTransferTag(
 /**
  * #10(b): give each acknowledgeable journal review its acknowledgement
  * candidate, and quiet the ones whose full key a stored acknowledgement
- * matches. A movement must occur once in the statement and the other retained
+ * matches. The statement must have been retained by an inbox scan in this
+ * process and a movement must occur once in it and the other retained
  * statements of the inbox (B3b), the review must name
  * exactly one journal that moves exactly the row's signed EUR cents, and no
  * other row (or another movement's acknowledgement) may name that journal;
@@ -192,7 +197,7 @@ function applyReviewAcknowledgements(
   entries: readonly ParsedCamtEntry[],
   accountsDimensionsId: number,
   records: readonly CamtReviewAcknowledgementRecord[],
-  otherStatementOccurrences: (movementIdentity: string) => number = () => 0,
+  otherStatementOccurrences: ((movementIdentity: string) => number) | undefined,
 ): void {
   const occurrences = new Map<string, number>();
   for (const entry of entries) {
@@ -211,9 +216,10 @@ function applyReviewAcknowledgements(
     const key = { accounts_dimensions_id: accountsDimensionsId, movement_identity: row.movement_identity, review_code: row.review_code, journal_ids: journalIds };
     let refused: CamtAckRefusalCode | undefined;
     if (journalIds.length !== 1) refused = "camt_ack_multiple_candidates";
-    else if (occurrences.get(row.movement_identity) !== 1 || otherStatementOccurrences(row.movement_identity) > 0) refused = "camt_ack_nonunique_movement";
+    else if (occurrences.get(row.movement_identity) !== 1 || (otherStatementOccurrences?.(row.movement_identity) ?? 0) > 0) refused = "camt_ack_nonunique_movement";
     else if (!source.booksExactly) refused = "camt_ack_journal_mismatch";
     else if ((journalRows.get(journalIds[0]!) ?? 0) > 1 || findClaimingAcknowledgement(records, key)) refused = "camt_ack_journal_already_claimed";
+    else if (otherStatementOccurrences === undefined) refused = "camt_ack_needs_inbox_scan";
     if (refused === undefined && stored.has(camtReviewAcknowledgementKey(key))) {
       skipped[index] = {
         date: row.date,
@@ -227,6 +233,9 @@ function applyReviewAcknowledgements(
         acknowledged_review: { review_code: row.review_code, journal_ids: journalIds },
       };
       return;
+    }
+    if (refused === "camt_ack_needs_inbox_scan" && stored.has(camtReviewAcknowledgementKey(key))) {
+      row.reason = `${row.reason} — checked earlier, but that check applies only after an inbox scan has compared this statement with the other statements; run an inbox scan first`;
     }
     row.acknowledgement = {
       ...key,

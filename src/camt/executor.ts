@@ -64,7 +64,7 @@ import {
   type CamtImportExecution,
 } from "./presenter.js";
 import { isRecord } from "../record-utils.js";
-import { retainedCamtMovementOccurrences } from "./statement-context.js";
+import { hasRetainedCamtStatement, retainedCamtMovementOccurrences } from "./statement-context.js";
 import type {
   CamtBalance,
   CamtImportProjection,
@@ -376,7 +376,7 @@ export async function buildImportProjection(
   dateTo: string | undefined,
   freshBankAccounts = false,
   skipInterAccountLegs: CamtSkipInterAccountLegs = "none",
-  /** The statement's own digest, left out of the retained-statement counts (B3b). */
+  /** The statement's own digest (B3b): it must be retained by an inbox scan, and is left out of the counts. */
   statementDigest?: string,
 ): Promise<CamtImportProjection> {
   const ledgerTransactions = (await api.transactions.listAll()).filter(isNonVoidTransaction);
@@ -392,7 +392,9 @@ export async function buildImportProjection(
     reportProgress: (index, total) => reportProgress(index, total),
     reviewAcknowledgements: readCamtReviewAcknowledgements(),
     skipInterAccountLegs,
-    otherStatementOccurrences: identity => retainedCamtMovementOccurrences(identity, statementDigest),
+    ...(hasRetainedCamtStatement(statementDigest)
+      ? { otherStatementOccurrences: (identity: string) => retainedCamtMovementOccurrences(identity, statementDigest) }
+      : {}),
   });
 }
 

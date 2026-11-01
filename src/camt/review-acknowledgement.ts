@@ -13,7 +13,8 @@ export type CamtAckRefusalCode =
   | "camt_ack_nonunique_movement"
   | "camt_ack_multiple_candidates"
   | "camt_ack_journal_already_claimed"
-  | "camt_ack_journal_mismatch";
+  | "camt_ack_journal_mismatch"
+  | "camt_ack_needs_inbox_scan";
 
 export const CAMT_REVIEW_ACKNOWLEDGED = "camt_review_acknowledged";
 
@@ -121,5 +122,7 @@ export function refusalMessage(code: CamtAckRefusalCode): string {
       return "The journal is already bound to another statement row; one journal books one movement, so the review stays.";
     case "camt_ack_journal_mismatch":
       return "The journal does not move exactly this row's amount in its direction on this bank account; the review stays.";
+    case "camt_ack_needs_inbox_scan":
+      return "This statement has not been checked against the other statements in the inbox since the server started, so one journal cannot be shown to book this movement only once; run an inbox scan first. The review stays.";
   }
 }
