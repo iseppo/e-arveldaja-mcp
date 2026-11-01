@@ -21,12 +21,24 @@ import {
   validateUsdPool,
   withUsdPoolLock,
   type PoolKey,
+  type StatementPoolEvent,
   type UsdPoolCheckpoint,
   type UsdPoolEvent,
   type UsdPoolRecord,
 } from "./usd-pool.js";
 import { memoryUsdPoolStore } from "../__fixtures__/usd-pool-store.js";
 
+const NO_STATEMENT = { events: [], rows: [] };
+/** Statement events with a role (row_index by position); sweep rows are priced at exactly 1.00. */
+function statementOf(events: Array<{ ref: string; ts: number; role: StatementPoolEvent["role"] }>) {
+  return {
+    events: events.map((event, row_index) => ({ ...event, row_index })),
+    rows: events.map((event, row_index) => ({
+      row_index, reference: event.ref, ts: event.ts, type: event.role === "sweep" ? "Sell" : "Dividend", ticker: "ICSUSSDP", ccy: "USD",
+      quantity: 1, price_per_share: 1, gross_amount: 1, fee: 0, net_amount: 1,
+    })),
+  };
+}
 const KEY: PoolKey = { connection_fingerprint: "conn", lightyear_account: "CHZELUU", broker_account: 1020, broker_dimension_id: 11, currency: "USD" };
 
 function opening(usd: number, eur: number, asOf = "2026-09-30", rate?: string): UsdPoolCheckpoint {
@@ -139,7 +151,7 @@ describe("validateUsdPool", () => {
   const base = (records: UsdPoolRecord[], journals: Journal[], extra: Partial<Parameters<typeof validateUsdPool>[0]> = {}) =>
     validateUsdPool({
       api: poolApi(journals), store: memoryUsdPoolStore(records), key: KEY, until: UNTIL, newRecords: [UNTIL],
-      statementEvents: [], requireRegistered: false, ...extra,
+      statement: NO_STATEMENT, requireRegistered: false, ...extra,
     });
 
   it("replays the opening plus logged distributions (worked example 109.05 USD / 97.02 EUR)", async () => {
@@ -157,7 +169,7 @@ describe("validateUsdPool", () => {
     const until = eventOrder("OR-19", ts("2026-10-19"));
     const result = await validateUsdPool({
       api: poolApi([journal(1, "LY:D-1", 8000), journal(2, "LY:D-30", 10000)]), store: memoryUsdPoolStore(records), key: KEY,
-      until, newRecords: [until], statementEvents: [], requireRegistered: false,
+      until, newRecords: [until], statement: NO_STATEMENT, requireRegistered: false,
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -170,7 +182,7 @@ describe("validateUsdPool", () => {
     const retro = checkpointOrder("revaluation", "2026-10-19");
     const result = await validateUsdPool({
       api: poolApi([journal(1, "LY:OR-20", -900)]), store: memoryUsdPoolStore(records), key: KEY,
-      until: retro, newRecords: [retro], statementEvents: [], requireRegistered: true,
+      until: retro, newRecords: [retro], statement: NO_STATEMENT, requireRegistered: true,
     });
     expect(result).toMatchObject({ ok: false, code: "usd_pool_backdated_event", detail: "LY:OR-20" });
   });
@@ -222,7 +234,7 @@ describe("validateUsdPool", () => {
     api.journals.invalidateListCache.mockImplementation(() => calls.push("invalidate"));
     api.journals.listAll.mockImplementation(async () => { calls.push("list"); return [...api.byId.values()]; });
     api.journals.get.mockImplementation(async (id: number) => { calls.push("get"); const j = api.byId.get(id); if (!j) throw new HttpError("nf", 404, "GET", "/journals"); return j; });
-    await validateUsdPool({ api, store: memoryUsdPoolStore(records), key: KEY, until: UNTIL, newRecords: [UNTIL], statementEvents: [], requireRegistered: false });
+    await validateUsdPool({ api, store: memoryUsdPoolStore(records), key: KEY, until: UNTIL, newRecords: [UNTIL], statement: NO_STATEMENT, requireRegistered: false });
     expect(calls[0]).toBe("invalidate");
   });
 
@@ -238,13 +250,13 @@ describe("validateUsdPool", () => {
 
   it("completeness: unbooked prerequisite, unsupported event, booked sweep", async () => {
     const records = [opening(10000, 9000)];
-    expect(await base(records, [], { statementEvents: [{ ref: "DD-X", ts: ts("2026-10-05"), role: "distribution_in" }] }))
+    expect(await base(records, [], { statement: statementOf([{ ref: "DD-X", ts: ts("2026-10-05"), role: "distribution_in" }]) }))
       .toMatchObject({ ok: false, code: "usd_pool_prerequisite_unbooked", detail: "DD-X" });
-    expect(await base(records, [], { statementEvents: [{ ref: "WL-X", ts: ts("2026-10-05"), role: "unsupported" }] }))
+    expect(await base(records, [], { statement: statementOf([{ ref: "WL-X", ts: ts("2026-10-05"), role: "unsupported" }]) }))
       .toMatchObject({ ok: false, code: "usd_pool_unsupported_event" });
-    expect(await base(records, [journal(5, "LY:OR-SWEEP", 905)], { statementEvents: [{ ref: "OR-SWEEP", ts: ts("2026-10-05"), role: "sweep" }] }))
+    expect(await base(records, [journal(5, "LY:OR-SWEEP", 905)], { statement: statementOf([{ ref: "OR-SWEEP", ts: ts("2026-10-05"), role: "sweep" }]) }))
       .toMatchObject({ ok: false, code: "usd_pool_sweep_booked" });
-    expect((await base(records, [], { statementEvents: [{ ref: "DD-X", ts: ts("2026-09-29"), role: "distribution_in" }, { ref: "OR-BUY", ts: UNTIL.ts, role: "buy_relief" }] })).ok).toBe(true);
+    expect((await base(records, [], { statement: statementOf([{ ref: "DD-X", ts: ts("2026-09-29"), role: "distribution_in" }, { ref: "OR-BUY", ts: UNTIL.ts, role: "buy_relief" }]) })).ok).toBe(true);
   });
 
   it("an opening whose EUR value does not recompute from its rate, or that was never approved, is not accepted", async () => {
@@ -261,7 +273,7 @@ describe("validateUsdPool", () => {
     expect(await base([{ ...opening(1, 1), pool_key: { ...KEY, broker_dimension_id: 12 } }], []))
       .toMatchObject({ ok: false, code: "usd_pool_target_mismatch" });
     const result = await validateUsdPool({
-      api: poolApi([]), store: memoryUsdPoolStore([], { unavailable: true }), key: KEY, until: UNTIL, newRecords: [], statementEvents: [], requireRegistered: false,
+      api: poolApi([]), store: memoryUsdPoolStore([], { unavailable: true }), key: KEY, until: UNTIL, newRecords: [], statement: NO_STATEMENT, requireRegistered: false,
     });
     expect(result).toMatchObject({ ok: false, code: "usd_pool_unavailable" });
   });
@@ -340,7 +352,7 @@ describe("recoverUsdPoolIntents — checkpoint write failure (review wpc 2)", ()
     expect((await recoverUsdPoolIntents(api, store, KEY)).ok).toBe(true);
     expect(store.records.filter(r => r.record === "event")).toHaveLength(0);
     const until = eventOrder("OR-LATER", ts("2026-10-20"));
-    const validated = await validateUsdPool({ api, store, key: KEY, until, newRecords: [until], statementEvents: [], requireRegistered: false });
+    const validated = await validateUsdPool({ api, store, key: KEY, until, newRecords: [until], statement: NO_STATEMENT, requireRegistered: false });
     expect(validated.ok).toBe(true);
     if (!validated.ok) return;
     expect(projectPool(validated.value, [{ ref: "OR-LATER", ts: until.ts, spend_usd_cents: 5000 }])[0]).toMatchObject({ ok: true, relief_eur_cents: 4750 });

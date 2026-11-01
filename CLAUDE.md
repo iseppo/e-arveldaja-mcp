@@ -628,6 +628,18 @@ or checkpoint are refused (`usd_pool_backdated_event`). Order: opening once → 
 trades → confirm drafts → period-end revaluation. FX amounts come only from the pool log and the
 ECB rate, never from the 1020 balance.
 
+Statement roles (`src/lightyear/pool-statement.ts`): every USD row gets exactly one role —
+`pass_through` (1:1 trade↔conversion, converted distribution), `sweep` (ICSUSSDP Buy/Sell, never
+booked, checked at price 1.00 / fee 0 / gross = quantity), `distribution_in`, `sell_in`, `buy_relief`,
+`conversion_out`, `unsupported` (EUR→USD conversion with no trade, USD deposit/withdrawal),
+`pairing_ambiguous` or `unplaceable` (no valid timestamp: blocks the whole pool for that statement).
+Trade↔conversion pairing is computed over the whole statement before anything is consumed
+(`assignOneToOne`): a same-day same-amount group pairs only when unambiguous (one trade + one
+conversion, or unique ±60 s edges covering the smaller side); otherwise every member is
+`invalid_conversion_pair` / `pairing_ambiguous`. A second holding both a pool inflow and an outflow
+refuses that and every later pool command (`usd_pool_ambiguous_order`). `validateUsdPool`, the trades
+valuation and the revaluation run these pure checks.
+
 ## Security Notes
 
 - File read operations (PDF, CSV) resolve symlinks via `realpath()` and re-check extensions

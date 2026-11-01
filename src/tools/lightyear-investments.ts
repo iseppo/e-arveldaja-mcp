@@ -100,6 +100,12 @@ import {
   type UsdPoolReviewCode,
   type UsdPoolStore,
 } from "../lightyear/usd-pool.js";
+import {
+  checkMixedSeconds,
+  classifyStatementPool,
+  type PoolPairing,
+  type PoolStatementRow,
+} from "../lightyear/pool-statement.js";
 
 export const LIGHTYEAR_MAX_CSV_SIZE = 10 * 1024 * 1024; // 10 MB
 const MAX_CSV_SIZE = LIGHTYEAR_MAX_CSV_SIZE;
@@ -1041,6 +1047,8 @@ interface TradeExtractionResult {
   consumedConversionRefs: Set<string>;
   /** Conversions claimed by the funded pass (reserved from distributions too). */
   fundedConversionRefs: Set<string>;
+  /** Order-independent 1:1 pairing and pool-funded conversions (USD pool roles, pool-statement.ts). */
+  poolPairing: PoolPairing;
 }
 
 export interface TradeExtractionOptions {
@@ -1150,6 +1158,95 @@ function fxReviewWarning(
   return `${orderContext}: FX review [${reason.code}] ${reason.message}${conversionContext}`;
 }
 
+/**
+ * 1:1 trade↔conversion assignment over the whole statement (plan Q2, Codex r1
+ * #1), computed before anything is consumed and independent of row order.
+ * Candidate edges: same statement day, the trade's currency, the trade's
+ * direction, conversion foreign gross = the trade's conversion amount (to the
+ * cent). A connected component with one trade and one conversion pairs;
+ * otherwise only edges within ±60 s count, and they pair when every node has at
+ * most one and they cover the smaller side; unmatched trades fall through to
+ * the pool stages, unmatched conversions block (ambiguous). Any other component
+ * is ambiguous: its trades are invalid_conversion_pair, its conversions block.
+ */
+function assignOneToOne(
+  candidates: ReadonlyMap<number, ReadonlyArray<{ ref: string; ts: number | null }>>,
+  tradeTs: ReadonlyMap<number, number | null>,
+): { pairs: Map<number, string>; tradeState: Map<number, "paired" | "ambiguous" | "unmatched">; conversionState: Map<string, "paired" | "ambiguous"> } {
+  const parent = new Map<string, string>();
+  const find = (node: string): string => {
+    let root = node;
+    while (parent.get(root) !== root) root = parent.get(root)!;
+    parent.set(node, root);
+    return root;
+  };
+  const union = (a: string, b: string) => {
+    if (!parent.has(a)) parent.set(a, a);
+    if (!parent.has(b)) parent.set(b, b);
+    const ra = find(a), rb = find(b);
+    if (ra !== rb) parent.set(ra < rb ? rb : ra, ra < rb ? ra : rb);
+  };
+  const tradeNode = (index: number) => `t\u0000${index}`;
+  const convNode = (ref: string) => `c\u0000${ref}`;
+  const conversionTs = new Map<string, number | null>();
+  for (const [index, list] of candidates) {
+    for (const candidate of list) {
+      union(tradeNode(index), convNode(candidate.ref));
+      conversionTs.set(candidate.ref, candidate.ts);
+    }
+  }
+  const components = new Map<string, { trades: number[]; conversions: string[] }>();
+  for (const [index, list] of candidates) {
+    if (list.length === 0) continue;
+    const root = find(tradeNode(index));
+    const component = components.get(root) ?? { trades: [], conversions: [] };
+    component.trades.push(index);
+    components.set(root, component);
+  }
+  for (const ref of conversionTs.keys()) components.get(find(convNode(ref)))!.conversions.push(ref);
+
+  const pairs = new Map<number, string>();
+  const tradeState = new Map<number, "paired" | "ambiguous" | "unmatched">();
+  const conversionState = new Map<string, "paired" | "ambiguous">();
+  for (const component of components.values()) {
+    if (component.trades.length === 1 && component.conversions.length === 1) {
+      pairs.set(component.trades[0]!, component.conversions[0]!);
+      tradeState.set(component.trades[0]!, "paired");
+      conversionState.set(component.conversions[0]!, "paired");
+      continue;
+    }
+    const near: Array<[number, string]> = [];
+    for (const index of component.trades) {
+      const ts = tradeTs.get(index) ?? null;
+      for (const candidate of candidates.get(index)!) {
+        const convTs = conversionTs.get(candidate.ref) ?? null;
+        if (ts !== null && convTs !== null && Math.abs(ts - convTs) <= FUNDING_WINDOW_SECONDS) near.push([index, candidate.ref]);
+      }
+    }
+    const tradeDegree = new Map<number, number>();
+    const convDegree = new Map<string, number>();
+    for (const [index, ref] of near) {
+      tradeDegree.set(index, (tradeDegree.get(index) ?? 0) + 1);
+      convDegree.set(ref, (convDegree.get(ref) ?? 0) + 1);
+    }
+    const unique = [...tradeDegree.values(), ...convDegree.values()].every(degree => degree <= 1);
+    const covers = near.length === Math.min(component.trades.length, component.conversions.length);
+    if (unique && covers) {
+      for (const [index, ref] of near) {
+        pairs.set(index, ref);
+        tradeState.set(index, "paired");
+        conversionState.set(ref, "paired");
+      }
+      for (const index of component.trades) if (!pairs.has(index)) tradeState.set(index, "unmatched");
+      for (const ref of component.conversions) if (!conversionState.has(ref)) conversionState.set(ref, "ambiguous");
+      continue;
+    }
+    for (const index of component.trades) tradeState.set(index, "ambiguous");
+    for (const ref of component.conversions) conversionState.set(ref, "ambiguous");
+  }
+  return { pairs, tradeState, conversionState };
+}
+
 function extractTrades(rows: AccountStatementRow[], options: TradeExtractionOptions = {}): TradeExtractionResult {
   // Index conversion rows by reference for quick lookup
   const conversionsByRef = new Map<string, AccountStatementRow[]>();
@@ -1160,14 +1257,17 @@ function extractTrades(rows: AccountStatementRow[], options: TradeExtractionOpti
       conversionsByRef.set(row.reference, existing);
     }
   }
+  const fundingTickers = options.fundingTickers ?? new Set<string>();
 
-  // Track consumed conversion references to prevent reuse
   const consumedConversions = new Set<string>();
   const fxWarnings: TradeExtractionWarning[] = [];
-
   const trades: InvestmentTrade[] = [];
-  /** USD buys with no 1:1 conversion candidate at all: the funded pass's input. */
-  const unpairedBuys: Array<{ trade: InvestmentTrade; row: AccountStatementRow; warningIndex: number }> = [];
+  /** Foreign trades still to pair, by position in `trades`. */
+  const foreign: Array<{ trade: InvestmentTrade; row: AccountStatementRow }> = [];
+  const candidates = new Map<number, Array<{ ref: string; ts: number | null }>>();
+  const tradeTs = new Map<number, number | null>();
+  /** Non-fund USD trade rows and their pairing (pool roles). */
+  const poolTradeState = new Map<number, "paired" | "ambiguous" | "unmatched">();
 
   for (const row of rows) {
     if (row.type !== "Buy" && row.type !== "Sell") continue;
@@ -1194,106 +1294,111 @@ function extractTrades(rows: AccountStatementRow[], options: TradeExtractionOpti
       conversion_row_indexes: [],
       cash_equivalent: isCashEquivalentTicker(row.ticker),
     };
+    trades.push(trade);
+    const isPoolTrade = normalizedCurrency(row.ccy) === "USD" && !fundingTickers.has(row.ticker);
+    if (isPoolTrade) poolTradeState.set(row.row_index, "unmatched");
 
     const tradeAmountFailure = validateTradeAmounts(row);
     if (tradeAmountFailure) {
       trade.fx_review_reason = tradeAmountFailure;
-      fxWarnings.push({ reference: trade.reference, ticker: trade.ticker, text: fxReviewWarning(trade.reference, tradeAmountFailure) });
-      trades.push(trade);
       continue;
     }
-
     if (normalizedCurrency(row.ccy) === "EUR") {
       trade.eur_amount = Math.abs(row.gross_amount);
-      trades.push(trade);
       continue;
     }
-
+    const index = foreign.length;
+    foreign.push({ trade, row });
+    tradeTs.set(index, lightyearTimestampSeconds(row.date));
+    // Skipped cash-fund tickers are never 1:1 members (plan D2): their rows are sweeps.
+    if (fundingTickers.has(row.ticker)) { candidates.set(index, []); continue; }
     const tradeCurrency = normalizedCurrency(row.ccy);
     const orderDatePrefix = row.date.split(/[\sT]/)[0];
-    const shortlisted: Array<{ ref: string; rows: AccountStatementRow[] }> = [];
+    const list: Array<{ ref: string; ts: number | null }> = [];
     for (const [ref, conversionRows] of conversionsByRef) {
-      if (consumedConversions.has(ref)) continue;
-      const hasMatchingForeignRow = conversionRows.some(conversionRow =>
+      const matching = conversionRows.find(conversionRow =>
         normalizedCurrency(conversionRow.ccy) === tradeCurrency &&
         conversionRow.date.split(/[\sT]/)[0] === orderDatePrefix &&
         conversionMatchesTradeDirection(row, conversionRow) &&
         agreesToCent(Math.abs(conversionRow.gross_amount), tradeConversionAmountCcy(row))
       );
-      if (hasMatchingForeignRow) shortlisted.push({ ref, rows: conversionRows });
+      if (matching) list.push({ ref, ts: lightyearTimestampSeconds(matching.date) });
     }
+    candidates.set(index, list);
+  }
 
-    if (shortlisted.length !== 1) {
-      const reason = fxReason("invalid_conversion_pair");
-      trade.fx_review_reason = reason;
-      if (shortlisted.length === 0 && row.type === "Buy" && tradeCurrency === "USD") {
-        unpairedBuys.push({ trade, row, warningIndex: fxWarnings.length });
-      }
-      fxWarnings.push({ reference: trade.reference, ticker: trade.ticker, text: fxReviewWarning(trade.reference, reason) });
-      trades.push(trade);
+  const assignment = assignOneToOne(candidates, tradeTs);
+  const conversionPairing = assignment.conversionState;
+  /** USD buys left for the pool stages (no 1:1 assignment, not ambiguous). */
+  const unpairedBuys: Array<{ trade: InvestmentTrade; row: AccountStatementRow; warningIndex: number }> = [];
+  const failures = new Map<InvestmentTrade, { reason: FxReviewReason; conversionRef?: string }>();
+  for (let index = 0; index < foreign.length; index++) {
+    const { trade, row } = foreign[index]!;
+    const state = assignment.tradeState.get(index);
+    if (state === "ambiguous") poolTradeState.set(row.row_index, "ambiguous");
+    const ref = assignment.pairs.get(index);
+    if (ref === undefined) {
+      failures.set(trade, { reason: fxReason("invalid_conversion_pair") });
       continue;
     }
-
-    const candidate = shortlisted[0]!;
-    const eurRows = candidate.rows.filter(conversionRow => normalizedCurrency(conversionRow.ccy) === "EUR");
-    const foreignRows = candidate.rows.filter(conversionRow => normalizedCurrency(conversionRow.ccy) === tradeCurrency);
-    if (candidate.rows.length !== 2 || eurRows.length !== 1 || foreignRows.length !== 1) {
-      const reason = fxReason("invalid_conversion_pair");
-      trade.fx_review_reason = reason;
-      fxWarnings.push({ reference: trade.reference, ticker: trade.ticker, text: fxReviewWarning(trade.reference, reason, candidate.ref) });
-      trades.push(trade);
+    poolTradeState.set(row.row_index, "paired");
+    const tradeCurrency = normalizedCurrency(row.ccy);
+    const conversionRows = conversionsByRef.get(ref)!;
+    const eurRows = conversionRows.filter(conversionRow => normalizedCurrency(conversionRow.ccy) === "EUR");
+    const foreignRows = conversionRows.filter(conversionRow => normalizedCurrency(conversionRow.ccy) === tradeCurrency);
+    if (conversionRows.length !== 2 || eurRows.length !== 1 || foreignRows.length !== 1) {
+      failures.set(trade, { reason: fxReason("invalid_conversion_pair"), conversionRef: ref });
       continue;
     }
-
     const eurConv = eurRows[0]!;
     const foreignConv = foreignRows[0]!;
     const conversionFailure = validateConversionAmounts(eurConv, foreignConv);
-    if (conversionFailure) {
-      trade.fx_review_reason = conversionFailure;
-      fxWarnings.push({ reference: trade.reference, ticker: trade.ticker, text: fxReviewWarning(trade.reference, conversionFailure, candidate.ref) });
-      trades.push(trade);
-      continue;
-    }
-
-    const resolution = resolveFxPair(
-      Math.abs(eurConv.net_amount),
-      Math.abs(foreignConv.net_amount),
-      [eurConv.fx_rate, foreignConv.fx_rate],
-    );
-    if (!resolution.ok) {
-      trade.fx_review_reason = resolution.reason;
-      fxWarnings.push({ reference: trade.reference, ticker: trade.ticker, text: fxReviewWarning(trade.reference, resolution.reason, candidate.ref) });
-      trades.push(trade);
-      continue;
-    }
-
+    if (conversionFailure) { failures.set(trade, { reason: conversionFailure, conversionRef: ref }); continue; }
+    const resolution = resolveFxPair(Math.abs(eurConv.net_amount), Math.abs(foreignConv.net_amount), [eurConv.fx_rate, foreignConv.fx_rate]);
+    if (!resolution.ok) { failures.set(trade, { reason: resolution.reason, conversionRef: ref }); continue; }
     const convertedFxFee = fxFeeToEur(eurConv, foreignConv, resolution);
-    if (convertedFxFee === null) {
-      const reason = fxReason("conversion_fee_conflict");
-      trade.fx_review_reason = reason;
-      fxWarnings.push({ reference: trade.reference, ticker: trade.ticker, text: fxReviewWarning(trade.reference, reason, candidate.ref) });
-      trades.push(trade);
-      continue;
-    }
-
+    if (convertedFxFee === null) { failures.set(trade, { reason: fxReason("conversion_fee_conflict"), conversionRef: ref }); continue; }
     trade.eur_amount = Math.abs(eurConv.net_amount);
     trade.fx_rate = resolution.rate;
     trade.fx_orientation = resolution.orientation;
     trade.fx_fee_eur = convertedFxFee;
-    trade.conversion_ref = candidate.ref;
+    trade.conversion_ref = ref;
     trade.conversion_row_indexes = [eurConv.row_index, foreignConv.row_index];
-    consumedConversions.add(candidate.ref);
-    trades.push(trade);
+    consumedConversions.add(ref);
   }
 
+  // Warnings in statement row order, as before.
+  const foreignIndex = new Map(foreign.map((entry, index) => [entry.trade, index]));
+  for (const trade of trades) {
+    if (trade.fx_review_reason !== null) {
+      fxWarnings.push({ reference: trade.reference, ticker: trade.ticker, text: fxReviewWarning(trade.reference, trade.fx_review_reason) });
+      continue;
+    }
+    const failure = failures.get(trade);
+    if (!failure) continue;
+    trade.fx_review_reason = failure.reason;
+    const index = foreignIndex.get(trade)!;
+    const { row } = foreign[index]!;
+    if (failure.conversionRef === undefined && assignment.tradeState.get(index) !== "ambiguous" && row.type === "Buy" && normalizedCurrency(row.ccy) === "USD" && !fundingTickers.has(row.ticker)) {
+      unpairedBuys.push({ trade, row, warningIndex: fxWarnings.length });
+    }
+    fxWarnings.push({ reference: trade.reference, ticker: trade.ticker, text: fxReviewWarning(trade.reference, failure.reason, failure.conversionRef) });
+  }
+
+  // The pool stages never take a conversion the 1:1 stage claimed or blocked.
+  const claimed = new Set<string>([...consumedConversions, ...conversionPairing.keys()]);
   const fundedConversionRefs = new Set<string>();
-  if (options.fundingTickers && options.fundingTickers.size > 0 && unpairedBuys.length > 0) {
-    fundedPass(rows, conversionsByRef, consumedConversions, fundedConversionRefs, unpairedBuys, options.fundingTickers, fxWarnings);
+  if (fundingTickers.size > 0 && unpairedBuys.length > 0) {
+    fundedPass(rows, conversionsByRef, claimed, fundedConversionRefs, unpairedBuys, fundingTickers, fxWarnings);
+    for (const ref of fundedConversionRefs) consumedConversions.add(ref);
   }
 
   // Sort by date ascending
   trades.sort((a, b) => a.date.localeCompare(b.date) || a.datetime.localeCompare(b.datetime));
-  return { trades, warnings: fxWarnings, consumedConversionRefs: consumedConversions, fundedConversionRefs };
+  return {
+    trades, warnings: fxWarnings, consumedConversionRefs: consumedConversions, fundedConversionRefs,
+    poolPairing: { trades: poolTradeState, conversions: conversionPairing, fundedConversions: fundedConversionRefs },
+  };
 }
 
 /**
@@ -1395,7 +1500,9 @@ function fundedPass(
 /** Conversions a distribution must never claim: trade-reserved by amount plus the funded pass's (C4 1b). */
 export function tradeReservedConversionRefsWithFunding(rows: AccountStatementRow[], fundingTickers: ReadonlySet<string>): ReadonlySet<string> {
   const reserved = new Set(collectTradeReservedConversionRefs(rows));
-  for (const ref of extractTrades(rows, { fundingTickers }).fundedConversionRefs) reserved.add(ref);
+  const extraction = extractTrades(rows, { fundingTickers });
+  // Conversions the 1:1 stage paired or blocked as ambiguous are never a distribution's (plan Q2).
+  for (const ref of [...extraction.fundedConversionRefs, ...extraction.poolPairing.conversions.keys()]) reserved.add(ref);
   return reserved;
 }
 
@@ -4289,39 +4396,38 @@ async function routeDistributionPool(params: {
 }
 
 /**
- * Pool roles of the statement's USD rows (C2 completeness): cash-fund sweeps,
- * funded buys (buy_relief), retained distributions (distribution_in),
- * statement-converted rows (pass_through); everything else is unsupported (Q4).
+ * Pool roles of the statement's USD rows (plan Q2, pool-statement.ts): one
+ * role per USD row, from the trade extraction's order-independent pairing and
+ * the distribution extraction. `rows` carries every USD row the pool checks see.
  */
 export function statementPoolEvents(
   rows: readonly AccountStatementRow[],
   trades: TradeExtractionResult,
   distributions: DistributionExtractionResult,
   fundingTickers: ReadonlySet<string>,
-): StatementPoolEvent[] {
-  const tradeByRow = new Map(trades.trades.map(trade => [trade.row_index, trade]));
-  const distributionByRow = new Map(distributions.distributions.map(d => [d.row_index, d]));
-  const events: StatementPoolEvent[] = [];
-  for (const row of rows) {
-    if (normalizedCurrency(row.ccy) !== "USD") continue;
-    const ts = lightyearTimestampSeconds(row.date);
-    if (ts === null) continue;
-    let role: StatementPoolEvent["role"] = "unsupported";
-    if (row.type === "Buy" || row.type === "Sell") {
-      const trade = tradeByRow.get(row.row_index);
-      if (fundingTickers.has(row.ticker) || KNOWN_CASH_EQUIVALENT_TICKERS.has(row.ticker)) role = "sweep";
-      else if (trade?.funding) role = "buy_relief";
-      else if (trade?.conversion_ref) role = "pass_through";
-    } else if (row.type === "Conversion") {
-      if (trades.consumedConversionRefs.has(row.reference) || distributions.consumedConversionRefs.has(row.reference)) role = "pass_through";
-    } else if (row.type === "Dividend" || row.type === "Distribution" || row.type === "Interest" || row.type === "Reward") {
-      const distribution = distributionByRow.get(row.row_index);
-      if (distributions.unconvertedRowIndexes.has(row.row_index)) role = "distribution_in";
-      else if (distribution?.fx_provenance?.source === "statement_conversion") role = "pass_through";
-    }
-    events.push({ ref: row.reference, ts, role });
-  }
-  return events;
+): { events: StatementPoolEvent[]; rows: PoolStatementRow[] } {
+  const poolRows = rows.map((row): PoolStatementRow => ({
+    row_index: row.row_index, reference: row.reference, ts: lightyearTimestampSeconds(row.date), type: row.type,
+    ticker: row.ticker, ccy: row.ccy, quantity: row.quantity, price_per_share: row.price_per_share,
+    gross_amount: row.gross_amount, fee: row.fee, net_amount: row.net_amount,
+  }));
+  const convertedDistributionRows = new Set(distributions.distributions
+    .filter(d => d.fx_provenance?.source === "statement_conversion").map(d => d.row_index));
+  const events = classifyStatementPool(poolRows, {
+    pairing: trades.poolPairing,
+    fundTickers: new Set([...fundingTickers, ...KNOWN_CASH_EQUIVALENT_TICKERS]),
+    distributionConversions: distributions.consumedConversionRefs,
+    retainedDistributionRows: distributions.unconvertedRowIndexes,
+    convertedDistributionRows,
+  });
+  return { events, rows: poolRows.filter(row => normalizedCurrency(row.ccy) === "USD") };
+}
+
+/** Pool roles of a whole statement as the pool-dependent tools see them (trade + distribution extraction). */
+export function classifyLightyearStatementPool(rows: AccountStatementRow[], fundingTickers: ReadonlySet<string>): { events: StatementPoolEvent[]; rows: PoolStatementRow[]; trades: TradeExtractionResult } {
+  const trades = extractTrades(rows, { fundingTickers });
+  const distributions = extractDistributions(rows, tradeReservedConversionRefsWithFunding(rows, fundingTickers));
+  return { ...statementPoolEvents(rows, trades, distributions, fundingTickers), trades };
 }
 
 /**
@@ -4374,11 +4480,18 @@ async function valueFundedTrades(params: {
   const loaded = await loadPoolRecords(params.api, params.store, key, params.inLock);
   if (!loaded.ok) return reviewAll(loaded.code);
   const distributions = extractDistributions(params.rows, tradeReservedConversionRefsWithFunding(params.rows, params.fundingTickers));
-  const orders = funded.map(trade => eventOrder(trade.reference, trade.funding!.ts));
+  const statement = statementPoolEvents(params.rows, params.extraction, distributions, params.fundingTickers);
+  // A second holding pool inflow and outflow: that command and every later one is refused (Codex r1 #2).
+  const opening = poolRecordsFor(loaded.records, key).opening;
+  const mixed = checkMixedSeconds(statement.events, opening ? checkpointOrder("opening", opening.as_of) : { ts: Number.NEGATIVE_INFINITY, rank: 0, ref: "" });
+  const ambiguous = new Set(funded.filter(trade => mixed !== null && trade.funding!.ts >= mixed).map(trade => trade.reference));
+  const ordered = funded.filter(trade => !ambiguous.has(trade.reference));
+  if (ordered.length === 0) return reviewAll("usd_pool_ambiguous_order");
+  const orders = ordered.map(trade => eventOrder(trade.reference, trade.funding!.ts));
   const until = orders.reduce((latest, order) => compareOrder(order, latest) > 0 ? order : latest);
   const validated = await validateUsdPool({
     api: params.api, store: params.store, key, until, newRecords: orders,
-    statementEvents: statementPoolEvents(params.rows, params.extraction, distributions, params.fundingTickers),
+    statement,
     plannedRefs: new Set(funded.map(trade => trade.reference)),
     requireRegistered: false,
   });
@@ -4394,7 +4507,8 @@ async function valueFundedTrades(params: {
     const outcome = replayFrozenFx(params.fxOutcomes, "USD", trade.date);
     const poolEcbCents = outcome.ok ? usdCentsToEurCents(funding.pool_usd_cents, outcome.rate.rate) : null;
     prepared.set(trade.reference, { trade, ecb: outcome.ok ? outcome.rate : null, poolEcbCents });
-    const blocked = params.held.get(trade.reference) ?? (!outcome.ok ? outcome.code : poolEcbCents === null ? "trade_amount_conflict" : undefined);
+    const blocked = ambiguous.has(trade.reference) ? "usd_pool_ambiguous_order"
+      : params.held.get(trade.reference) ?? (!outcome.ok ? outcome.code : poolEcbCents === null ? "trade_amount_conflict" : undefined);
     return { ref: trade.reference, ts: funding.ts, spend_usd_cents: funding.pool_usd_cents, ...(blocked !== undefined ? { blocked } : {}) };
   });
   for (const projected of projectPool(snapshot, commands)) {
@@ -5481,7 +5595,7 @@ export function registerLightyearTools(
         const order = checkpointOrder("revaluation", as_of);
         const validated = await validateUsdPool({
           api, store: usdPoolStore, key, until: order, newRecords: [order],
-          statementEvents: statementPoolEvents(rows, tradeExtraction, distributionExtraction, fundingTickers),
+          statement: statementPoolEvents(rows, tradeExtraction, distributionExtraction, fundingTickers),
           requireRegistered: true,
         });
         if (!validated.ok) return review(validated.code, validated.detail);

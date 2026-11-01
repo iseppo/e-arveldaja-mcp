@@ -527,7 +527,7 @@ describe("lightyear investments tools", () => {
     expect(payload.unhandled).toBeUndefined();
   });
 
-  it("does not flag matched ICSUSSDP sell plus conversion plus withdrawal as unhandled", async () => {
+  it("an ICSUSSDP sell never consumes a USD→EUR conversion: the conversion stays a USD-pool movement (plan Q2, D2)", async () => {
     mockedReadFile.mockResolvedValue(buildStatementCsv([
       ["10/11/2025 13:40:29", "CN-GZUJLSKLL2", "", "", "Conversion", "", "EUR", "", "1126.28", "1.15709", "", "1126.28", ""],
       ["10/11/2025 13:40:29", "CN-GZUJLSKLL2", "", "", "Conversion", "", "USD", "", "-1307.80", "0.86423", "4.58", "-1303.22", ""],
@@ -549,8 +549,8 @@ describe("lightyear investments tools", () => {
         ICSUSSDP: { buys: 0, sells: 1 },
       },
     }));
-    expect(payload.cash_reconciliation.is_balanced).toBe(true);
-    expect(payload.unhandled).toBeUndefined();
+    // The fund sell is a sweep; the conversion is not its pair (both legs reported until it is booked).
+    expect(payload.unhandled.rows.map((row: { type: string; ccy: string }) => `${row.type}:${row.ccy}`).sort()).toEqual(["Conversion:EUR", "Conversion:USD"]);
   });
 
   it("skips cash-equivalent tickers by default when booking trades", async () => {
@@ -3750,7 +3750,7 @@ describe("H16 Lightyear handler provenance", () => {
   it.each([
     ["forward", ["OR-H16-CROSS-FIRST", "OR-H16-CROSS-SECOND"]],
     ["reversed", ["OR-H16-CROSS-SECOND", "OR-H16-CROSS-FIRST"]],
-  ])("H16 legacy-cross-kind synchronizes removal and prevents reuse in %s order", async (_label, references) => {
+  ])("H16 legacy-cross-kind: two same-amount buys and one conversion 3 h away are ambiguous in %s order (plan Q2, Codex r1 #1)", async (_label, references) => {
     const trades = references.map(reference => [
       "04/03/2026 09:00:00", reference, "AAPL", "US0378331005", "Buy", "1", "USD", "39527901950128.89",
       "39527901950128.89", "", "0", "39527901950128.89", "",
@@ -3767,10 +3767,12 @@ describe("H16 Lightyear handler provenance", () => {
     const payload = parseMcpResponse(result.content[0]!.text) as any;
     const byReference = new Map<unknown, Record<string, unknown>>(payload.results.map((entry: any) => [entry.reference, entry]));
 
-    expect(byReference.get(references[0])).toEqual(expect.objectContaining({ status: "would_create", eur_amount: 35575111755115.99 }));
-    expect(byReference.get(references[1])).toEqual(expect.objectContaining({ status: "skipped", eur_amount: 0 }));
-    expect(byReference.get(references[1])!.skip_reason).toBe(H16_MESSAGES.invalid_conversion_pair);
-    expect(payload.warnings).toContainEqual(expect.stringContaining(references[1]));
+    // Neither buy takes the conversion: file order is no evidence of which one it funded.
+    for (const reference of references) {
+      expect(byReference.get(reference)).toEqual(expect.objectContaining({ status: "skipped", eur_amount: 0 }));
+      expect(byReference.get(reference)!.skip_reason).toBe(H16_MESSAGES.invalid_conversion_pair);
+      expect(payload.warnings).toContainEqual(expect.stringContaining(reference));
+    }
     expect(payload.warnings).toContainEqual(expect.stringContaining("FX review [invalid_conversion_pair]"));
   });
 

@@ -6,6 +6,13 @@ import { createConnectionScopedBundleStore, type ConnectionScopedBundleStore } f
 import { isNotFoundHttpError } from "../http-client.js";
 import type { ApiContext } from "../tools/crud-tools.js";
 import type { Journal } from "../types/api.js";
+import {
+  checkMixedSeconds,
+  checkStatementCompleteness,
+  checkSweeps,
+  type PoolStatementRow,
+  type StatementPoolEvent,
+} from "./pool-statement.js";
 
 /**
  * USD cash-equivalent pool (plan WP-C C2, owner Q1/Q3/Q13).
@@ -115,7 +122,10 @@ export type UsdPoolReviewCode =
   | "usd_pool_fund_price_not_stable"
   | "usd_pool_opening_replay_unproven"
   | "usd_pool_opening_exists"
-  | "usd_pool_before_opening";
+  | "usd_pool_before_opening"
+  | "usd_pool_pairing_ambiguous"
+  | "usd_pool_ambiguous_order"
+  | "usd_pool_row_unplaceable";
 
 export const USD_POOL_REVIEW_MESSAGES: Record<UsdPoolReviewCode, string> = {
   usd_pool_unavailable: "The USD cash-fund pool store needs the accounting-rules bundle (not single-file EARVELDAJA_RULES_FILE mode); pool-dependent rows stay in review.",
@@ -128,7 +138,7 @@ export const USD_POOL_REVIEW_MESSAGES: Record<UsdPoolReviewCode, string> = {
   usd_pool_event_mismatch: "A journal logged in the USD pool was edited or deleted after logging.",
   usd_pool_event_unregistered: "A journal logged in the USD pool is still an unregistered draft; confirm it before revaluing.",
   usd_pool_prerequisite_unbooked: "A USD pool event on the statement (e.g. a retained USD distribution) is not booked and logged yet; book it first.",
-  usd_pool_unsupported_event: "The statement holds a USD movement this tool does not book into the pool (USD sell kept in USD, unpaired conversion, deposit, withdrawal or fee).",
+  usd_pool_unsupported_event: "The statement holds a USD movement this tool does not book into the pool (a EUR→USD conversion with no trade, a USD deposit, withdrawal or fee, or a distribution whose conversion is reserved by a trade).",
   usd_pool_sweep_booked: "A cash-fund sweep row was booked as a journal that moves the broker account; the pool cannot be replayed.",
   usd_pool_insufficient: "The USD pool holds less USD than this buy spends from it.",
   usd_pool_prerequisite_failed: "An earlier USD pool command in this plan is not bookable, so later pool commands are not booked either.",
@@ -140,6 +150,9 @@ export const USD_POOL_REVIEW_MESSAGES: Record<UsdPoolReviewCode, string> = {
   usd_pool_opening_replay_unproven: "Replaying the statement drives USD cash or ICSUSSDP units negative, so it does not start from an empty USD position.",
   usd_pool_opening_exists: "The USD pool already has a checkpoint; the opening is set only once (delete the pool's store entry to redo it).",
   usd_pool_before_opening: "This retained USD distribution is dated on or before the USD pool's approved opening, which already holds its USD; a new journal for it now would leave books and pool apart. Nothing is booked — book such rows before storing the opening, or correct them by hand.",
+  usd_pool_pairing_ambiguous: "Same-day USD trades and conversions of the same amount cannot be paired one to one without guessing; none of them is booked and the USD pool stays blocked until they are booked by hand.",
+  usd_pool_ambiguous_order: "One statement second holds both USD arriving in the pool and USD leaving it; the statement's 1-second resolution does not prove their order, so this and every later pool booking is refused.",
+  usd_pool_row_unplaceable: "A USD row of the statement has no valid date and time, so its place in the USD pool's history is unknown; no pool booking or revaluation is made from this statement.",
 };
 
 export type UsdPoolResult<T> = { ok: true; value: T } | { ok: false; code: UsdPoolReviewCode; detail?: string };
@@ -434,13 +447,7 @@ export async function recoverUsdPoolIntents(api: ApiContext, store: UsdPoolStore
 
 // ---- validation -----------------------------------------------------------------
 
-/** A pool-relevant row of the statement, classified by the Lightyear extraction. */
-export interface StatementPoolEvent {
-  ref: string;
-  ts: number;
-  /** distribution_in / buy_relief must be committed; sweep and pass_through never are; unsupported blocks. */
-  role: "distribution_in" | "buy_relief" | "sweep" | "pass_through" | "unsupported";
-}
+export type { StatementPoolEvent } from "./pool-statement.js";
 
 export interface ValidateUsdPoolParams {
   api: ApiContext;
@@ -450,7 +457,8 @@ export interface ValidateUsdPoolParams {
   until: PoolOrder;
   /** Every new record this run would add; each must order after the frontier. */
   newRecords: readonly PoolOrder[];
-  statementEvents: readonly StatementPoolEvent[];
+  /** The statement's USD rows and their roles (classifyStatementPool). */
+  statement: { events: readonly StatementPoolEvent[]; rows: readonly PoolStatementRow[] };
   /** Refs this plan itself books (not yet committed). */
   plannedRefs?: ReadonlySet<string>;
   requireRegistered: boolean;
@@ -483,7 +491,9 @@ function checkpointValueRecomputes(checkpoint: UsdPoolCheckpoint): boolean {
  * 1. no intents (usd_pool_uncertain_outcome);
  * 2. events after the latest checkpoint: live, same number and broker net
  *    (usd_pool_event_mismatch), registered when required;
- * 3. completeness against the statement (prerequisite / unsupported / sweep).
+ * 3. completeness against the statement (pool-statement.ts: unplaceable rows,
+ *    ambiguous pairing, mixed seconds, unsupported rows, sweeps at 1.00 and
+ *    unbooked, every pool-logged role committed or planned).
  * Call inside {@link withUsdPoolLock} after {@link recoverUsdPoolIntents}.
  */
 export async function validateUsdPool(params: ValidateUsdPoolParams): Promise<UsdPoolResult<UsdPoolSnapshot>> {
@@ -559,22 +569,19 @@ export async function validateUsdPool(params: ValidateUsdPoolParams): Promise<Us
     return { ok: false, code: "usd_pool_validation_unavailable" };
   }
 
-  // Completeness: every statement pool event since the opening and before `until`.
-  const committedRefs = new Set(view.events.map(e => e.ref));
-  for (const event of params.statementEvents) {
-    const order = eventOrder(event.ref, event.ts);
-    if (compareOrder(order, openingOrder) <= 0 || compareOrder(order, until) >= 0) continue;
-    if (event.role === "unsupported") return { ok: false, code: "usd_pool_unsupported_event", detail: event.ref };
-    if (event.role === "sweep") {
-      const booked = liveJournals.some(j => j.is_deleted !== true && (j.document_number === `LY:${event.ref}` || j.document_number === event.ref));
-      if (booked) return { ok: false, code: "usd_pool_sweep_booked", detail: event.ref };
-      continue;
-    }
-    if (event.role === "pass_through") continue;
-    if (!committedRefs.has(event.ref) && !params.plannedRefs?.has(event.ref)) {
-      return { ok: false, code: "usd_pool_prerequisite_unbooked", detail: event.ref };
-    }
-  }
+  // Completeness: every statement pool row since the opening and before `until`.
+  const interval = { after: openingOrder, until };
+  const { events, rows } = params.statement;
+  const liveNumbers = new Set(liveJournals.filter(j => j.is_deleted !== true).map(j => j.document_number));
+  const bookedRefs = new Set(events.filter(event => liveNumbers.has(`LY:${event.ref}`) || liveNumbers.has(event.ref)).map(event => event.ref));
+  const complete = checkStatementCompleteness(events, {
+    interval, committedRefs: new Set(view.events.map(e => e.ref)), plannedRefs: params.plannedRefs ?? new Set(), bookedRefs,
+  });
+  if (!complete.ok) return complete;
+  const mixed = checkMixedSeconds(events, openingOrder);
+  if (mixed !== null && compareOrder(eventOrder("", mixed), until) < 0) return { ok: false, code: "usd_pool_ambiguous_order", detail: String(mixed) };
+  const sweeps = checkSweeps(events, rows, interval);
+  if (!sweeps.ok) return sweeps;
 
   const snapshot_digest = digestOf({
     pool: poolKeyId(key),
@@ -628,12 +635,13 @@ export function projectPool(snapshot: UsdPoolSnapshot, commands: readonly PoolSp
   let plannedEur = 0;
   let failed = false;
   for (const command of ordered) {
-    if (failed) { out.push({ ref: command.ref, ok: false, code: "usd_pool_prerequisite_failed" }); continue; }
+    // A command blocked on its own keeps its own code; any other after a failure is prerequisite_failed.
     if (command.blocked !== undefined) {
       failed = true;
       out.push({ ref: command.ref, ok: false, code: command.blocked });
       continue;
     }
+    if (failed) { out.push({ ref: command.ref, ok: false, code: "usd_pool_prerequisite_failed" }); continue; }
     const committed = poolStateBefore(snapshot, eventOrder(command.ref, command.ts));
     const state = { usd_cents: committed.usd_cents + plannedUsd, eur_cents: committed.eur_cents + plannedEur };
     const relief = relieveCents(state, command.spend_usd_cents);
