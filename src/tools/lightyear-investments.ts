@@ -3193,6 +3193,29 @@ function tradeContent(t: InvestmentTrade): string {
 }
 
 /**
+ * Unbooked trades grouped by reference, and the references whose rows differ
+ * in content: those cannot share one `LY:{ref}` journal, so every row goes to
+ * review. Shared by the final projection and the C4 pool readiness.
+ */
+function groupUnbookedTradesByReference(
+  trades: readonly InvestmentTrade[],
+  existingRefs: ReadonlySet<string>,
+): { byRef: Map<string, InvestmentTrade[]>; conflictedRefs: Set<string> } {
+  const byRef = new Map<string, InvestmentTrade[]>();
+  for (const t of trades) {
+    if (existingRefs.has(t.reference)) continue;
+    const group = byRef.get(t.reference) ?? [];
+    group.push(t);
+    byRef.set(t.reference, group);
+  }
+  const conflictedRefs = new Set<string>();
+  for (const [reference, group] of byRef) {
+    if (group.some(t => tradeContent(t) !== tradeContent(group[0]!))) conflictedRefs.add(reference);
+  }
+  return { byRef, conflictedRefs };
+}
+
+/**
  * Funded buys the projection will route away before booking (C4 readiness):
  * same-reference rows with differing content (`reference_conflict`) and own
  * references booked on another date (`reference_journal_date_mismatch`).
@@ -3200,17 +3223,20 @@ function tradeContent(t: InvestmentTrade): string {
  * projection runs only over the rest; a held buy stops every later pool spend.
  */
 function fundedTradeReadiness(
-  funded: readonly InvestmentTrade[],
+  trades: readonly InvestmentTrade[],
+  existingRefs: ReadonlySet<string>,
   ownRefCandidates: ReadonlyMap<string, number[]>,
 ): { funded: InvestmentTrade[]; held: Map<string, FxReviewCode> } {
-  const byRef = new Map<string, InvestmentTrade[]>();
-  for (const trade of funded) byRef.set(trade.reference, [...(byRef.get(trade.reference) ?? []), trade]);
+  // Conflicts are judged over ALL unbooked rows (a non-funded copy conflicts too), as the projection does.
+  const { byRef, conflictedRefs } = groupUnbookedTradesByReference(trades, existingRefs);
   const held = new Map<string, FxReviewCode>();
   const kept: InvestmentTrade[] = [];
   for (const [reference, group] of byRef) {
-    if (group.some(t => tradeContent(t) !== tradeContent(group[0]!))) held.set(reference, "reference_conflict");
+    const funded = group.find(t => t.funding !== undefined && isStrictDate(t.date));
+    if (!funded) continue;
+    if (conflictedRefs.has(reference)) held.set(reference, "reference_conflict");
     else if (ownRefCandidates.has(reference)) held.set(reference, "reference_journal_date_mismatch");
-    kept.push(group[0]!);
+    kept.push(funded);
   }
   return { funded: kept, held };
 }
@@ -3226,13 +3252,7 @@ function computeTradesProjection(params: TradesProjectionParams): TradesProjecti
   // ready, so a review-required copy never blocks a bookable one. Differing
   // same-reference rows cannot share one `LY:{ref}` journal, so all go to review.
   const warnings: string[] = [...params.seedWarnings];
-  const byRef = new Map<string, InvestmentTrade[]>();
-  for (const t of trades) {
-    if (existingRefs.has(t.reference)) continue;
-    const group = byRef.get(t.reference) ?? [];
-    group.push(t);
-    byRef.set(t.reference, group);
-  }
+  const { byRef, conflictedRefs } = groupUnbookedTradesByReference(trades, existingRefs);
   // A date that is not a real calendar day (31/02/2026, a non-DD/MM/YYYY token)
   // would otherwise flow verbatim into the journal's effective_date, so such a
   // trade is routed to review (it still owns its paired conversion).
@@ -3243,10 +3263,8 @@ function computeTradesProjection(params: TradesProjectionParams): TradesProjecti
         ? { kind: "ready", converted_trade_fee_eur: t.funding.valuation.fee_eur_cents / 100 }
         : classifyTradeIntrinsicReadiness(t);
   const keptTrades = new Set<InvestmentTrade>();
-  const conflictedRefs = new Set<string>();
   for (const [reference, group] of byRef) {
-    if (group.some(t => tradeContent(t) !== tradeContent(group[0]!))) {
-      conflictedRefs.add(reference);
+    if (conflictedRefs.has(reference)) {
       warnings.push(fxReviewWarning(reference, fxReason("reference_conflict")));
       continue;
     }
@@ -4916,9 +4934,7 @@ export function registerLightyearTools(
         // ones for skipped tickers and already-booked references, and count them.
         const suppressedWarnings = { already_booked: 0, skipped_ticker: 0 };
         // C4: value the funded buys still to book (ECB rate frozen at the dry run, pool relief).
-        const readiness = fundedTradeReadiness(
-          trades.filter(t => t.funding !== undefined && !existingRefs.has(t.reference) && isStrictDate(t.date)), ownRefCandidates,
-        );
+        const readiness = fundedTradeReadiness(trades, existingRefs, ownRefCandidates);
         const funded = readiness.funded;
         const keyResolution = resolveLightyearPoolKey(api, statementSnapshot, file_path, lightyear_account, broker_account, broker_dimension_id);
         if (!keyResolution.ok) {

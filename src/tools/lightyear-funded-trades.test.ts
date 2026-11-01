@@ -456,6 +456,28 @@ describe("book_lightyear_trades — buys funded from the USD cash fund (C4)", ()
     expect(exec.payload.usd_pool_notes?.[0]).toContain("journal 9001");
     expect(env.store.records.filter(record => record.record === "event")).toMatchObject([{ ref: "OR-TESTBUYR1", state: "intent" }]);
   });
+
+  it("review wpc r2: a funded buy conflicting with a non-funded same-reference copy stops the later spend (€31.50/€8.50 vs €34.75/€5.25)", async () => {
+    // Opening 100 USD / €89. The Oct 20 50 USD fund buy shares its reference with a €51 EUR row, so both are skipped;
+    // +100 USD / €50 is logged Oct 21; the Oct 22 50 USD buy at ECB 1.25 must be held, not valued at €31.50 relief /
+    // €8.50 FX gain (assuming the skipped buy); valued from the logged state it would be €34.75 / €5.25.
+    loadStatement([
+      ...poolBuy("20", "C1", "50.00"),
+      ["20/10/2026 11:00:00", "OR-TESTBUYC1", "VWCE", "IE00BK5BQT80", "Buy", "0.51", "EUR", "100", "51.00", "1", "0", "51.00", "0"],
+      ...poolBuy("22", "C2", "50.00"),
+    ]);
+    const env = setup({
+      pool: [opening(10000, 8900, "1.1236"), poolEvent("DD-TESTMID02", "2026-10-21T10:00:00Z", 10000, 5000, 602)],
+      journals: [poolJournal(602, "DD-TESTMID02", 5000)],
+      fetch: rateFetch("1.25"),
+    });
+    const dry = await env.run({ dry_run: true });
+    expect(dry.payload.results.filter(row => String(row.reference).includes("OR-TESTBUYC1")).every(row => row.status === "skipped")).toBe(true);
+    expect(resultFor(dry.payload, "OR-TESTBUYC2")).toMatchObject({ status: "skipped" });
+    expect(resultFor(dry.payload, "OR-TESTBUYC2")!.funding).toBeUndefined();
+    expect(reviewCode(dry.payload, "OR-TESTBUYC2")).toBe("usd_pool_prerequisite_failed");
+    expect(dry.payload.created).toBe(0);
+  });
 });
 
 function parseRowsForTest(rows: string[][]) {
