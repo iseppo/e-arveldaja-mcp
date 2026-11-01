@@ -616,7 +616,8 @@ entries from the store), `distribution_in` events (retained USD distributions,
 fund, `book_lightyear_trades`, relief at average carrying value, realised FX on 8500) and
 revaluation checkpoints (`book_lightyear_fx_revaluation` `mode: "revalue"`, journal
 `LY-FX:<account>:USD:<date>`, quantity proof against the Lightyear holding). Every write runs
-under `withUsdPoolLock` as intent → create → readback → commit; `recoverUsdPoolIntents` resolves
+under `withUsdPoolLock` (which drops the store's read cache once the lock is held, so records another
+process committed are seen) as intent → create → readback → commit; `recoverUsdPoolIntents` resolves
 leftovers from the ledger and never recreates a journal. `validateUsdPool` replays the whole
 chain from the opening against fresh journals; records ordered before the latest committed relief
 or checkpoint are refused (`usd_pool_backdated_event`). Order: opening once → distributions →

@@ -188,10 +188,18 @@ export function statementPeriodFromFileName(name: string | undefined): { from: s
   return match ? { from: match[1]!, to: match[2]! } : null;
 }
 
-export async function withUsdPoolLock<T>(key: PoolKey, fn: () => Promise<T>): Promise<T> {
+/**
+ * Serialize one pool across processes. The store's read cache is dropped once the
+ * lock is held: another process may have committed records since this one last
+ * read, and recovery, frontier checks and snapshot comparison must see them.
+ */
+export async function withUsdPoolLock<T>(key: PoolKey, store: UsdPoolStore, fn: () => Promise<T>): Promise<T> {
   const lockDir = process.env.EARVELDAJA_LOCK_DIR ?? resolve(tmpdir(), "e-arveldaja-mcp-locks");
   const digest = createHash("sha256").update(`usd-pool\u0000${poolKeyId(key)}`).digest("hex");
-  return withOwnedFileLock(resolve(lockDir, `${digest}.lock`), fn, { timeoutMs: 30_000, pollMs: 25 });
+  return withOwnedFileLock(resolve(lockDir, `${digest}.lock`), () => {
+    store.reset();
+    return fn();
+  }, { timeoutMs: 30_000, pollMs: 25 });
 }
 
 /** End-of-day timestamp (seconds) of a YYYY-MM-DD day, in the statement's own clock. */

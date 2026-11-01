@@ -321,8 +321,8 @@ describe("withUsdPoolLock", () => {
     const order: string[] = [];
     let release!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
-    const first = withUsdPoolLock(KEY, async () => { order.push("a-start"); await gate; order.push("a-end"); });
-    const second = withUsdPoolLock(KEY, async () => { order.push("b"); });
+    const first = withUsdPoolLock(KEY, memoryUsdPoolStore(), async () => { order.push("a-start"); await gate; order.push("a-end"); });
+    const second = withUsdPoolLock(KEY, memoryUsdPoolStore(), async () => { order.push("b"); });
     await new Promise(resolve => setTimeout(resolve, 30));
     release();
     await Promise.all([first, second]);

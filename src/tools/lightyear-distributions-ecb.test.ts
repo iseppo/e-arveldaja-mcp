@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { resolveFileInput } from "../file-validation.js";
 import { readFileCapped } from "../bounded-read.js";
@@ -8,7 +11,8 @@ import type { ApiContext } from "./crud/shared.js";
 import type { Journal } from "../types/api.js";
 import type { EcbFetch, EcbFetchResponse } from "../fx/ecb-rates.js";
 import type { PlanData } from "../plan-store.js";
-import type { UsdPoolEvent } from "../lightyear/usd-pool.js";
+import { createUsdPoolStore, endOfDaySeconds, type UsdPoolEvent, type UsdPoolStore } from "../lightyear/usd-pool.js";
+import { initAccountingRulesConnection } from "../accounting-rules.js";
 import { registerLightyearTools, type LightyearDistributionsPayload } from "./lightyear-investments.js";
 
 vi.mock("../bounded-read.js", async () => {
@@ -55,7 +59,7 @@ function rateFetch(rates: Array<[string, string]> = OCTOBER_RATES): FetchMock {
 
 interface CreatedJournal { document_number?: string; postings?: Array<{ accounts_id: number; type: string; amount: number }> }
 
-function setup(options: { fetch?: FetchMock; today?: string; journals?: Journal[] } = {}) {
+function setup(options: { fetch?: FetchMock; today?: string; journals?: Journal[]; store?: UsdPoolStore } = {}) {
   const server = { registerTool: vi.fn() };
   const created: CreatedJournal[] = [];
   const create = vi.fn(async (payload: CreatedJournal) => {
@@ -85,7 +89,7 @@ function setup(options: { fetch?: FetchMock; today?: string; journals?: Journal[
   const context = createTestRuntimeSafetyContext();
   registerLightyearTools(server as unknown as Parameters<typeof registerLightyearTools>[0], api as unknown as ApiContext, context, {
     ecb: { fetch, today: () => options.today ?? "2026-10-31", now: () => new Date("2026-10-31T08:00:00Z"), cache: new Map() },
-    usdPoolStore: store,
+    usdPoolStore: options.store ?? store,
   });
   const registration = server.registerTool.mock.calls.find(call => call[0] === "book_lightyear_distributions");
   if (!registration) throw new Error("book_lightyear_distributions not registered");
@@ -282,5 +286,47 @@ describe("book_lightyear_distributions fx_source=ecb", () => {
     const dry = await env.run({ fx_source: "ecb", lightyear_account: "OTHERACCT", dry_run: true });
     expect(dry.result.isError).toBe(true);
     expect(dry.result.content[0]!.text).toContain("does not match");
+  });
+
+  it("review wpc 1: a second process's committed relief is seen under the lock — the back-dated distribution is refused", async () => {
+    // Two "processes" = two bundle-backed stores on one rules dir. Opening 100 USD / €90 (2026-09-30);
+    // process A commits an Oct 20 relief of 50 USD / €45 after process B cached the opening only.
+    // An Oct 1 distribution of +100 USD / €80 (ECB 1.25) would leave 150 USD / €125 instead of the
+    // chronological €42.50 relief / €127.50 — it must be refused, not logged.
+    const dir = mkdtempSync(join(tmpdir(), "usd-pool-two-process-"));
+    process.env.EARVELDAJA_RULES_DIR = dir;
+    process.env.EARVELDAJA_LOCK_DIR = join(dir, "locks");
+    try {
+      initAccountingRulesConnection(() => ({ name: "default", stableIdentity: "default" }));
+      const key = { connection_fingerprint: "lightyear-ecb-test-connection", lightyear_account: "TESTACCT1", broker_account: 1120, broker_dimension_id: null, currency: "USD" as const };
+      const processA = createUsdPoolStore();
+      const processB = createUsdPoolStore();
+      processA.upsert([{
+        record: "checkpoint", pool_key: key, kind: "opening", as_of: "2026-09-30", ts: endOfDaySeconds("2026-09-30"),
+        usd_cents: 10000, eur_cents: 9000, fx_cents: 0, journal_id: null, document_number: null,
+        rate: "1.1111111111", rate_date: "2026-09-30", approved: true, recorded_at: "t",
+      }]);
+      expect(processB.read()).toHaveLength(1); // B caches the opening only
+      loadStatement([["01/10/2026 10:00:00", "DD-TESTBACK01", "NVDA", "US67066G1040", "Dividend", "0", "USD", "0", "100.00", "0", "0", "100.00", "0"]]);
+      const env = setup({ store: processB, fetch: rateFetch([["2026-10-01", "1.25"], ["2026-10-02", "1.25"]]), journals: [] });
+      const dry = await env.run({ fx_source: "ecb", dry_run: true });
+      expect(dry.payload.results[0]).toMatchObject({ net_eur: 80 });
+      processA.upsert([{
+        record: "event", pool_key: key, ref: "OR-TESTA20", ts: Date.parse("2026-10-20T12:00:00Z") / 1000, kind: "buy_relief",
+        usd_cents: -5000, eur_cents: -4500, document_number: "LY:OR-TESTA20", journal_id: 7001, journal_broker_net_cents: -4500,
+        state: "committed", recorded_at: "t",
+      }]);
+      expect(processB.read()).toHaveLength(1); // still stale outside the lock
+      const exec = await env.run({ fx_source: "ecb", dry_run: false, plan_handle: dry.payload.plan_handle });
+      expect(exec.result.content[0]!.text).toContain("plan_drift");
+      expect(env.create).not.toHaveBeenCalled();
+      const again = await env.run({ fx_source: "ecb", dry_run: true });
+      expect(again.payload.results[0]).toMatchObject({ status: "manual_review", review_reason: { code: "usd_pool_backdated_event" } });
+      expect(processA.read()!.filter(record => record.record === "event").map(record => (record as UsdPoolEvent).ref)).toEqual(["OR-TESTA20"]);
+    } finally {
+      delete process.env.EARVELDAJA_RULES_DIR;
+      delete process.env.EARVELDAJA_LOCK_DIR;
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

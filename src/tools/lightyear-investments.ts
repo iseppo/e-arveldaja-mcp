@@ -4166,7 +4166,7 @@ async function loadPoolRecords(
   if (store.read() === null) return { ok: false, code: "usd_pool_unavailable" };
   const recovered = inLock
     ? await recoverUsdPoolIntents(api, store, key)
-    : await withUsdPoolLock(key, () => recoverUsdPoolIntents(api, store, key));
+    : await withUsdPoolLock(key, store, () => recoverUsdPoolIntents(api, store, key));
   if (!recovered.ok) return { ok: false, code: recovered.code };
   const records = store.read();
   if (records === null) return { ok: false, code: "usd_pool_unavailable" };
@@ -5004,7 +5004,7 @@ export function registerLightyearTools(
       };
       };
       // All pool-funded commands run inside one pool lock section (Codex r2 #4).
-      return storedPoolKey !== null ? withUsdPoolLock(storedPoolKey, () => executeTrades(true)) : executeTrades(false);
+      return storedPoolKey !== null ? withUsdPoolLock(storedPoolKey, usdPoolStore, () => executeTrades(true)) : executeTrades(false);
     }
   );
 
@@ -5297,7 +5297,7 @@ export function registerLightyearTools(
           })) }],
         };
       };
-      return storedPoolKey !== null ? withUsdPoolLock(storedPoolKey, () => executeLocked(true)) : executeLocked(false);
+      return storedPoolKey !== null ? withUsdPoolLock(storedPoolKey, usdPoolStore, () => executeLocked(true)) : executeLocked(false);
     }
   );
 
@@ -5533,7 +5533,7 @@ export function registerLightyearTools(
       if (storedKey === null) return planErrorResult("plan_drift", "The reviewed plan carries no USD pool.");
       storedOrResolved = readFrozenFxOutcomes(storedPlan.privatePayload);
 
-      return withUsdPoolLock(storedKey, async () => {
+      return withUsdPoolLock(storedKey, usdPoolStore, async () => {
         let result;
         try {
           result = await evaluate(storedSourceBindings(storedPlan.privatePayload)[0], storedOrResolved, true);
