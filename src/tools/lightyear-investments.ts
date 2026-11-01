@@ -1409,6 +1409,19 @@ function extractTrades(rows: AccountStatementRow[], options: TradeExtractionOpti
     consumedConversions.add(ref);
   }
 
+  // A conversion missing a leg (not exactly one EUR + one foreign row) proves nothing about how its
+  // day's trades were paid: an unpaired USD trade that day is held with it, never left to the pool.
+  const orphanByDay = new Map<string, string>();
+  for (const [ref, conversionRows] of conversionsByRef) {
+    const eurLegs = conversionRows.filter(conversionRow => normalizedCurrency(conversionRow.ccy) === "EUR").length;
+    if (conversionRows.length === 2 && eurLegs === 1) continue;
+    for (const conversionRow of conversionRows) {
+      const day = rawStatementDatePrefix(conversionRow.date);
+      const known = orphanByDay.get(day);
+      if (known === undefined || ref < known) orphanByDay.set(day, ref);
+    }
+  }
+
   // Warnings in statement row order, as before.
   const foreignIndex = new Map(foreign.map((entry, index) => [entry.trade, index]));
   for (const trade of trades) {
@@ -1422,7 +1435,9 @@ function extractTrades(rows: AccountStatementRow[], options: TradeExtractionOpti
     const index = foreignIndex.get(trade)!;
     const { row } = foreign[index]!;
     if (failure.conversionRef === undefined && assignment.tradeState.get(index) !== "ambiguous" && normalizedCurrency(row.ccy) === "USD" && !fundingTickers.has(row.ticker)) {
-      unpairedBuys.push({ trade, row, warningIndex: fxWarnings.length });
+      const orphan = orphanByDay.get(rawStatementDatePrefix(row.date));
+      if (orphan !== undefined) failure.conversionRef = orphan;
+      else unpairedBuys.push({ trade, row, warningIndex: fxWarnings.length });
     }
     fxWarnings.push({ reference: trade.reference, ticker: trade.ticker, text: fxReviewWarning(trade.reference, failure.reason, failure.conversionRef) });
   }

@@ -3934,6 +3934,8 @@ describe("H16 Lightyear handler provenance", () => {
 
   it.each([
     ["missing EUR row", "invalid_conversion_pair", (rows: string[][]) => rows.slice(1)],
+    // Only the EUR leg remains: an orphan leg is never pool funding (Codex review of Q4, #1).
+    ["missing foreign row", "invalid_conversion_pair", (rows: string[][]) => [rows[0]!, rows[2]!]],
     ["duplicate EUR row", "invalid_conversion_pair", (rows: string[][]) => [rows[0]!, [...rows[0]!], rows[1]!, rows[2]!]],
     ["duplicate foreign row", "invalid_conversion_pair", (rows: string[][]) => [rows[0]!, rows[1]!, [...rows[1]!], rows[2]!]],
     ["third conversion row", "invalid_conversion_pair", (rows: string[][]) => [rows[0]!, rows[1]!, [...rows[1]!.slice(0, 6), "GBP", ...rows[1]!.slice(7)], rows[2]!]],
@@ -3985,8 +3987,6 @@ describe("H16 Lightyear handler provenance", () => {
   });
 
   it.each([
-    // Only the EUR leg remains: no USD arrives, so the buy is paid from the pool.
-    ["missing foreign row", (rows: string[][]) => [rows[0]!, rows[2]!]],
     // The buy is larger than the conversion in the same second: an N:1 pool-funded buy.
     ["foreign gross mismatch", (rows: string[][]) => { rows[2]![8] = "1400"; rows[2]![11] = "1398"; return rows; }],
   ])("H16 %s is never a 1:1 pair: the USD buy is left to the pool and held for review", async (_label, mutate) => {
