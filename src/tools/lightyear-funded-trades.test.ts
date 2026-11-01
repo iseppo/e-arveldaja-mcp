@@ -159,7 +159,7 @@ function reviewCode(payload: LightyearTradesPayload, reference: string): string 
   return text ? /FX review \[([a-z_]+)\]/.exec(text)?.[1] : undefined;
 }
 
-describe("book_lightyear_trades — buys funded from the USD cash fund (C4)", () => {
+describe("book_lightyear_trades — buys paid from the USD pool (C4, generalised in Q3)", () => {
   beforeEach(() => {
     mockedResolveFileInput.mockResolvedValue({ path: STATEMENT_PATH });
     mockedReadFileCapped.mockReset();
@@ -171,9 +171,8 @@ describe("book_lightyear_trades — buys funded from the USD cash fund (C4)", ()
     const { dry, exec } = await env.book();
     const row = resultFor(dry.payload, "OR-TESTBUY001")!;
     expect(row).toMatchObject({ status: "would_create", eur_amount: 356.75, fx_result: { account: 8500, amount: 0.01, kind: "gain" } });
-    expect(row.funding).toMatchObject({ pool_usd: 9.05, pool_ecb_eur: 8.06, relief_eur: 8.05, ecb: { rate: "1.1225", rate_date: "2026-10-19" }, fx_rate_text: "1.1225 USD/EUR ECB 2026-10-19" });
-    expect(String(row.funding!.conversion_reference)).toContain("CN-TESTFUND1");
-    expect(String(row.funding!.sell_references[0])).toContain("OR-TESTSWEEP1");
+    expect(row.pool).toMatchObject({ kind: "buy_relief", pool_usd: -9.05, pool_eur: -8.05, pool_ecb_eur: 8.06, relief_eur: 8.05, ecb: { rate: "1.1225", rate_date: "2026-10-19" }, fx_rate_text: "1.1225 USD/EUR ECB 2026-10-19" });
+    expect(String(row.pool!.conversion_reference)).toContain("CN-TESTFUND1");
     expect(exec.result.isError).toBeFalsy();
     const funded = env.created.find(journal => journal.document_number === "LY:OR-TESTBUY001")!;
     expect(funded.postings).toEqual([
@@ -219,13 +218,10 @@ describe("book_lightyear_trades — buys funded from the USD cash fund (C4)", ()
     expect(env.created[0]!.postings).toContainEqual({ accounts_id: 1120, type: "C", amount: 89 });
   });
 
-  it("a funding sell 61 s away is not used: the buy stays invalid_conversion_pair", async () => {
-    loadStatement([["19/10/2026 14:42:48", ...FUNDING_SELL.slice(1)], ...CONVERSION, FUNDED_BUY]);
-    const env = setup();
-    const dry = await env.run({ dry_run: true });
-    expect(resultFor(dry.payload, "OR-TESTBUY001")).toMatchObject({ status: "skipped" });
-    expect(reviewCode(dry.payload, "OR-TESTBUY001")).toBe("invalid_conversion_pair");
-    expect(env.fetch).not.toHaveBeenCalled();
+  it("the fund sweep's timing does not matter: a sweep 61 s away gives the same N:1 relief (plan Q3)", async () => {
+    loadStatement([...DISTRIBUTIONS, ["19/10/2026 14:42:48", ...FUNDING_SELL.slice(1)], ...CONVERSION, FUNDED_BUY]);
+    const dry = await setup({ journals: WORKED_JOURNALS }).run({ dry_run: true });
+    expect(resultFor(dry.payload, "OR-TESTBUY001")).toMatchObject({ status: "would_create", pool: { pool_usd: -9.05, relief_eur: 8.05 } });
   });
 
   it("two qualifying conversions → review, no guess", async () => {
@@ -235,10 +231,11 @@ describe("book_lightyear_trades — buys funded from the USD cash fund (C4)", ()
     expect(reviewCode(dry.payload, "OR-TESTBUY001")).toBe("invalid_conversion_pair");
   });
 
-  it("a partial sum (conversion + fund sells below the buy gross) stays invalid_conversion_pair", async () => {
-    loadStatement([FUNDING_SELL, ...CONVERSION, ["19/10/2026 14:43:49", "OR-TESTBUY001", "NVDA", "US67066G1040", "Buy", "2", "USD", "204.80", "410.00", "0", "0.40", "409.60", "0"]]);
-    const dry = await setup().run({ dry_run: true });
-    expect(reviewCode(dry.payload, "OR-TESTBUY001")).toBe("invalid_conversion_pair");
+  it("the pool part is buy gross − conversion USD, whatever the same-window sweeps add up to", async () => {
+    loadStatement([...DISTRIBUTIONS, FUNDING_SELL, ...CONVERSION, ["19/10/2026 14:43:49", "OR-TESTBUY001", "NVDA", "US67066G1040", "Buy", "2", "USD", "204.80", "410.00", "0", "0.40", "409.60", "0"]]);
+    const dry = await setup({ journals: WORKED_JOURNALS }).run({ dry_run: true });
+    // 410.00 − 390.95 = 19.05 USD from the pool (109.05 USD / €97.02): relief 19.05 × 9702 / 10905 = 16.95.
+    expect(resultFor(dry.payload, "OR-TESTBUY001")).toMatchObject({ status: "would_create", pool: { pool_usd: -19.05, relief_eur: 16.95 } });
   });
 
   it("skip_tickers none (ICSUSSDP booked) turns the funded pass off", async () => {
@@ -247,12 +244,11 @@ describe("book_lightyear_trades — buys funded from the USD cash fund (C4)", ()
     expect(reviewCode(dry.payload, "OR-TESTBUY001")).toBe("invalid_conversion_pair");
   });
 
-  it("the funding sell is not reused by a second buy in the same window", async () => {
-    loadStatement([FUNDING_SELL, ...CONVERSION, FUNDED_BUY, ["19/10/2026 14:43:50", "OR-TESTBUY004", "NVDA", "US67066G1040", "Buy", "0.05", "USD", "181", "9.05", "0", "0", "9.05", "0"]]);
+  it("a second buy in the window does not share the conversion: it is paid 100 % from the pool", () => {
     const { trades } = extractTradesForTesting(parseRowsForTest([FUNDING_SELL, ...CONVERSION, FUNDED_BUY, ["19/10/2026 14:43:50", "OR-TESTBUY004", "NVDA", "US67066G1040", "Buy", "0.05", "USD", "181", "9.05", "0", "0", "9.05", "0"]]), { fundingTickers: new Set(["ICSUSSDP"]) });
-    expect(trades.find(t => t.reference === "OR-TESTBUY001")!.funding?.sell_refs).toEqual(["OR-TESTSWEEP1"]);
-    expect(trades.find(t => t.reference === "OR-TESTBUY004")!.funding).toBeUndefined();
-    expect(trades.find(t => t.reference === "OR-TESTBUY004")!.fx_review_reason?.code).toBe("invalid_conversion_pair");
+    expect(trades.find(t => t.reference === "OR-TESTBUY001")!.pool).toMatchObject({ kind: "buy_relief", conversion_ref: "CN-TESTFUND1", pool_usd_cents: 905 });
+    expect(trades.find(t => t.reference === "OR-TESTBUY004")!.pool).toMatchObject({ kind: "buy_relief", conversion_ref: null, pool_usd_cents: 905 });
+    expect(trades.find(t => t.reference === "OR-TESTBUY004")!.fx_review_reason?.code).toBe("usd_pool_funded");
   });
 
   it("parse/portfolio see a funded buy as a usd_pool_funded review; distributions never claim its conversion", () => {
@@ -262,7 +258,7 @@ describe("book_lightyear_trades — buys funded from the USD cash fund (C4)", ()
     expect([...fundedConversionRefs]).toEqual(["CN-TESTFUND1"]);
     expect(tradeReservedConversionRefsWithFunding(rows, new Set(["ICSUSSDP"])).has("CN-TESTFUND1")).toBe(true);
     // Two-pass: without funding tickers the 1:1 pass alone leaves it unpaired.
-    expect(extractTradesForTesting(rows).trades.find(t => t.reference === "OR-TESTBUY001")!.funding).toBeUndefined();
+    expect(extractTradesForTesting(rows).trades.find(t => t.reference === "OR-TESTBUY001")!.pool).toBeUndefined();
   });
 
   it("no opening checkpoint → usd_pool_checkpoint_missing, nothing guessed", async () => {
@@ -287,7 +283,7 @@ describe("book_lightyear_trades — buys funded from the USD cash fund (C4)", ()
     loadStatement([...oneDollarBuy(1), ...oneDollarBuy(2), ...oneDollarBuy(3)]);
     const env = setup({ pool: [opening(300, 100, "3")] });
     const { dry } = await env.book();
-    expect([1, 2, 3].map(n => resultFor(dry.payload, `OR-TESTB${n}`)!.funding!.relief_eur)).toEqual([0.33, 0.34, 0.33]);
+    expect([1, 2, 3].map(n => resultFor(dry.payload, `OR-TESTB${n}`)!.pool!.relief_eur)).toEqual([0.33, 0.34, 0.33]);
     expect(env.store.records.filter(record => record.record === "event").map(record => (record as UsdPoolEvent).eur_cents)).toEqual([-33, -34, -33]);
   });
 
@@ -426,7 +422,7 @@ describe("book_lightyear_trades — buys funded from the USD cash fund (C4)", ()
     const dry = await env.run({ dry_run: true });
     expect(resultFor(dry.payload, "OR-TESTBUYM1")).toMatchObject({ status: "skipped", candidate_journal_ids: [701] });
     expect(resultFor(dry.payload, "OR-TESTBUYM2")).toMatchObject({ status: "skipped" });
-    expect(resultFor(dry.payload, "OR-TESTBUYM2")!.funding).toBeUndefined();
+    expect(resultFor(dry.payload, "OR-TESTBUYM2")!.pool).toBeUndefined();
     expect(reviewCode(dry.payload, "OR-TESTBUYM2")).toBe("usd_pool_prerequisite_failed");
     expect(dry.payload.created).toBe(0);
   });
@@ -437,8 +433,8 @@ describe("book_lightyear_trades — buys funded from the USD cash fund (C4)", ()
     loadStatement([...poolBuy("20", "R1", "50.00"), ...poolBuy("22", "R2", "25.00")]);
     const env = setup({ pool: [opening(10000, 9000, "1.1111111111")] });
     const dry = await env.run({ dry_run: true });
-    expect(resultFor(dry.payload, "OR-TESTBUYR1")!.funding!.relief_eur).toBe(45);
-    expect(resultFor(dry.payload, "OR-TESTBUYR2")!.funding!.relief_eur).toBe(22.5);
+    expect(resultFor(dry.payload, "OR-TESTBUYR1")!.pool!.relief_eur).toBe(45);
+    expect(resultFor(dry.payload, "OR-TESTBUYR2")!.pool!.relief_eur).toBe(22.5);
     const get = env.api.journals.get.getMockImplementation()!;
     env.api.journals.get.mockImplementation(async (id: number) => {
       const journal = await get(id);
@@ -474,7 +470,7 @@ describe("book_lightyear_trades — buys funded from the USD cash fund (C4)", ()
     const dry = await env.run({ dry_run: true });
     expect(dry.payload.results.filter(row => String(row.reference).includes("OR-TESTBUYC1")).every(row => row.status === "skipped")).toBe(true);
     expect(resultFor(dry.payload, "OR-TESTBUYC2")).toMatchObject({ status: "skipped" });
-    expect(resultFor(dry.payload, "OR-TESTBUYC2")!.funding).toBeUndefined();
+    expect(resultFor(dry.payload, "OR-TESTBUYC2")!.pool).toBeUndefined();
     expect(reviewCode(dry.payload, "OR-TESTBUYC2")).toBe("usd_pool_prerequisite_failed");
     expect(dry.payload.created).toBe(0);
   });

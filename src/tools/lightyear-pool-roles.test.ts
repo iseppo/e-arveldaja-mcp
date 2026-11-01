@@ -261,7 +261,7 @@ describe("USD pool roles: order-independent 1:1 pairing and complete classificat
     // Control: the spend one second later relieves €42.50 from 200 USD / €170.
     load([dividend, fundSell("19/10/2026 14:43:41", "OR-TESTMXSW1", "50.00"), buy("19/10/2026 14:43:50", "OR-TESTMXBY1", "50.00")]);
     const control = await tradesTool({ pool, journals }).run({ dry_run: true });
-    expect(control.payload.results.find(row => String(row.reference).includes("OR-TESTMXBY1"))!.funding!.relief_eur).toBe(42.5);
+    expect(control.payload.results.find(row => String(row.reference).includes("OR-TESTMXBY1"))!.pool!.relief_eur).toBe(42.5);
   });
 
   it("an ICSUSSDP row priced 1.0001 or with a fee inside the interval is usd_pool_fund_price_not_stable at validation", async () => {

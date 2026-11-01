@@ -40,7 +40,7 @@ export interface PoolKey {
   currency: "USD";
 }
 
-export type UsdPoolEventKind = "distribution_in" | "buy_relief" | "revaluation";
+export type UsdPoolEventKind = "distribution_in" | "sell_in" | "buy_relief" | "conversion_out" | "revaluation";
 
 export interface UsdPoolCheckpoint {
   record: "checkpoint";
@@ -133,14 +133,14 @@ export const USD_POOL_REVIEW_MESSAGES: Record<UsdPoolReviewCode, string> = {
   usd_pool_target_mismatch: "This Lightyear account already has a USD pool on another broker account/dimension; nothing is booked to a second pool.",
   usd_pool_checkpoint_missing: "The USD pool has no approved opening checkpoint yet; run book_lightyear_fx_revaluation with mode \"opening\" first.",
   usd_pool_chain_broken: "A journal the USD pool's history depends on was edited, deleted or no longer matches the pool log, so the carrying value cannot be proven.",
-  usd_pool_backdated_event: "A later buy relief or checkpoint is already committed in the USD pool; booking this earlier event would change it. Nothing is booked.",
+  usd_pool_backdated_event: "A later buy relief, USD→EUR conversion or checkpoint is already committed in the USD pool; booking this earlier event would change it. Nothing is booked.",
   usd_pool_uncertain_outcome: "An earlier pool booking has an uncertain outcome (intent without commit) that recovery could not resolve; check the journal and retry.",
   usd_pool_event_mismatch: "A journal logged in the USD pool was edited or deleted after logging.",
   usd_pool_event_unregistered: "A journal logged in the USD pool is still an unregistered draft; confirm it before revaluing.",
-  usd_pool_prerequisite_unbooked: "A USD pool event on the statement (e.g. a retained USD distribution) is not booked and logged yet; book it first.",
+  usd_pool_prerequisite_unbooked: "A USD pool event on the statement (a retained USD distribution, a USD sale kept in USD, a buy paid from USD at Lightyear or a USD→EUR conversion) is not booked and logged yet; book it first.",
   usd_pool_unsupported_event: "The statement holds a USD movement this tool does not book into the pool (a EUR→USD conversion with no trade, a USD deposit, withdrawal or fee, or a distribution whose conversion is reserved by a trade).",
   usd_pool_sweep_booked: "A cash-fund sweep row was booked as a journal that moves the broker account; the pool cannot be replayed.",
-  usd_pool_insufficient: "The USD pool holds less USD than this buy spends from it.",
+  usd_pool_insufficient: "The USD pool holds less USD than this buy or conversion takes from it.",
   usd_pool_prerequisite_failed: "An earlier USD pool command in this plan is not bookable, so later pool commands are not booked either.",
   usd_pool_validation_unavailable: "The USD pool journals could not be read completely; nothing is accepted.",
   usd_pool_checkpoint_after_date: "The USD pool already has a checkpoint after this date; revaluation is never back-dated.",
@@ -149,7 +149,7 @@ export const USD_POOL_REVIEW_MESSAGES: Record<UsdPoolReviewCode, string> = {
   usd_pool_fund_price_not_stable: "An ICSUSSDP row is not priced at exactly 1.00, so its units cannot be valued as USD cash.",
   usd_pool_opening_replay_unproven: "Replaying the statement drives USD cash or ICSUSSDP units negative, so it does not start from an empty USD position.",
   usd_pool_opening_exists: "The USD pool already has a checkpoint; the opening is set only once (delete the pool's store entry to redo it).",
-  usd_pool_before_opening: "This retained USD distribution is dated on or before the USD pool's approved opening, which already holds its USD; a new journal for it now would leave books and pool apart. Nothing is booked — book such rows before storing the opening, or correct them by hand.",
+  usd_pool_before_opening: "This USD pool row is dated on or before the USD pool's approved opening, which already holds its effect; a new journal for it now would leave books and pool apart. Nothing is booked — book such rows before storing the opening, or correct them by hand.",
   usd_pool_pairing_ambiguous: "Same-day USD trades and conversions of the same amount cannot be paired one to one without guessing; none of them is booked and the USD pool stays blocked until they are booked by hand.",
   usd_pool_ambiguous_order: "One statement second holds both USD arriving in the pool and USD leaving it; the statement's 1-second resolution does not prove their order, so this and every later pool booking is refused.",
   usd_pool_row_unplaceable: "A USD row of the statement has no valid date and time, so its place in the USD pool's history is unknown; no pool booking or revaluation is made from this statement.",
@@ -251,13 +251,13 @@ export function checkpointOrder(kind: "opening" | "revaluation", asOf: string): 
 
 /**
  * The append-only history frontier: the latest committed STATE-DEPENDENT record
- * (buy relief or checkpoint). A distribution_in is state-independent (ECB × USD)
- * and does not advance it.
+ * (buy relief, conversion out or checkpoint). A distribution_in or sell_in is
+ * state-independent (ECB × USD) and does not advance it.
  */
 export function poolFrontier(records: readonly UsdPoolRecord[]): { order: PoolOrder; record: UsdPoolRecord } | null {
   let best: { order: PoolOrder; record: UsdPoolRecord } | null = null;
   for (const record of records) {
-    if (record.record === "event" && (record.state !== "committed" || record.kind === "distribution_in")) continue;
+    if (record.record === "event" && (record.state !== "committed" || record.kind === "distribution_in" || record.kind === "sell_in")) continue;
     const order = orderOf(record);
     if (best === null || compareOrder(order, best.order) > 0) best = { order, record };
   }
@@ -509,6 +509,7 @@ export async function validateUsdPool(params: ValidateUsdPoolParams): Promise<Us
   const frontier = poolFrontier(records.filter(record => samePool(record.pool_key, key)));
   for (const order of params.newRecords) {
     if (frontier && compareOrder(order, frontier.order) <= 0) {
+      if (compareOrder(order, orderOf(opening)) <= 0) return { ok: false, code: "usd_pool_before_opening" };
       return { ok: false, code: "usd_pool_backdated_event", detail: frontier.record.record === "event" ? frontier.record.document_number : frontier.record.document_number ?? `${frontier.record.kind}:${frontier.record.as_of}` };
     }
   }
@@ -610,32 +611,38 @@ export function poolStateAtEnd(snapshot: UsdPoolSnapshot): { usd_cents: number; 
 
 // ---- provisional projection -------------------------------------------------------
 
-export interface PoolSpendCommand {
+/**
+ * One pool command of a plan: an inflow adds a fixed EUR value (sell_in,
+ * distribution_in at ECB), an outflow relieves at average carrying value
+ * (buy_relief, conversion_out).
+ */
+export interface PoolCommand {
   ref: string;
   ts: number;
-  spend_usd_cents: number;
+  /** USD entering (> 0) or leaving (< 0) the pool. */
+  usd_delta_cents: number;
+  eur: { fixed: number } | "relief";
   /** A failure decided before the pool (ECB outcome, review row). */
   blocked?: string;
 }
 
 export type ProjectedPoolCommand =
-  | { ref: string; ok: true; relief_eur_cents: number; state_before: { usd_cents: number; eur_cents: number } }
+  | { ref: string; ok: true; eur_delta_cents: number; relief_eur_cents: number | null; state_before: { usd_cents: number; eur_cents: number } }
   | { ref: string; ok: false; code: string };
 
 /**
- * Walk the plan's pool-spending commands in (ts, ref) order; each relief is
- * computed from the provisional state the previous one left (committed events
- * before it plus this plan's earlier reliefs). The first failing command stops
- * every later one (usd_pool_prerequisite_failed).
+ * Walk the plan's pool commands in (ts, ref) order; each one starts from the
+ * provisional state the previous one left (committed events before it plus
+ * this plan's earlier commands). The first failing command stops every later
+ * one (usd_pool_prerequisite_failed); a command blocked on its own keeps its code.
  */
-export function projectPool(snapshot: UsdPoolSnapshot, commands: readonly PoolSpendCommand[]): ProjectedPoolCommand[] {
+export function projectPool(snapshot: UsdPoolSnapshot, commands: readonly PoolCommand[]): ProjectedPoolCommand[] {
   const ordered = [...commands].sort((a, b) => compareOrder(eventOrder(a.ref, a.ts), eventOrder(b.ref, b.ts)));
   const out: ProjectedPoolCommand[] = [];
   let plannedUsd = 0;
   let plannedEur = 0;
   let failed = false;
   for (const command of ordered) {
-    // A command blocked on its own keeps its own code; any other after a failure is prerequisite_failed.
     if (command.blocked !== undefined) {
       failed = true;
       out.push({ ref: command.ref, ok: false, code: command.blocked });
@@ -644,15 +651,28 @@ export function projectPool(snapshot: UsdPoolSnapshot, commands: readonly PoolSp
     if (failed) { out.push({ ref: command.ref, ok: false, code: "usd_pool_prerequisite_failed" }); continue; }
     const committed = poolStateBefore(snapshot, eventOrder(command.ref, command.ts));
     const state = { usd_cents: committed.usd_cents + plannedUsd, eur_cents: committed.eur_cents + plannedEur };
-    const relief = relieveCents(state, command.spend_usd_cents);
-    if (!relief.ok) {
-      failed = true;
-      out.push({ ref: command.ref, ok: false, code: relief.code });
-      continue;
+    let eurDelta: number;
+    let relief: number | null = null;
+    if (command.eur === "relief") {
+      const relieved = relieveCents(state, -command.usd_delta_cents);
+      if (!relieved.ok) {
+        failed = true;
+        out.push({ ref: command.ref, ok: false, code: relieved.code });
+        continue;
+      }
+      relief = relieved.value;
+      eurDelta = -relief;
+    } else {
+      if (!Number.isSafeInteger(command.usd_delta_cents) || command.usd_delta_cents <= 0 || !Number.isSafeInteger(command.eur.fixed)) {
+        failed = true;
+        out.push({ ref: command.ref, ok: false, code: "trade_amount_conflict" });
+        continue;
+      }
+      eurDelta = command.eur.fixed;
     }
-    plannedUsd -= command.spend_usd_cents;
-    plannedEur -= relief.value;
-    out.push({ ref: command.ref, ok: true, relief_eur_cents: relief.value, state_before: state });
+    plannedUsd += command.usd_delta_cents;
+    plannedEur += eurDelta;
+    out.push({ ref: command.ref, ok: true, eur_delta_cents: eurDelta, relief_eur_cents: relief, state_before: state });
   }
   return out;
 }

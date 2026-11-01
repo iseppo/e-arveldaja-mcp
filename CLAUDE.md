@@ -615,8 +615,13 @@ owner-approved opening checkpoint (`book_lightyear_fx_revaluation` `mode: "openi
 from the statement and valued at the ECB rate; set once — redoing it means deleting the pool's
 entries from the store), `distribution_in` events (retained USD distributions,
 `book_lightyear_distributions` `fx_source: "ecb"`; without a pool key or store they are reviews, never
-booked unlogged; a new one dated on/before the approved opening is held `usd_pool_before_opening`), `buy_relief` events (buys funded from the
-fund, `book_lightyear_trades`, relief at average carrying value, realised FX on 8500) and
+booked unlogged; a new one dated on/before the approved opening is held `usd_pool_before_opening`), `sell_in` events (a USD sell with no 1:1
+conversion keeps its net in the pool at the ECB rate; `book_lightyear_trades` needs its capital-gains row matched by
+identity — exact statement date+time, ticker, quantity — else `pool_sell_gains_unmatched`, which stops later pool
+commands; gain/loss = ECB consideration − Lightyear FIFO cost basis), `buy_relief` events (`book_lightyear_trades`: a USD
+buy with no 1:1 conversion is paid N:1 — at most one remaining EUR→USD conversion in [buy − 60 s, buy] with a smaller
+gross, pool part = buy gross − conversion USD — or 100 % from the pool; relief at average carrying value, realised FX
+= relief − ECB value of the pool part, on 8500) and
 revaluation checkpoints (`book_lightyear_fx_revaluation` `mode: "revalue"`, journal
 `LY-FX:<account>:USD:<date>`, quantity proof against the Lightyear holding). Every write runs
 under `withUsdPoolLock` (which drops the store's read cache once the lock is held, so records another

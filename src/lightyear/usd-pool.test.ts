@@ -7,6 +7,7 @@ import type { Journal } from "../types/api.js";
 import type { ApiContext } from "../tools/crud-tools.js";
 import {
   checkpointOrder,
+  compareOrder,
   endOfDaySeconds,
   eventOrder,
   lightyearAccountFromFileName,
@@ -110,9 +111,9 @@ describe("USD pool identity and helpers", () => {
   it("successive reliefs from 3.00 USD / 1.00 EUR give 0.33, 0.34, 0.33", () => {
     const snapshot = { pool_key: KEY, opening: opening(300, 100), base: opening(300, 100), events: [], snapshot_digest: "d" };
     const projected = projectPool(snapshot, [
-      { ref: "B1", ts: ts("2026-10-01"), spend_usd_cents: 100 },
-      { ref: "B2", ts: ts("2026-10-02"), spend_usd_cents: 100 },
-      { ref: "B3", ts: ts("2026-10-03"), spend_usd_cents: 100 },
+      { ref: "B1", ts: ts("2026-10-01"), usd_delta_cents: -100, eur: "relief" },
+      { ref: "B2", ts: ts("2026-10-02"), usd_delta_cents: -100, eur: "relief" },
+      { ref: "B3", ts: ts("2026-10-03"), usd_delta_cents: -100, eur: "relief" },
     ]);
     expect(projected.map(p => p.ok && p.relief_eur_cents)).toEqual([33, 34, 33]);
   });
@@ -120,15 +121,15 @@ describe("USD pool identity and helpers", () => {
   it("two full-pool buys: the first books, the second is insufficient; a failure stops later commands", () => {
     const snapshot = { pool_key: KEY, opening: opening(10000, 9000), base: opening(10000, 9000), events: [], snapshot_digest: "d" };
     expect(projectPool(snapshot, [
-      { ref: "B1", ts: ts("2026-10-01"), spend_usd_cents: 10000 },
-      { ref: "B2", ts: ts("2026-10-02"), spend_usd_cents: 10000 },
+      { ref: "B1", ts: ts("2026-10-01"), usd_delta_cents: -10000, eur: "relief" },
+      { ref: "B2", ts: ts("2026-10-02"), usd_delta_cents: -10000, eur: "relief" },
     ])).toEqual([
       expect.objectContaining({ ref: "B1", ok: true, relief_eur_cents: 9000 }),
       { ref: "B2", ok: false, code: "usd_pool_insufficient" },
     ]);
     expect(projectPool(snapshot, [
-      { ref: "B1", ts: ts("2026-10-01"), spend_usd_cents: 100, blocked: "ecb_rate_unavailable" },
-      { ref: "B2", ts: ts("2026-10-02"), spend_usd_cents: 100 },
+      { ref: "B1", ts: ts("2026-10-01"), usd_delta_cents: -100, eur: "relief", blocked: "ecb_rate_unavailable" },
+      { ref: "B2", ts: ts("2026-10-02"), usd_delta_cents: -100, eur: "relief" },
     ])).toEqual([
       { ref: "B1", ok: false, code: "ecb_rate_unavailable" },
       { ref: "B2", ok: false, code: "usd_pool_prerequisite_failed" },
@@ -145,6 +146,16 @@ describe("USD pool identity and helpers", () => {
     expect(poolFrontier(records)?.record).toMatchObject({ ref: "B-2" });
     expect(checkpointOrder("revaluation", "2026-10-20").rank).toBe(0);
   });
+
+  it("a later committed sell_in (fixed-EUR inflow) does not move the frontier: an earlier revaluation is not backdated (plan Q3)", () => {
+    const records: UsdPoolRecord[] = [
+      opening(100, 90),
+      event("B-1", "2026-10-10", "buy_relief", -10, -9, 1),
+      event("S-1", "2026-10-25", "sell_in", 1000, 800, 2),
+    ];
+    expect(poolFrontier(records)?.record).toMatchObject({ ref: "B-1" });
+    expect(compareOrder(checkpointOrder("revaluation", "2026-10-20"), poolFrontier(records)!.order)).toBeGreaterThan(0);
+  });
 });
 
 describe("validateUsdPool", () => {
@@ -160,7 +171,7 @@ describe("validateUsdPool", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.value.events).toHaveLength(2);
-    const [projected] = projectPool(result.value, [{ ref: "OR-BUY", ts: UNTIL.ts, spend_usd_cents: 905 }]);
+    const [projected] = projectPool(result.value, [{ ref: "OR-BUY", ts: UNTIL.ts, usd_delta_cents: -905, eur: "relief" }]);
     expect(projected).toMatchObject({ ok: true, relief_eur_cents: 805, state_before: { usd_cents: 10905, eur_cents: 9702 } });
   });
 
@@ -173,7 +184,7 @@ describe("validateUsdPool", () => {
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    const [projected] = projectPool(result.value, [{ ref: "OR-19", ts: until.ts, spend_usd_cents: 10000 }]);
+    const [projected] = projectPool(result.value, [{ ref: "OR-19", ts: until.ts, usd_delta_cents: -10000, eur: "relief" }]);
     expect(projected).toMatchObject({ ok: true, relief_eur_cents: 8500 });
   });
 
@@ -355,7 +366,7 @@ describe("recoverUsdPoolIntents — checkpoint write failure (review wpc 2)", ()
     const validated = await validateUsdPool({ api, store, key: KEY, until, newRecords: [until], statement: NO_STATEMENT, requireRegistered: false });
     expect(validated.ok).toBe(true);
     if (!validated.ok) return;
-    expect(projectPool(validated.value, [{ ref: "OR-LATER", ts: until.ts, spend_usd_cents: 5000 }])[0]).toMatchObject({ ok: true, relief_eur_cents: 4750 });
+    expect(projectPool(validated.value, [{ ref: "OR-LATER", ts: until.ts, usd_delta_cents: -5000, eur: "relief" }])[0]).toMatchObject({ ok: true, relief_eur_cents: 4750 });
   });
 });
 

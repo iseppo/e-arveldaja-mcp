@@ -82,11 +82,12 @@ export interface PoolToolEnv<P> {
   fetch: FetchMock;
   ecbCache: NonNullable<EcbRateDeps["cache"]>;
   store: ReturnType<typeof memoryUsdPoolStore>;
+  context: ReturnType<typeof createTestRuntimeSafetyContext>;
   run: (args?: Record<string, unknown>) => Promise<{ result: ToolResult; payload: P }>;
   book: (args?: Record<string, unknown>) => Promise<{ dry: { result: ToolResult; payload: P }; exec: { result: ToolResult; payload: P } }>;
 }
 
-export function setupPoolTool<P>(toolName: string, defaults: Record<string, unknown>, options: { fetch?: FetchMock; pool?: UsdPoolRecord[]; journals?: Journal[] } = {}): PoolToolEnv<P> {
+export function setupPoolTool<P>(toolName: string, defaults: Record<string, unknown>, options: { fetch?: FetchMock; pool?: UsdPoolRecord[]; journals?: Journal[]; store?: ReturnType<typeof memoryUsdPoolStore> } = {}): PoolToolEnv<P> {
   const server = { registerTool: vi.fn() };
   const ledger = new Map<number, Journal>((options.journals ?? []).map(j => [j.id!, structuredClone(j)]));
   const created: CreatedJournal[] = [];
@@ -109,8 +110,9 @@ export function setupPoolTool<P>(toolName: string, defaults: Record<string, unkn
   };
   const fetch = options.fetch ?? rateFetch();
   const ecbCache: NonNullable<EcbRateDeps["cache"]> = new Map();
-  const store = memoryUsdPoolStore(options.pool ?? []);
-  registerLightyearTools(server as unknown as Parameters<typeof registerLightyearTools>[0], api as unknown as ApiContext, createTestRuntimeSafetyContext(), {
+  const store = options.store ?? memoryUsdPoolStore(options.pool ?? []);
+  const context = createTestRuntimeSafetyContext();
+  registerLightyearTools(server as unknown as Parameters<typeof registerLightyearTools>[0], api as unknown as ApiContext, context, {
     ecb: { fetch, today: () => "2026-10-31", now: () => new Date("2026-10-31T08:00:00Z"), cache: ecbCache },
     usdPoolStore: store,
   });
@@ -126,5 +128,5 @@ export function setupPoolTool<P>(toolName: string, defaults: Record<string, unkn
     const exec = await run({ ...args, dry_run: false, plan_handle: (dry.payload as { plan_handle?: string }).plan_handle });
     return { dry, exec };
   };
-  return { api, ledger, create, created, fetch, ecbCache, store, run, book };
+  return { api, ledger, create, created, fetch, ecbCache, store, context, run, book };
 }

@@ -151,6 +151,7 @@ const H16_MESSAGES = {
   trade_amount_conflict: "The trade gross, net, or fee arithmetic is inconsistent.",
   trade_fee_unresolved: "The foreign-currency trade fee has no proven EUR conversion.",
   portfolio_arithmetic_overflow: "The portfolio arithmetic exceeds the supported exact bounds.",
+  usd_pool_funded: "This USD trade is settled through the USD held at Lightyear (a sale kept in USD, or a buy paid partly or fully from USD already there); book_lightyear_trades values it from the ECB rate and the USD pool.",
 } as const;
 
 const H17_MESSAGES = {
@@ -3618,7 +3619,7 @@ describe("H16 Lightyear handler provenance", () => {
     expect(vi.mocked(logAudit)).toHaveBeenCalledTimes(1);
   });
 
-  it("H16 legacy-trade-shortlist keeps evidence outside the rounded-cent tolerance rejected", async () => {
+  it("H16 legacy-trade-shortlist keeps evidence outside the rounded-cent tolerance out of a 1:1 pair (pool review)", async () => {
     mockedReadFile.mockResolvedValue(buildStatementCsv(h16LegacyTradeShortlistRows({ foreignGross: 85.016 })));
     const { api, handler } = setupLightyearTool("book_lightyear_trades");
 
@@ -3632,8 +3633,9 @@ describe("H16 Lightyear handler provenance", () => {
 
     expect(payload.created).toBe(0);
     expect(payload.skipped).toBe(1);
+    // Not a 1:1 pair; the buy is left to the USD pool (plan Q3), which this statement cannot key.
     expect(payload.warnings).toEqual(expect.arrayContaining([
-      expect.stringContaining("FX review [invalid_conversion_pair]"),
+      expect.stringContaining("FX review [usd_pool_account_unknown]"),
     ]));
     expect(api.journals.create).not.toHaveBeenCalled();
     expect(vi.mocked(logAudit)).not.toHaveBeenCalled();
@@ -3932,7 +3934,6 @@ describe("H16 Lightyear handler provenance", () => {
 
   it.each([
     ["missing EUR row", "invalid_conversion_pair", (rows: string[][]) => rows.slice(1)],
-    ["missing foreign row", "invalid_conversion_pair", (rows: string[][]) => [rows[0]!, rows[2]!]],
     ["duplicate EUR row", "invalid_conversion_pair", (rows: string[][]) => [rows[0]!, [...rows[0]!], rows[1]!, rows[2]!]],
     ["duplicate foreign row", "invalid_conversion_pair", (rows: string[][]) => [rows[0]!, rows[1]!, [...rows[1]!], rows[2]!]],
     ["third conversion row", "invalid_conversion_pair", (rows: string[][]) => [rows[0]!, rows[1]!, [...rows[1]!.slice(0, 6), "GBP", ...rows[1]!.slice(7)], rows[2]!]],
@@ -3960,10 +3961,6 @@ describe("H16 Lightyear handler provenance", () => {
       const secondForeign = [...rows[1]!]; secondForeign[1] = "CN-H16-SECOND";
       return [rows[0]!, rows[1]!, secondEur, secondForeign, rows[2]!];
     }],
-    // Gross moves away from the conversion's foreign gross while staying
-    // internally coherent (net = gross - fee), so the pair fails to shortlist
-    // rather than tripping the amount validator first.
-    ["foreign gross mismatch", "invalid_conversion_pair", (rows: string[][]) => { rows[2]![8] = "1400"; rows[2]![11] = "1398"; return rows; }],
     ["trade amount mismatch", "trade_amount_conflict", (rows: string[][]) => { rows[2]![11] = "1308.80"; return rows; }],
     ["negative trade fee", "trade_amount_conflict", (rows: string[][]) => { rows[2]![10] = "-2"; return rows; }],
   ])("H16 fails closed for %s", async (_label, code, mutate) => {
@@ -3981,6 +3978,26 @@ describe("H16 Lightyear handler provenance", () => {
 
     expect(warning).toContain(H16_MESSAGES[code as keyof typeof H16_MESSAGES]);
     expect(warning).toContain("<<UNTRUSTED_OCR_START:");
+    expect(payload.created).toBe(0);
+    expect(payload.skipped).toBe(1);
+    expect(api.journals.create).not.toHaveBeenCalled();
+    expect(vi.mocked(logAudit)).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    // Only the EUR leg remains: no USD arrives, so the buy is paid from the pool.
+    ["missing foreign row", (rows: string[][]) => [rows[0]!, rows[2]!]],
+    // The buy is larger than the conversion in the same second: an N:1 pool-funded buy.
+    ["foreign gross mismatch", (rows: string[][]) => { rows[2]![8] = "1400"; rows[2]![11] = "1398"; return rows; }],
+  ])("H16 %s is never a 1:1 pair: the USD buy is left to the pool and held for review", async (_label, mutate) => {
+    const rows = mutate(h16Pair().map(row => [...row]));
+    mockedReadFile.mockResolvedValue(buildStatementCsv(rows));
+    const { api, handler } = setupLightyearTool("book_lightyear_trades");
+    const result = await handler({ file_path: "/tmp/lightyear.csv", investment_account: 1550, broker_account: 1120, dry_run: false });
+    const payload = parseToolPayload<lightyearInvestments.LightyearTradesPayload>(result.content[0]!.text);
+
+    expect((payload.warnings ?? []).some(value => value.includes("FX review [usd_pool_account_unknown]"))).toBe(true);
+    expect((payload.warnings ?? []).some(value => value.includes("FX review [invalid_conversion_pair]"))).toBe(false);
     expect(payload.created).toBe(0);
     expect(payload.skipped).toBe(1);
     expect(api.journals.create).not.toHaveBeenCalled();
@@ -4401,6 +4418,7 @@ describe("M26 intrinsic portfolio outcomes", () => {
     type?: "Buy" | "Sell";
     quantity?: string;
     gross?: string;
+    ccy?: string;
   }): string[] => {
     const gross = options.gross ?? "20";
     const quantity = options.quantity ?? "2";
@@ -4411,7 +4429,7 @@ describe("M26 intrinsic portfolio outcomes", () => {
       options.isin ?? `ISIN-${options.ticker ?? "MSFT"}`,
       options.type ?? "Buy",
       quantity,
-      "USD",
+      options.ccy ?? "USD",
       String(Number(gross) / Number(quantity)),
       gross,
       "",
@@ -4490,7 +4508,7 @@ describe("M26 intrinsic portfolio outcomes", () => {
       expect.objectContaining({
         ticker: "MSFT",
         status: "review_required",
-        review_reason: { code: "invalid_conversion_pair", message: H16_MESSAGES.invalid_conversion_pair },
+        review_reason: { code: "usd_pool_funded", message: H16_MESSAGES.usd_pool_funded },
       }),
     ]);
     expect(payload.skipped).toEqual([]);
@@ -4506,7 +4524,7 @@ describe("M26 intrinsic portfolio outcomes", () => {
     ]);
 
     expect(payload.review_required).toEqual([
-      expect.objectContaining({ type: "Sell", review_reason: { code: "invalid_conversion_pair", message: H16_MESSAGES.invalid_conversion_pair } }),
+      expect.objectContaining({ type: "Sell", review_reason: { code: "usd_pool_funded", message: H16_MESSAGES.usd_pool_funded } }),
     ]);
     expect(payload.previewed).toEqual([
       expect.objectContaining({
@@ -4633,7 +4651,10 @@ describe("M26 intrinsic portfolio outcomes", () => {
     const publicCases = [
       { rows: [eurTrade({ reference: "OR-PARITY-EUR-M26", ticker: "AAPL", gross: "100", fee: "2" })], bucket: "booked_basis", booking: "would_create" },
       { rows: h16Pair({ tradeReference: "OR-PARITY-USD-M26", conversionReference: "CN-PARITY-USD-M26", rates: ["", "0.86423"] }), bucket: "booked_basis", booking: "would_create" },
-      { rows: [unmatchedUsdTrade({ reference: "OR-PARITY-REVIEW-M26", ticker: "AAPL" })], bucket: "review_required", booking: "skipped", code: "invalid_conversion_pair" },
+      // A non-USD trade with no conversion has no pool: invalid_conversion_pair in every tool.
+      { rows: [unmatchedUsdTrade({ reference: "OR-PARITY-REVIEW-M26", ticker: "AAPL", ccy: "GBP" })], bucket: "review_required", booking: "skipped", code: "invalid_conversion_pair" },
+      // A USD trade with no conversion is a pool trade (plan Q3): review in the read-only tools, skipped by booking.
+      { rows: [unmatchedUsdTrade({ reference: "OR-PARITY-POOL-M26", ticker: "AAPL" })], bucket: "review_required", booking: "skipped" },
       { rows: impossibleTradeFeeRows("OR-PARITY-FEE-M26"), bucket: "review_required", booking: "skipped", code: "trade_amount_conflict" },
     ];
     for (const scenario of publicCases) {
@@ -6118,7 +6139,7 @@ describe("Lightyear trade warnings for rows that still matter (#7)", () => {
     const payload = parseToolPayload<lightyearInvestments.LightyearTradesPayload>((await handler({
       file_path: "/tmp/lightyear.csv", investment_account: 1550, broker_account: 1120,
     })).content[0]!.text);
-    const fxWarnings = (payload.warnings ?? []).filter(warning => warning.includes("invalid_conversion_pair"));
+    const fxWarnings = (payload.warnings ?? []).filter(warning => warning.includes("FX review ["));
     expect(fxWarnings).toHaveLength(1);
     expect(fxWarnings[0]).toContain("OR-FX-NEW");
     expect(payload.suppressed_warnings).toEqual({ already_booked: 2, skipped_ticker: 1 });

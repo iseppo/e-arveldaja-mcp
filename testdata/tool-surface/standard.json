@@ -2,8 +2,8 @@
   "profile": "standard",
   "measurement": {
     "toolCount": 127,
-    "toolsListBytes": 145317,
-    "descriptionsBytes": 20243,
+    "toolsListBytes": 145523,
+    "descriptionsBytes": 20449,
     "inputSchemasBytes": 94489,
     "largestTool": {
       "name": "import_wise_transactions",
@@ -5009,7 +5009,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Book Lightyear stock Buy/Sell trades. DRY RUN by default. For sells, capital_gains_file is required for FIFO cost basis and recognized gain/loss. A USD buy paid partly or fully from the USD cash fund (ICSUSSDP sells within 60 s) is valued at the dealt rate for the converted part and the ECB rate for the fund part, relieves the USD pool at average carrying value and books the difference on fx_account.",
+      "description": "Book Lightyear stock Buy/Sell trades. DRY RUN by default. For sells, capital_gains_file is required for FIFO cost basis and recognized gain/loss. A USD trade with no 1:1 conversion goes through the USD pool (the USD held at Lightyear): a sell kept in USD is valued at the ECB rate and matched to its capital-gains row by exact date and time; a buy paid partly (at most one EUR→USD conversion up to 60 s before it) or fully from the pool is valued at the dealt rate for the converted part and the ECB rate for the pool part, relieves the pool at average carrying value and books the difference on fx_account.",
       "execution": {
         "taskSupport": "forbidden"
       },
