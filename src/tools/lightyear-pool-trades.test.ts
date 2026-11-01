@@ -356,6 +356,18 @@ describe("book_lightyear_trades — USD sells kept in USD and pool-paid buys (pl
     }
   });
 
+  it("same-second pool buys execute in the order they are valued (timestamp, then reference), not CSV order", async () => {
+    // Opening 3 USD / €1: valued A then B, A relieves €0.33 and B €0.34 — so A must also be created first,
+    // or a stop after B would leave B's relief computed on a state that never existed.
+    load([buy("15/04/2026 10:00:00", "OR-TESTORDB", "1.00"), buy("15/04/2026 10:00:00", "OR-TESTORDA", "1.00")]);
+    const env = tradesTool({ pool: [poolOpening(300, 100, "3", "2026-03-31")], fetch: rateFetch("1.25") });
+    const { dry, exec } = await env.book();
+    expect(exec.result.isError).toBeFalsy();
+    expect(resultFor(dry.payload, "OR-TESTORDA")).toMatchObject({ pool: { relief_eur: 0.33 } });
+    expect(resultFor(dry.payload, "OR-TESTORDB")).toMatchObject({ pool: { relief_eur: 0.34 } });
+    expect(env.created.map(entry => entry.document_number)).toEqual(["LY:OR-TESTORDA", "LY:OR-TESTORDB"]);
+  });
+
   it("T-FC3: with no pool key (account not in the file name) a pool sell is a review and nothing is written", async () => {
     load([S, B], [S_GAIN]);
     const env = fcTool();

@@ -3676,6 +3676,10 @@ function computeTradesProjection(params: TradesProjectionParams): TradesProjecti
       duplicates.push({ reference: t.reference, ticker: t.ticker, date: t.date });
     }
   }
+  // Within one second, commands follow the reference — the (ts, ref) order the USD pool projection
+  // values in — so execution and the conversion merge below use that same order (review 2026-11-01 #5).
+  newTrades.sort((a, b) => a.date.localeCompare(b.date) || a.datetime.localeCompare(b.datetime) ||
+    (a.reference < b.reference ? -1 : a.reference > b.reference ? 1 : 0));
 
   const planned: PlannedTradeRow[] = [];
   const commands: TradeCommand[] = [];
