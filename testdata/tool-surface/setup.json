@@ -2,9 +2,9 @@
   "profile": "setup",
   "measurement": {
     "toolCount": 129,
-    "toolsListBytes": 145284,
-    "descriptionsBytes": 19951,
-    "inputSchemasBytes": 94263,
+    "toolsListBytes": 145920,
+    "descriptionsBytes": 20209,
+    "inputSchemasBytes": 94641,
     "largestTool": {
       "name": "import_wise_transactions",
       "bytes": 5627
@@ -5139,7 +5139,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Book Lightyear stock Buy/Sell trades. DRY RUN by default. For sells, capital_gains_file is required for FIFO cost basis and recognized gain/loss.",
+      "description": "Book Lightyear stock Buy/Sell trades. DRY RUN by default. For sells, capital_gains_file is required for FIFO cost basis and recognized gain/loss. A USD buy paid partly or fully from the USD cash fund (ICSUSSDP sells within 60 s) is valued at the dealt rate for the converted part and the ECB rate for the fund part, relieves the USD pool at average carrying value and books the difference on fx_account.",
       "execution": {
         "taskSupport": "forbidden"
       },
@@ -5179,6 +5179,10 @@
             "description": "Opaque Lightyear AccountStatement file reference.",
             "type": "string"
           },
+          "fx_account": {
+            "description": "Realised FX gain/loss account for buys paid from the USD cash fund (default: auto-detect 'Kasum/kahjum valuutakursi muutustest', standard 8500).",
+            "type": "number"
+          },
           "gain_loss_account": {
             "description": "Realized gain account, credited on a sell gain (default: auto-detect 'Tulu aktsiatelt ja osadelt', standard 8330)",
             "type": "number"
@@ -5190,6 +5194,11 @@
           "investment_dimension_id": {
             "description": "Dimension ID for investment account (accounts_dimensions_id)",
             "type": "number"
+          },
+          "lightyear_account": {
+            "description": "Lightyear account id (e.g. CHZELUU) for the USD pool when the statement's file name does not carry it.",
+            "pattern": "^[A-Z0-9]{3,32}$",
+            "type": "string"
           },
           "loss_account": {
             "description": "Realized loss account, debited on a sell loss (default: auto-detect 'Kulu aktsiatelt ja osadelt', standard 8335)",

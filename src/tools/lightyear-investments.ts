@@ -48,6 +48,7 @@ import {
   resolveSecuritiesIncomeAccount,
   resolveSecuritiesExpenseAccount,
   resolveOtherFinancialIncomeAccount,
+  resolveFxAccount,
 } from "../account-resolution.js";
 import { BookingGuard, formatDocNumber, type DocKey } from "../booking-guard.js";
 import { isStrictDate } from "../strict-date.js";
@@ -80,8 +81,13 @@ import {
   poolKeyId,
   usdPoolRecordKey,
   withUsdPoolLock,
+  validateUsdPool,
+  projectPool,
+  usdCentsToEurCents,
   USD_POOL_REVIEW_MESSAGES,
   type PoolKey,
+  type PoolSpendCommand,
+  type StatementPoolEvent,
   type UsdPoolEvent,
   type UsdPoolReviewCode,
   type UsdPoolStore,
@@ -156,6 +162,7 @@ export type FxReviewCode =
   | "reference_journal_date_mismatch"
   | "legacy_check_incomplete"
   | "portfolio_arithmetic_overflow"
+  | "usd_pool_funded"
   | FxFailureCode
   | "fx_rate_unbound"
   | UsdPoolReviewCode;
@@ -189,6 +196,7 @@ export const FX_REVIEW_MESSAGES: Record<FxReviewCode, string> = {
   reference_journal_date_mismatch: "A journal numbered with this row's bare Lightyear reference exists within a day of the row's date but not on it (e.g. on the settlement day); it may be this row's booking. Its amounts are not checked. Not booked automatically — if it is this row, set its document_number to LY: followed by this row's reference (e.g. LY:RW-ABC123); if it is unrelated, book this row by hand with create_journal and that document_number.",
   legacy_check_incomplete: "The legacy-booking check for this row was cut short by its request budget, so an existing booking under another document number cannot be ruled out. Not booked automatically — check the broker account for this date and amount, or rerun with a shorter statement.",
   portfolio_arithmetic_overflow: "The portfolio arithmetic exceeds the supported exact bounds.",
+  usd_pool_funded: "This buy is paid partly or fully from the USD cash fund (ICSUSSDP sells next to it); book_lightyear_trades values it from the ECB rate and the USD pool.",
   ecb_rate_unavailable: "No ECB reference rate could be read for this day (no publication within 7 days, or the ECB data API did not answer); nothing is guessed. Retry the dry run later.",
   ecb_rate_not_final: "The ECB reference rate for this day is not final yet (today or later); retry the dry run on a later day.",
   ecb_response_invalid: "The ECB data API answered with data that failed validation; nothing is guessed.",
@@ -269,6 +277,39 @@ interface InvestmentTrade {
   conversion_ref: string | null;
   conversion_row_indexes: number[];
   cash_equivalent: boolean;
+  /** A USD buy paid partly (N:1) or fully from the USD cash fund (C4). */
+  funding?: TradeFunding;
+}
+
+/** Statement evidence of a buy funded from the USD cash fund (integer cents). */
+export interface TradeFunding {
+  ts: number;
+  conversion_ref: string | null;
+  sell_refs: string[];
+  sell_row_indexes: number[];
+  funding_ticker: string;
+  /** Σ funding-sell nets: the USD taken from the pool. */
+  pool_usd_cents: number;
+  /** EUR leg net of the conversion (dealt rate); 0 when 100 % pool-funded. */
+  conv_eur_cents: number;
+  gross_usd_cents: number;
+  fee_usd_cents: number;
+  /** Set by book_lightyear_trades once the ECB rate and the pool relief are known. */
+  valuation?: FundedTradeValuation;
+}
+
+export interface FundedTradeValuation {
+  ecb: EcbRateRecord;
+  pool_ecb_eur_cents: number;
+  relief_eur_cents: number;
+  total_eur_cents: number;
+  fee_eur_cents: number;
+  fx_fee_eur_cents: number;
+  investment_eur_cents: number;
+  /** relief − ECB value: > 0 realised loss, < 0 realised gain. */
+  fx_eur_cents: number;
+  broker_credit_cents: number;
+  snapshot_digest: string;
 }
 
 function parseNumber(s: string): number {
@@ -988,7 +1029,21 @@ interface TradeExtractionResult {
   trades: InvestmentTrade[];
   warnings: TradeExtractionWarning[];
   consumedConversionRefs: Set<string>;
+  /** Conversions claimed by the funded pass (reserved from distributions too). */
+  fundedConversionRefs: Set<string>;
 }
+
+export interface TradeExtractionOptions {
+  /** Cash-fund tickers whose sells can fund a USD buy (skipped tickers only). */
+  fundingTickers?: ReadonlySet<string>;
+}
+
+/** Funding tickers for a run: known cash funds that the run skips. */
+export function lightyearFundingTickers(skipSet: ReadonlySet<string>): Set<string> {
+  return new Set([...KNOWN_CASH_EQUIVALENT_TICKERS].filter(ticker => skipSet.has(ticker)));
+}
+
+const FUNDING_WINDOW_SECONDS = 60;
 
 /**
  * The cash that moves through the broker balance in the trade's own currency —
@@ -1085,7 +1140,7 @@ function fxReviewWarning(
   return `${orderContext}: FX review [${reason.code}] ${reason.message}${conversionContext}`;
 }
 
-function extractTrades(rows: AccountStatementRow[]): TradeExtractionResult {
+function extractTrades(rows: AccountStatementRow[], options: TradeExtractionOptions = {}): TradeExtractionResult {
   // Index conversion rows by reference for quick lookup
   const conversionsByRef = new Map<string, AccountStatementRow[]>();
   for (const row of rows) {
@@ -1101,6 +1156,8 @@ function extractTrades(rows: AccountStatementRow[]): TradeExtractionResult {
   const fxWarnings: TradeExtractionWarning[] = [];
 
   const trades: InvestmentTrade[] = [];
+  /** USD buys with no 1:1 conversion candidate at all: the funded pass's input. */
+  const unpairedBuys: Array<{ trade: InvestmentTrade; row: AccountStatementRow; warningIndex: number }> = [];
 
   for (const row of rows) {
     if (row.type !== "Buy" && row.type !== "Sell") continue;
@@ -1159,6 +1216,9 @@ function extractTrades(rows: AccountStatementRow[]): TradeExtractionResult {
     if (shortlisted.length !== 1) {
       const reason = fxReason("invalid_conversion_pair");
       trade.fx_review_reason = reason;
+      if (shortlisted.length === 0 && row.type === "Buy" && tradeCurrency === "USD") {
+        unpairedBuys.push({ trade, row, warningIndex: fxWarnings.length });
+      }
       fxWarnings.push({ reference: trade.reference, ticker: trade.ticker, text: fxReviewWarning(trade.reference, reason) });
       trades.push(trade);
       continue;
@@ -1216,9 +1276,117 @@ function extractTrades(rows: AccountStatementRow[]): TradeExtractionResult {
     trades.push(trade);
   }
 
+  const fundedConversionRefs = new Set<string>();
+  if (options.fundingTickers && options.fundingTickers.size > 0 && unpairedBuys.length > 0) {
+    fundedPass(rows, conversionsByRef, consumedConversions, fundedConversionRefs, unpairedBuys, options.fundingTickers, fxWarnings);
+  }
+
   // Sort by date ascending
   trades.sort((a, b) => a.date.localeCompare(b.date) || a.datetime.localeCompare(b.datetime));
-  return { trades, warnings: fxWarnings, consumedConversionRefs: consumedConversions };
+  return { trades, warnings: fxWarnings, consumedConversionRefs: consumedConversions, fundedConversionRefs };
+}
+
+/**
+ * Second pass (C4) over USD buys the 1:1 pass left without any candidate:
+ * funding sells = unconsumed Sells of a funding ticker in the trade currency
+ * within ±60 s; a conversion qualifies when its foreign gross plus Σ funding
+ * sell nets equals the buy gross to the cent. Exactly one qualifying
+ * conversion → N:1; none and Σ sells = gross → 100 % pool-funded; anything
+ * else stays invalid_conversion_pair. A funded buy is a usd_pool_funded review
+ * until book_lightyear_trades values it.
+ */
+function fundedPass(
+  rows: readonly AccountStatementRow[],
+  conversionsByRef: ReadonlyMap<string, AccountStatementRow[]>,
+  consumedConversions: Set<string>,
+  fundedConversionRefs: Set<string>,
+  unpairedBuys: ReadonlyArray<{ trade: InvestmentTrade; row: AccountStatementRow; warningIndex: number }>,
+  fundingTickers: ReadonlySet<string>,
+  fxWarnings: TradeExtractionWarning[],
+): void {
+  const consumedSells = new Set<number>();
+  const sells = rows.filter(row => row.type === "Sell" && fundingTickers.has(row.ticker));
+  for (const { trade, row, warningIndex } of unpairedBuys) {
+    const ts = lightyearTimestampSeconds(row.date);
+    const grossCents = moneyToSafeCents(Math.abs(row.gross_amount));
+    const feeCents = moneyToSafeCents(row.fee);
+    if (ts === null || grossCents === null || feeCents === null) continue;
+    const funding = sells.filter(sell => {
+      if (consumedSells.has(sell.row_index) || normalizedCurrency(sell.ccy) !== "USD") return false;
+      const sellTs = lightyearTimestampSeconds(sell.date);
+      return sellTs !== null && Math.abs(sellTs - ts) <= FUNDING_WINDOW_SECONDS;
+    });
+    if (funding.length === 0) continue;
+    let poolCents = 0;
+    let poolSafe = true;
+    for (const sell of funding) {
+      const cents = moneyToSafeCents(Math.abs(sell.net_amount));
+      if (cents === null || cents <= 0) { poolSafe = false; break; }
+      poolCents += cents;
+    }
+    if (!poolSafe || poolCents <= 0 || poolCents > grossCents) continue;
+    const day = rawStatementDatePrefix(row.date);
+    const qualifying: Array<{ ref: string; rows: AccountStatementRow[] }> = [];
+    for (const [ref, conversionRows] of conversionsByRef) {
+      if (consumedConversions.has(ref)) continue;
+      const matches = conversionRows.some(conversionRow => {
+        if (normalizedCurrency(conversionRow.ccy) !== "USD" || rawStatementDatePrefix(conversionRow.date) !== day) return false;
+        if (!conversionMatchesTradeDirection(row, conversionRow)) return false;
+        const foreignCents = moneyToSafeCents(Math.abs(conversionRow.gross_amount));
+        return foreignCents !== null && foreignCents < grossCents && foreignCents + poolCents === grossCents;
+      });
+      if (matches) qualifying.push({ ref, rows: conversionRows });
+    }
+    const base: Omit<TradeFunding, "conversion_ref" | "conv_eur_cents"> = {
+      ts,
+      sell_refs: funding.map(sell => sell.reference),
+      sell_row_indexes: funding.map(sell => sell.row_index),
+      funding_ticker: funding[0]!.ticker,
+      pool_usd_cents: poolCents,
+      gross_usd_cents: grossCents,
+      fee_usd_cents: feeCents,
+    };
+    let claimed: TradeFunding | null = null;
+    if (qualifying.length === 0 && poolCents === grossCents) {
+      claimed = { ...base, conversion_ref: null, conv_eur_cents: 0 };
+      trade.fx_fee_eur = 0;
+    } else if (qualifying.length === 1) {
+      const candidate = qualifying[0]!;
+      const eurRows = candidate.rows.filter(conversionRow => normalizedCurrency(conversionRow.ccy) === "EUR");
+      const foreignRows = candidate.rows.filter(conversionRow => normalizedCurrency(conversionRow.ccy) === "USD");
+      if (candidate.rows.length !== 2 || eurRows.length !== 1 || foreignRows.length !== 1) continue;
+      const eurConv = eurRows[0]!;
+      const foreignConv = foreignRows[0]!;
+      if (validateConversionAmounts(eurConv, foreignConv)) continue;
+      const resolution = resolveFxPair(Math.abs(eurConv.net_amount), Math.abs(foreignConv.net_amount), [eurConv.fx_rate, foreignConv.fx_rate]);
+      if (!resolution.ok) continue;
+      const fxFee = fxFeeToEur(eurConv, foreignConv, resolution);
+      const convEurCents = moneyToSafeCents(Math.abs(eurConv.net_amount));
+      if (fxFee === null || convEurCents === null) continue;
+      claimed = { ...base, conversion_ref: candidate.ref, conv_eur_cents: convEurCents };
+      trade.eur_amount = Math.abs(eurConv.net_amount);
+      trade.fx_rate = resolution.rate;
+      trade.fx_orientation = resolution.orientation;
+      trade.fx_fee_eur = fxFee;
+      trade.conversion_ref = candidate.ref;
+      trade.conversion_row_indexes = [eurConv.row_index, foreignConv.row_index];
+      consumedConversions.add(candidate.ref);
+      fundedConversionRefs.add(candidate.ref);
+    }
+    if (claimed === null) continue;
+    for (const index of claimed.sell_row_indexes) consumedSells.add(index);
+    trade.funding = claimed;
+    const reason = fxReason("usd_pool_funded");
+    trade.fx_review_reason = reason;
+    fxWarnings[warningIndex] = { reference: trade.reference, ticker: trade.ticker, text: fxReviewWarning(trade.reference, reason, claimed.conversion_ref ?? undefined) };
+  }
+}
+
+/** Conversions a distribution must never claim: trade-reserved by amount plus the funded pass's (C4 1b). */
+export function tradeReservedConversionRefsWithFunding(rows: AccountStatementRow[], fundingTickers: ReadonlySet<string>): ReadonlySet<string> {
+  const reserved = new Set(collectTradeReservedConversionRefs(rows));
+  for (const ref of extractTrades(rows, { fundingTickers }).fundedConversionRefs) reserved.add(ref);
+  return reserved;
 }
 
 export { extractTrades as extractTradesForTesting };
@@ -2886,6 +3054,16 @@ function sandboxResultRow<T extends Record<string, unknown>>(row: T): T {
   if (typeof row.ticker === "string") wrapped.ticker = sandboxExternalText(row.ticker) ?? row.ticker;
   if (typeof row.isin === "string") wrapped.isin = sandboxExternalText(row.isin) ?? row.isin;
   if (typeof row.currency === "string") wrapped.currency = sandboxExternalText(row.currency) ?? row.currency;
+  const funding = row.funding;
+  if (funding && typeof funding === "object" && !Array.isArray(funding)) {
+    const f = funding as Record<string, unknown>;
+    wrapped.funding = {
+      ...f,
+      ...(typeof f.conversion_reference === "string" ? { conversion_reference: sandboxExternalText(f.conversion_reference) } : {}),
+      ...(Array.isArray(f.sell_references) ? { sell_references: f.sell_references.map(ref => typeof ref === "string" ? sandboxExternalText(ref) : ref) } : {}),
+      ...(typeof f.funding_ticker === "string" ? { funding_ticker: sandboxExternalText(f.funding_ticker) ?? f.funding_ticker } : {}),
+    };
+  }
   const provenance = row.fx_provenance;
   if (provenance && typeof provenance === "object" && !Array.isArray(provenance)) {
     const p = provenance as Record<string, unknown>;
@@ -2911,6 +3089,21 @@ interface TradeResultRow {
   lightyear_capital_gains_eur?: number;
   skip_reason?: string;
   candidate_journal_ids?: number[];
+  /** C4: a buy paid partly or fully from the USD cash fund. */
+  funding?: TradeResultFunding;
+  /** C4: realised FX of the pool part (relief − ECB value). */
+  fx_result?: { account: number; amount: number; kind: "gain" | "loss" };
+}
+
+export interface TradeResultFunding {
+  conversion_reference: string | null;
+  sell_references: string[];
+  funding_ticker: string;
+  pool_usd: number;
+  pool_ecb_eur: number;
+  relief_eur: number;
+  ecb: { rate: string; rate_date: string; requested_date: string };
+  fx_rate_text: string;
 }
 
 interface TradeCommand {
@@ -2925,6 +3118,10 @@ interface TradeCommand {
   auditDetails: Record<string, unknown>;
   /** Review fields without postings; see reviewProjectionWithPostings. */
   reviewProjection: PlanRecord;
+  /** C4: canonical funding evidence for the fingerprint. */
+  funding?: PlanRecord;
+  /** C4: the buy_relief event committed at execute. */
+  poolEvent?: PendingPoolEvent;
 }
 
 type PlannedTradeRow =
@@ -2958,6 +3155,10 @@ interface TradesProjectionParams {
   gainAccount: number;
   lossAccount: number;
   feeAccount: number;
+  /** C4: realised FX account (8500). */
+  fxAccount?: number;
+  /** C4: pool the funded buys relieve. */
+  poolKey?: PoolKey | null;
 }
 
 function computeTradesProjection(params: TradesProjectionParams): TradesProjection {
@@ -2987,7 +3188,9 @@ function computeTradesProjection(params: TradesProjectionParams): TradesProjecti
   const bookingReadiness = (t: InvestmentTrade): TradeIntrinsicReadiness =>
     statementDay(t.datetime) === null
       ? { kind: "review_required", reason: fxReason("invalid_date") }
-      : classifyTradeIntrinsicReadiness(t);
+      : t.funding?.valuation && t.fx_review_reason === null
+        ? { kind: "ready", converted_trade_fee_eur: t.funding.valuation.fee_eur_cents / 100 }
+        : classifyTradeIntrinsicReadiness(t);
   const keptTrades = new Set<InvestmentTrade>();
   const conflictedRefs = new Set<string>();
   for (const [reference, group] of byRef) {
@@ -3046,6 +3249,72 @@ function computeTradesProjection(params: TradesProjectionParams): TradesProjecti
 
     const tradeFeeEur = readiness.converted_trade_fee_eur;
     const postings: LyPosting[] = [];
+
+    const valuation = trade.funding?.valuation;
+    if (trade.type === "Buy" && trade.funding && valuation && params.poolKey && params.fxAccount !== undefined) {
+      // C4: D investment / D trade fee / D conversion fee / ±FX / C broker =
+      // EUR cash out (dealt conversion incl. its fee) + pool relief.
+      const funding = trade.funding;
+      const cents = (value: number) => value / 100;
+      postings.push({ accounts_id: investment_account, ...investmentDim, type: "D", amount: cents(valuation.investment_eur_cents) });
+      if (valuation.fee_eur_cents > 0) postings.push({ accounts_id: feeAccount, type: "D", amount: cents(valuation.fee_eur_cents) });
+      if (valuation.fx_fee_eur_cents > 0) postings.push({ accounts_id: feeAccount, type: "D", amount: cents(valuation.fx_fee_eur_cents) });
+      if (valuation.fx_eur_cents > 0) postings.push({ accounts_id: params.fxAccount, type: "D", amount: cents(valuation.fx_eur_cents) });
+      if (valuation.fx_eur_cents < 0) postings.push({ accounts_id: params.fxAccount, type: "C", amount: cents(-valuation.fx_eur_cents) });
+      postings.push({ accounts_id: broker_account, ...brokerDim, type: "C", amount: cents(valuation.broker_credit_cents) });
+      const poolUsd = cents(funding.pool_usd_cents);
+      const fxInfo = trade.fx_rate ? ` (${trade.ccy} FX ${trade.fx_rate})` : "";
+      const title = `Lightyear Buy: ${trade.quantity.toFixed(6)} ${trade.ticker}${fxInfo} + ${funding.funding_ticker} ${poolUsd.toFixed(2)} ${trade.ccy}`;
+      const ecb = { rate: valuation.ecb.rate, rate_date: valuation.ecb.rate_date, requested_date: valuation.ecb.requested_date };
+      const fxResult = valuation.fx_eur_cents === 0
+        ? undefined
+        : { account: params.fxAccount, amount: cents(Math.abs(valuation.fx_eur_cents)), kind: valuation.fx_eur_cents > 0 ? "loss" as const : "gain" as const };
+      const resultRow: TradeResultRow = {
+        reference: trade.reference, ticker: trade.ticker, type: trade.type, date: trade.date,
+        eur_amount: cents(valuation.total_eur_cents), status: "would_create",
+        funding: {
+          conversion_reference: funding.conversion_ref,
+          sell_references: funding.sell_refs,
+          funding_ticker: funding.funding_ticker,
+          pool_usd: poolUsd,
+          pool_ecb_eur: cents(valuation.pool_ecb_eur_cents),
+          relief_eur: cents(valuation.relief_eur_cents),
+          ecb,
+          fx_rate_text: `${ecb.rate} USD/EUR ECB ${ecb.rate_date}`,
+        },
+        ...(fxResult ? { fx_result: fxResult } : {}),
+      };
+      const fundingRecord = {
+        conversion_reference: funding.conversion_ref,
+        sell_references: funding.sell_refs,
+        pool_usd_cents: funding.pool_usd_cents,
+        ecb: { ...ecb, series: valuation.ecb.series },
+        relief_eur_cents: valuation.relief_eur_cents,
+        pool_snapshot_digest: valuation.snapshot_digest,
+      } as unknown as PlanRecord;
+      commands.push({
+        reference: trade.reference, date: trade.date, ticker: trade.ticker, tradeType: "Buy",
+        title, postings, resultRow,
+        auditSummary: `Lightyear Buy: ${trade.ticker} ${trade.quantity} @ ${cents(valuation.total_eur_cents)} EUR (${poolUsd} USD from the cash fund)`,
+        auditDetails: {
+          effective_date: trade.date, ticker: trade.ticker, type: "Buy", amount: cents(valuation.total_eur_cents),
+          funding: fundingRecord, ...(fxResult ? { fx_result: fxResult } : {}),
+          postings: postings.map(p => ({ accounts_id: p.accounts_id, type: p.type, amount: p.amount })),
+        },
+        reviewProjection: stripUndefinedDeep({
+          reference: trade.reference, ticker: trade.ticker, type: "Buy", date: trade.date,
+          eur_amount: cents(valuation.total_eur_cents), funding: fundingRecord, fx_result: fxResult,
+        }) as PlanRecord,
+        funding: fundingRecord,
+        poolEvent: {
+          record: "event", pool_key: params.poolKey, ref: trade.reference, ts: funding.ts, kind: "buy_relief",
+          usd_cents: -funding.pool_usd_cents, eur_cents: -valuation.relief_eur_cents,
+          document_number: `LY:${trade.reference}`, journal_broker_net_cents: -valuation.broker_credit_cents,
+        },
+      });
+      planned.push({ kind: "command", command: commands[commands.length - 1]! });
+      continue;
+    }
 
     if (trade.type === "Buy") {
       // `eur_amount` already contains the trade fee — for an FX buy it is the EUR
@@ -3207,6 +3476,7 @@ function tradesFingerprint(projection: TradesProjection, normalizedArgs: PlanRec
       type: command.tradeType,
       title: command.title,
       postings: command.postings,
+      ...(command.funding ? { funding: command.funding } : {}),
     })),
     skipped: projection.planned
       .filter((row): row is { kind: "result"; row: TradeResultRow } => row.kind === "result")
@@ -3658,6 +3928,7 @@ interface TradesRenderInput {
   executionReport?: PlanExecutionReport;
   createdByIndex?: LightyearCreatedByIndex;
   pendingDuplicates?: LightyearPendingDuplicateJournal[];
+  usdPoolNotes?: string[];
 }
 
 export interface LightyearSuppressedWarnings {
@@ -3674,8 +3945,11 @@ export type LightyearTradesPayload = Partial<LightyearDraftConfirmationFields> &
   skipped: number;
   duplicates_skipped: number;
   duplicate_refs: Array<{ reference: string | undefined; ticker: string; date: string }>;
-  results: Array<Record<string, unknown>>;
+  /** Rows; a pool-funded buy carries `funding` (references wrapped) and `fx_result`. */
+  results: Array<Record<string, unknown> & { funding?: TradeResultFunding; fx_result?: { account: number; amount: number; kind: "gain" | "loss" } }>;
   accounts: { investment: number; broker: number; gain: number; loss: number; fee: number };
+  /** USD cash-fund pool notes (commit deferred / intent left). */
+  usd_pool_notes?: string[];
   /** How this tool books fees (fixed policy; `account` is the resolved fee account). */
   fee_policy: { trade_fee: "expensed"; fx_conversion_fee: "expensed"; account: number; cost_basis: "fee_exclusive" };
   warnings?: string[];
@@ -3727,6 +4001,7 @@ function renderTradesPayload(input: TradesRenderInput): LightyearTradesPayload {
     },
     fee_policy: { trade_fee: "expensed", fx_conversion_fee: "expensed", account: projection.accounts.fee, cost_basis: "fee_exclusive" },
     ...(projection.warnings.length > 0 && { warnings: projection.warnings }),
+    ...(input.usdPoolNotes !== undefined && input.usdPoolNotes.length > 0 ? { usd_pool_notes: input.usdPoolNotes } : {}),
     ...(projection.suppressedWarnings !== undefined &&
       projection.suppressedWarnings.already_booked + projection.suppressedWarnings.skipped_ticker > 0
       ? { suppressed_warnings: projection.suppressedWarnings }
@@ -3950,6 +4225,119 @@ async function routeDistributionPool(params: {
   };
 }
 
+/**
+ * Pool roles of the statement's USD rows (C2 completeness): cash-fund sweeps,
+ * funded buys (buy_relief), retained distributions (distribution_in),
+ * statement-converted rows (pass_through); everything else is unsupported (Q4).
+ */
+export function statementPoolEvents(
+  rows: readonly AccountStatementRow[],
+  trades: TradeExtractionResult,
+  distributions: DistributionExtractionResult,
+  fundingTickers: ReadonlySet<string>,
+): StatementPoolEvent[] {
+  const tradeByRow = new Map(trades.trades.map(trade => [trade.row_index, trade]));
+  const distributionByRow = new Map(distributions.distributions.map(d => [d.row_index, d]));
+  const events: StatementPoolEvent[] = [];
+  for (const row of rows) {
+    if (normalizedCurrency(row.ccy) !== "USD") continue;
+    const ts = lightyearTimestampSeconds(row.date);
+    if (ts === null) continue;
+    let role: StatementPoolEvent["role"] = "unsupported";
+    if (row.type === "Buy" || row.type === "Sell") {
+      const trade = tradeByRow.get(row.row_index);
+      if (fundingTickers.has(row.ticker) || KNOWN_CASH_EQUIVALENT_TICKERS.has(row.ticker)) role = "sweep";
+      else if (trade?.funding) role = "buy_relief";
+      else if (trade?.conversion_ref) role = "pass_through";
+    } else if (row.type === "Conversion") {
+      if (trades.consumedConversionRefs.has(row.reference) || distributions.consumedConversionRefs.has(row.reference)) role = "pass_through";
+    } else if (row.type === "Dividend" || row.type === "Distribution" || row.type === "Interest" || row.type === "Reward") {
+      const distribution = distributionByRow.get(row.row_index);
+      if (distributions.unconvertedRowIndexes.has(row.row_index)) role = "distribution_in";
+      else if (distribution?.fx_provenance?.source === "statement_conversion") role = "pass_through";
+    }
+    events.push({ ref: row.reference, ts, role });
+  }
+  return events;
+}
+
+/** Half-up integer division for non-negative cents (BigInt, exact). */
+function divideHalfUp(numerator: bigint, denominator: bigint): number {
+  return Number((2n * numerator + denominator) / (2n * denominator));
+}
+
+/**
+ * Value the funded buys of a trades run (C4): the converted part at the dealt
+ * rate, the pool part at the frozen ECB rate of the trade day, the pool
+ * relieved at average carrying value from a fresh validation; realised FX =
+ * relief − ECB value. A trade that cannot be valued keeps a review reason.
+ */
+async function valueFundedTrades(params: {
+  api: ApiContext;
+  store: UsdPoolStore;
+  key: PoolKey | null;
+  rows: AccountStatementRow[];
+  extraction: TradeExtractionResult;
+  funded: InvestmentTrade[];
+  fundingTickers: ReadonlySet<string>;
+  fxOutcomes: FrozenFxOutcomes;
+  inLock: boolean;
+}): Promise<void> {
+  const { funded } = params;
+  if (funded.length === 0) return;
+  const reviewAll = (code: FxReviewCode) => { for (const trade of funded) trade.fx_review_reason = fxReason(code); };
+  if (params.key === null) return reviewAll("usd_pool_account_unknown");
+  const key = params.key;
+  const loaded = await loadPoolRecords(params.api, params.store, key, params.inLock);
+  if (!loaded.ok) return reviewAll(loaded.code);
+  const distributions = extractDistributions(params.rows, tradeReservedConversionRefsWithFunding(params.rows, params.fundingTickers));
+  const orders = funded.map(trade => eventOrder(trade.reference, trade.funding!.ts));
+  const until = orders.reduce((latest, order) => compareOrder(order, latest) > 0 ? order : latest);
+  const validated = await validateUsdPool({
+    api: params.api, store: params.store, key, until, newRecords: orders,
+    statementEvents: statementPoolEvents(params.rows, params.extraction, distributions, params.fundingTickers),
+    plannedRefs: new Set(funded.map(trade => trade.reference)),
+    requireRegistered: false,
+  });
+  if (!validated.ok) return reviewAll(validated.code);
+  const snapshot = validated.value;
+
+  const prepared = new Map<string, { trade: InvestmentTrade; ecb: EcbRateRecord | null; poolEcbCents: number | null }>();
+  const commands: PoolSpendCommand[] = funded.map(trade => {
+    const funding = trade.funding!;
+    const outcome = replayFrozenFx(params.fxOutcomes, "USD", trade.date);
+    const poolEcbCents = outcome.ok ? usdCentsToEurCents(funding.pool_usd_cents, outcome.rate.rate) : null;
+    prepared.set(trade.reference, { trade, ecb: outcome.ok ? outcome.rate : null, poolEcbCents });
+    const blocked = !outcome.ok ? outcome.code : poolEcbCents === null ? "trade_amount_conflict" : undefined;
+    return { ref: trade.reference, ts: funding.ts, spend_usd_cents: funding.pool_usd_cents, ...(blocked !== undefined ? { blocked } : {}) };
+  });
+  for (const projected of projectPool(snapshot, commands)) {
+    const entry = prepared.get(projected.ref)!;
+    const trade = entry.trade;
+    if (!projected.ok) { trade.fx_review_reason = fxReason(projected.code as FxReviewCode); continue; }
+    const funding = trade.funding!;
+    const poolEcb = entry.poolEcbCents!;
+    const fxFee = moneyToSafeCents(trade.fx_fee_eur);
+    const total = funding.conv_eur_cents + poolEcb;
+    const fee = divideHalfUp(BigInt(funding.fee_usd_cents) * BigInt(total), BigInt(funding.gross_usd_cents));
+    const investment = total - fee;
+    if (fxFee === null || investment <= 0) { trade.fx_review_reason = fxReason("trade_amount_conflict"); continue; }
+    funding.valuation = {
+      ecb: entry.ecb!,
+      pool_ecb_eur_cents: poolEcb,
+      relief_eur_cents: projected.relief_eur_cents,
+      total_eur_cents: total,
+      fee_eur_cents: fee,
+      fx_fee_eur_cents: fxFee,
+      investment_eur_cents: investment,
+      fx_eur_cents: projected.relief_eur_cents - poolEcb,
+      broker_credit_cents: funding.conv_eur_cents + fxFee + projected.relief_eur_cents,
+      snapshot_digest: snapshot.snapshot_digest,
+    };
+    trade.fx_review_reason = null;
+  }
+}
+
 export function registerLightyearTools(
   server: McpServer,
   api: ApiContext,
@@ -3982,8 +4370,8 @@ export function registerLightyearTools(
           return true;
         });
       }
-      const tradeReservedConversionRefs = collectTradeReservedConversionRefs(rows);
-      const extractedTrades = extractTrades(rows);
+      const tradeReservedConversionRefs = tradeReservedConversionRefsWithFunding(rows, KNOWN_CASH_EQUIVALENT_TICKERS);
+      const extractedTrades = extractTrades(rows, { fundingTickers: KNOWN_CASH_EQUIVALENT_TICKERS });
       const trades = extractedTrades.trades;
       const fxWarnings = extractedTrades.warnings.map(warning => warning.text);
       const distributionExtraction = extractDistributions(rows, tradeReservedConversionRefs);
@@ -4273,7 +4661,7 @@ export function registerLightyearTools(
   );
 
   registerTool(server, "book_lightyear_trades",
-    "Book Lightyear stock Buy/Sell trades. DRY RUN by default. For sells, capital_gains_file is required for FIFO cost basis and recognized gain/loss.",
+    "Book Lightyear stock Buy/Sell trades. DRY RUN by default. For sells, capital_gains_file is required for FIFO cost basis and recognized gain/loss. A USD buy paid partly or fully from the USD cash fund (ICSUSSDP sells within 60 s) is valued at the dealt rate for the converted part and the ECB rate for the fund part, relieves the USD pool at average carrying value and books the difference on fx_account.",
     {
       file_path: z.string().optional().describe("AccountStatement path/base64 input. Provide exactly one of file_path or file_ref."),
       file_ref: z.string().optional().describe("Opaque Lightyear AccountStatement file reference."),
@@ -4287,11 +4675,13 @@ export function registerLightyearTools(
       loss_account: z.number().optional().describe("Realized loss account, debited on a sell loss (default: auto-detect 'Kulu aktsiatelt ja osadelt', standard 8335)"),
       fee_account: z.number().optional().describe("Account for EXPENSED trade fees — every Buy and Sell fee, both the platform fee and the FX-conversion fee (default: auto-detect 'Kulu aktsiatelt ja osadelt', standard 8335). No fee is capitalized into the investment cost: Lightyear's FIFO cost basis is fee-exclusive, and RTJ 3 expenses transaction costs on assets held at fair value through profit or loss."),
       skip_tickers: z.string().optional().describe("Comma-separated tickers to skip (default: BRICEKSP, ICSUSSDP). Pass \"none\" to disable; the empty string is treated as the default."),
+      fx_account: z.number().optional().describe("Realised FX gain/loss account for buys paid from the USD cash fund (default: auto-detect 'Kasum/kahjum valuutakursi muutustest', standard 8500)."),
+      lightyear_account: z.string().regex(LIGHTYEAR_ACCOUNT_RE).optional().describe("Lightyear account id (e.g. CHZELUU) for the USD pool when the statement's file name does not carry it."),
       dry_run: z.boolean().optional().describe("Preview without creating entries (default true)"),
       plan_handle: z.string().optional().describe("Execution-plan handle from the reviewed dry run. Required for dry_run=false."),
     },
     { ...batch, openWorldHint: true, title: "Book Lightyear Trades" },
-    async ({ file_path, file_ref, capital_gains_file, capital_gains_file_ref, investment_account, investment_dimension_id, broker_account, broker_dimension_id, gain_loss_account, loss_account, fee_account, skip_tickers, dry_run, plan_handle }) => {
+    async ({ file_path, file_ref, capital_gains_file, capital_gains_file_ref, investment_account, investment_dimension_id, broker_account, broker_dimension_id, gain_loss_account, loss_account, fee_account, skip_tickers, fx_account, lightyear_account, dry_run, plan_handle }) => {
       const isDryRun = dry_run !== false;
       const skipInput = skip_tickers?.trim() || [...KNOWN_CASH_EQUIVALENT_TICKERS].join(",");
       const skipSet = skipInput.toLowerCase() === "none"
@@ -4311,13 +4701,17 @@ export function registerLightyearTools(
         fee_account,
         skip_tickers: [...skipSet].sort().join(","),
         has_capital_gains_file: hasGainsFile,
+        fx_account,
+        lightyear_account: lightyear_account?.toUpperCase(),
       }) as PlanRecord;
+      const fundingTickers = lightyearFundingTickers(skipSet);
 
       // Resolve and validate accounts up front — the same gate on both paths.
       const accounts = await api.readonly.getAccounts();
       const gainAccount = resolveSecuritiesIncomeAccount(accounts, gain_loss_account);
       const lossAccount = resolveSecuritiesExpenseAccount(accounts, loss_account);
       const feeAccount = resolveSecuritiesExpenseAccount(accounts, fee_account);
+      const fxAccount = resolveFxAccount(accounts, fx_account);
       const accountErrors = validateAccounts(accounts, [
         { id: investment_account, label: "Investment account" },
         { id: broker_account, label: "Broker account" },
@@ -4333,16 +4727,18 @@ export function registerLightyearTools(
         });
       }
 
-      const buildTradesProjection = async (bindings: readonly unknown[] = []): Promise<{
+      const buildTradesProjection = async (bindings: readonly unknown[] = [], frozen?: FrozenFxOutcomes, inLock = false): Promise<{
         projection: TradesProjection;
         sourceIdentities: PlanRecord[];
         sourceSnapshots: FileInputSnapshot[];
         sourcePaths: PlanData[];
-      }> => {
+        fxOutcomes: FrozenFxOutcomes;
+        poolKey: PoolKey | null;
+      } | { error: ReturnType<typeof toolError> }> => {
         const statementSnapshot = await readCsvSnapshot(statementSource, FILE_REFERENCE_OPERATIONS.lightyearStatement, runtimeSafetyContext, bindings[0]);
         const sourcePaths: PlanData[] = [planBoundFileReference(statementSource, statementSnapshot, FILE_REFERENCE_OPERATIONS.lightyearStatement)];
         const rows = parseAccountStatement(statementSnapshot.text());
-        const extraction = extractTrades(rows);
+        const extraction = extractTrades(rows, { fundingTickers });
         const trades = extraction.trades.filter(t => !skipSet.has(t.ticker));
         const gainsWarnings: string[] = [];
         let gainsMap = new Map<string, CapitalGainsRow>();
@@ -4364,11 +4760,27 @@ export function registerLightyearTools(
         // FX warnings matter only for rows this run can still book: drop the
         // ones for skipped tickers and already-booked references, and count them.
         const suppressedWarnings = { already_booked: 0, skipped_ticker: 0 };
+        // C4: value the funded buys still to book (ECB rate frozen at the dry run, pool relief).
+        const funded = trades.filter(t => t.funding !== undefined && !existingRefs.has(t.reference) && isStrictDate(t.date));
+        const keyResolution = resolveLightyearPoolKey(api, statementSnapshot, file_path, lightyear_account, broker_account, broker_dimension_id);
+        if (!keyResolution.ok) {
+          return { error: toolError({ error: keyResolution.error, category: "invalid_arguments", retry: "never", mutation_occurred: false }) };
+        }
+        const fxOutcomes = frozen ?? (funded.length > 0
+          ? await resolveFrozenFxOutcomes(new Set(funded.map(t => fxOutcomeKey("USD", t.date))), deps.ecb)
+          : {});
+        await valueFundedTrades({
+          api, store: usdPoolStore, key: keyResolution.key, rows, extraction, funded, fundingTickers, fxOutcomes, inLock,
+        });
+        const fundedRefs = new Set(funded.map(t => t.reference));
         const relevantFxWarnings = extraction.warnings.filter(warning => {
           if (skipSet.has(warning.ticker)) { suppressedWarnings.skipped_ticker += 1; return false; }
           if (existingRefs.has(warning.reference)) { suppressedWarnings.already_booked += 1; return false; }
-          return true;
+          return !fundedRefs.has(warning.reference);
         });
+        for (const trade of funded) {
+          if (trade.fx_review_reason !== null) relevantFxWarnings.push({ reference: trade.reference, ticker: trade.ticker, text: fxReviewWarning(trade.reference, trade.fx_review_reason, trade.conversion_ref ?? undefined) });
+        }
         const projection = computeTradesProjection({
           trades, gainsMap, existingRefs, ownRefCandidates,
           // FIFO matching runs over every sell (disambiguation needs them all),
@@ -4378,22 +4790,34 @@ export function registerLightyearTools(
           })],
           hasCapitalGainsFile: hasGainsFile,
           investment_account, investment_dimension_id, broker_account, broker_dimension_id,
-          gainAccount, lossAccount, feeAccount,
+          gainAccount, lossAccount, feeAccount, fxAccount, poolKey: keyResolution.key,
         });
         projection.suppressedWarnings = suppressedWarnings;
-        return { projection, sourceIdentities: sourceSnapshots.map(sourceIdentityRecord), sourceSnapshots, sourcePaths };
+        return { projection, sourceIdentities: sourceSnapshots.map(sourceIdentityRecord), sourceSnapshots, sourcePaths, fxOutcomes, poolKey: keyResolution.key };
       };
 
+      const fxAccountErrors = (projection: TradesProjection): string[] =>
+        projection.commands.some(command => command.funding !== undefined)
+          ? validateAccounts(accounts, [{ id: fxAccount, label: "FX account" }])
+          : [];
+
       if (isDryRun) {
-        const { projection, sourceIdentities, sourcePaths } = await buildTradesProjection();
-        const postingErrors = await validateProjectedPostings(api, accounts, projection.commands);
+        const built = await buildTradesProjection();
+        if ("error" in built) return built.error;
+        const { projection, sourceIdentities, sourcePaths } = built;
+        const postingErrors = [...fxAccountErrors(projection), ...await validateProjectedPostings(api, accounts, projection.commands)];
         if (postingErrors.length > 0) return toolError({ error: "Account validation failed", details: postingErrors });
+        const logsPool = projection.commands.some(command => command.poolEvent !== undefined);
         const planHandleIssued = runtimeSafetyContext.planStore.issue(
           LIGHTYEAR_TRADES_PLAN_DOMAIN,
           buildLightyearExecutionPlanInput({
             normalizedArgs,
             sourceIdentities,
-            privateExtras: { source_paths: sourcePaths },
+            privateExtras: {
+              source_paths: sourcePaths,
+              ...(Object.keys(built.fxOutcomes).length > 0 ? { fx_outcomes: built.fxOutcomes as unknown as PlanData } : {}),
+              ...(logsPool && built.poolKey !== null ? { usd_pool: { pool_key: built.poolKey as unknown as PlanData } } : {}),
+            },
             liveSnapshot: { accounts: projection.accounts },
             reviewCommands: tradesReviewCommands(projection),
             fingerprint: tradesFingerprint(projection, normalizedArgs),
@@ -4432,10 +4856,14 @@ export function registerLightyearTools(
         throw error;
       }
 
+      const storedPoolKey = readStoredPoolKey(storedPlan.privatePayload);
+      const executeTrades = async (inLock: boolean) => {
       let projection: TradesProjection;
       let sourceSnapshots: FileInputSnapshot[];
       try {
-        ({ projection, sourceSnapshots } = await buildTradesProjection(storedSourceBindings(storedPlan.privatePayload)));
+        const built = await buildTradesProjection(storedSourceBindings(storedPlan.privatePayload), readFrozenFxOutcomes(storedPlan.privatePayload), inLock);
+        if ("error" in built) return built.error;
+        ({ projection, sourceSnapshots } = built);
       } catch (error) {
         if (error instanceof FileInputSnapshotError) return sourceReReadDrift(error, "A reviewed Lightyear source");
         throw error;
@@ -4451,28 +4879,33 @@ export function registerLightyearTools(
       if (canonicalPlanJson(storedPlan.normalizedArgs) !== canonicalPlanJson(normalizedArgs)) {
         return planErrorResult("plan_drift", "The booking arguments changed since the plan was reviewed.");
       }
-      const postingErrors = await validateProjectedPostings(api, accounts, projection.commands);
+      const postingErrors = [...fxAccountErrors(projection), ...await validateProjectedPostings(api, accounts, projection.commands)];
       if (postingErrors.length > 0) return toolError({ error: "Account validation failed", details: postingErrors });
       const storedFingerprint = readStoredFingerprint(storedPlan.privatePayload);
       if (typeof storedFingerprint !== "string" || storedFingerprint !== tradesFingerprint(projection, normalizedArgs)) {
-        return planErrorResult("plan_drift", "The reviewed Lightyear trade plan no longer matches the current ledger and source.");
+        return planErrorResult("plan_drift", "The reviewed Lightyear trade plan no longer matches the current ledger, source and USD pool.");
       }
 
       const guard = await BookingGuard.load(api);
-      const { executionReport, createdByIndex } = await executeLightyearJournalCommands({
+      const poolNotes: string[] = [];
+      const { executionReport, createdByIndex } = await executeLightyearJournalCommands<TradeCommand>({
         api, guard, commands: projection.commands,
         commandId: lightyearTradeCommandId,
         category: LIGHTYEAR_TRADE_CREATE_CATEGORY,
         tool: "book_lightyear_trades",
         auditDetails: command => command.auditDetails,
+        ...(storedPoolKey !== null ? { pool: { key: storedPoolKey, store: usdPoolStore, eventOf: command => command.poolEvent, notes: poolNotes } } : {}),
       });
 
       return {
-        content: [{ type: "text", text: toMcpJson(renderTradesPayload({
-          mode: "EXECUTED", projection, executionReport, createdByIndex,
+        content: [{ type: "text" as const, text: toMcpJson(renderTradesPayload({
+          mode: "EXECUTED", projection, executionReport, createdByIndex, usdPoolNotes: poolNotes,
           pendingDuplicates: await loadPendingDuplicateJournals(api, guard.journals, projection.duplicates),
         })) }],
       };
+      };
+      // All pool-funded commands run inside one pool lock section (Codex r2 #4).
+      return storedPoolKey !== null ? withUsdPoolLock(storedPoolKey, () => executeTrades(true)) : executeTrades(false);
     }
   );
 
@@ -4528,7 +4961,7 @@ export function registerLightyearTools(
       }> => {
         const snapshot = await readCsvSnapshot(statementSource, FILE_REFERENCE_OPERATIONS.lightyearStatement, runtimeSafetyContext, binding);
         const rows = parseAccountStatement(snapshot.text());
-        const reserved = collectTradeReservedConversionRefs(rows);
+        const reserved = tradeReservedConversionRefsWithFunding(rows, KNOWN_CASH_EQUIVALENT_TICKERS);
         let fxOutcomes: FrozenFxOutcomes = {};
         if (fxSource === "ecb") {
           fxOutcomes = frozen ?? await resolveFrozenFxOutcomes(extractDistributions(rows, reserved, { fxSource }).ecbKeys, deps.ecb);
@@ -4779,7 +5212,7 @@ export function registerLightyearTools(
     async ({ file_path, file_ref }) => {
       const csv = await readCsvFile(fileInputSource(file_path, file_ref), FILE_REFERENCE_OPERATIONS.lightyearStatement, runtimeSafetyContext);
       const rows = parseAccountStatement(csv);
-      const { trades, warnings: fxWarnings } = extractTrades(rows);
+      const { trades, warnings: fxWarnings } = extractTrades(rows, { fundingTickers: KNOWN_CASH_EQUIVALENT_TICKERS });
 
       const portfolioWarnings: string[] = fxWarnings.map(warning => warning.text);
 
