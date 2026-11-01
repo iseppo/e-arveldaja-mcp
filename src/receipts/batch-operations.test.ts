@@ -2362,6 +2362,23 @@ describe("#4 receipts already in e-arveldaja (attached bytes, exact earlier book
     expect(vi.mocked(resolveSupplierInternal).mock.calls.filter(call => call[3] === true)).toHaveLength(0);
   });
 
+  it.each([
+    ["invalidated in the UI, attachment kept", { status: "INVALIDATED" }],
+    ["attachment removed", { base_document_files_id: null }],
+    ["invoice number edited", { number: "INV-A2" }],
+  ])("backfill re-reads the listed invoice: %s → the receipt is not suppressed and nothing is recorded", async (_label, change) => {
+    primeFolder(["a.pdf"]);
+    const { api, getDocument } = apiWith([invoice801()], () => bytesOf("a.pdf"));
+    // The list (cached) still shows the confirmed invoice; a fresh read sees the change.
+    const invoices = api as unknown as { purchaseInvoices: Record<string, ReturnType<typeof vi.fn>> };
+    invoices.purchaseInvoices.get!.mockImplementation(async (id: number) => ({ ...invoice801(), id, ...change }));
+    const dry = await makeOperations(api).runBatch({ ...baseRun, executionMode: "dry_run", dryRun: true });
+    if (!dry.ok) throw new Error("dry run failed");
+    expect(dry.value.results[0]!.status).not.toBe("already_attached");
+    expect(getDocument).not.toHaveBeenCalled();
+    expect((receiptAttachmentDigestStore.read() ?? []).some(record => record.entity_id === 801)).toBe(false);
+  });
+
   it("a recorded digest is used after a fresh check of the invoice and its current bytes", async () => {
     primeFolder(["a.pdf"]);
     seedRecord();

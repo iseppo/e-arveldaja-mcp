@@ -113,8 +113,16 @@ export async function findAttachedInvoice(
     const invoice = byId.get(candidate.invoice_id);
     if (!invoice || typeof invoice.base_document_files_id !== "number" || recorded.has(candidate.invoice_id)) continue;
     if (!take(options.budget)) break;
+    // The listed invoice is a cached hint: re-read it past the cache, and only
+    // a live invoice still carrying an attachment under the matched number is
+    // recorded or excludes the receipt (one voided in the UI keeps its file).
+    let current: PurchaseInvoice;
     let documentSha: string;
     try {
+      api.purchaseInvoices.invalidateListCache();
+      current = await api.purchaseInvoices.get(candidate.invoice_id);
+      if (isInvalidatedPurchaseInvoice(current) || typeof current.base_document_files_id !== "number" ||
+        current.number !== invoice.number) continue;
       const document = await api.purchaseInvoices.getDocument(candidate.invoice_id);
       if (typeof document?.contents !== "string") continue;
       documentSha = sha256OfBase64(document.contents);
@@ -123,12 +131,12 @@ export async function findAttachedInvoice(
     }
     fresh.push({
       sha256: documentSha, entity: "purchase_invoice", entity_id: candidate.invoice_id,
-      base_document_files_id: invoice.base_document_files_id, number: invoice.number ?? null,
-      clients_id: invoice.clients_id ?? null, gross_price: invoice.gross_price ?? null,
+      base_document_files_id: current.base_document_files_id, number: current.number ?? null,
+      clients_id: current.clients_id ?? null, gross_price: current.gross_price ?? null,
       recorded_at: new Date().toISOString(),
     });
     if (documentSha === sha256) {
-      hit = { invoice_id: candidate.invoice_id, base_document_files_id: invoice.base_document_files_id };
+      hit = { invoice_id: candidate.invoice_id, base_document_files_id: current.base_document_files_id };
       break;
     }
   }
