@@ -114,7 +114,8 @@ export type UsdPoolReviewCode =
   | "usd_pool_quantity_mismatch"
   | "usd_pool_fund_price_not_stable"
   | "usd_pool_opening_replay_unproven"
-  | "usd_pool_opening_exists";
+  | "usd_pool_opening_exists"
+  | "usd_pool_before_opening";
 
 export const USD_POOL_REVIEW_MESSAGES: Record<UsdPoolReviewCode, string> = {
   usd_pool_unavailable: "The USD cash-fund pool store needs the accounting-rules bundle (not single-file EARVELDAJA_RULES_FILE mode); pool-dependent rows stay in review.",
@@ -138,6 +139,7 @@ export const USD_POOL_REVIEW_MESSAGES: Record<UsdPoolReviewCode, string> = {
   usd_pool_fund_price_not_stable: "An ICSUSSDP row is not priced at exactly 1.00, so its units cannot be valued as USD cash.",
   usd_pool_opening_replay_unproven: "Replaying the statement drives USD cash or ICSUSSDP units negative, so it does not start from an empty USD position.",
   usd_pool_opening_exists: "The USD pool already has a checkpoint; the opening is set only once (delete the pool's store entry to redo it).",
+  usd_pool_before_opening: "This retained USD distribution is dated on or before the USD pool's approved opening, which already holds its USD; a new journal for it now would leave books and pool apart. Nothing is booked — book such rows before storing the opening, or correct them by hand.",
 };
 
 export type UsdPoolResult<T> = { ok: true; value: T } | { ok: false; code: UsdPoolReviewCode; detail?: string };

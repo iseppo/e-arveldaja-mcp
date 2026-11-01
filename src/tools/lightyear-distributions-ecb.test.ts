@@ -290,6 +290,30 @@ describe("book_lightyear_distributions fx_source=ecb", () => {
     expect(env.create).not.toHaveBeenCalled();
   });
 
+  it("review wpc 4: after an approved opening a NEW pre-opening distribution is held usd_pool_before_opening; a booked one stays a duplicate", async () => {
+    // Books and pool aligned at €95 (opening 100 USD / €95 on 2026-09-30). A new Sep 20 journal adding €80 would make
+    // books €175 against a pool of €95, so it is refused; the Sep 18 one already booked keeps reporting as a duplicate.
+    const key = { connection_fingerprint: "lightyear-ecb-test-connection", lightyear_account: "TESTACCT1", broker_account: 1120, broker_dimension_id: null, currency: "USD" as const };
+    const store = memoryUsdPoolStore([{
+      record: "checkpoint", pool_key: key, kind: "opening", as_of: "2026-09-30", ts: endOfDaySeconds("2026-09-30"),
+      usd_cents: 10000, eur_cents: 9500, fx_cents: 0, journal_id: null, document_number: null,
+      rate: "1.0526315789", rate_date: "2026-09-30", approved: true, recorded_at: "t",
+    }]);
+    loadStatement([
+      ["18/09/2026 10:00:00", "DD-TESTOLD001", "NVDA", "US67066G1040", "Dividend", "0", "USD", "0", "10.00", "0", "0", "10.00", "0"],
+      ["20/09/2026 10:00:00", "DD-TESTPRE001", "NVDA", "US67066G1040", "Dividend", "0", "USD", "0", "100.00", "0", "0", "100.00", "0"],
+    ]);
+    const booked = { id: 4001, document_number: "LY:DD-TESTOLD001", effective_date: "2026-09-18", registered: true, is_deleted: false, postings: [] } as unknown as Journal;
+    const env = setup({ store, journals: [booked], fetch: rateFetch([["2026-09-17", "1.25"], ["2026-09-18", "1.25"], ["2026-09-21", "1.25"]]) });
+    const dry = await env.run({ fx_source: "ecb", dry_run: true });
+    expect(dry.payload.duplicates_skipped).toBe(1);
+    const held = dry.payload.results.find(row => String(row.reference).includes("DD-TESTPRE001"));
+    expect(held).toMatchObject({ status: "manual_review", net_eur: 80, review_reason: { code: "usd_pool_before_opening" } });
+    await env.run({ fx_source: "ecb", dry_run: false, plan_handle: dry.payload.plan_handle });
+    expect(env.create).not.toHaveBeenCalled();
+    expect(store.records).toHaveLength(1);
+  });
+
   it("a lightyear_account that contradicts the file name is refused", async () => {
     loadStatement([NVDA_DIVIDEND]);
     const env = setup();

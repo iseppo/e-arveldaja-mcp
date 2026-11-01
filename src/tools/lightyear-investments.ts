@@ -4047,7 +4047,7 @@ export type LightyearDistributionsPayload = Partial<LightyearDraftConfirmationFi
   /** Rows; `fx_provenance` is a DistributionFxProvenance, `fx_rate_text` present for ECB-valued rows. */
   results: Array<Record<string, unknown>>;
   warnings?: string[];
-  /** USD cash-fund pool notes (not logged / logged later / commit deferred). */
+  /** USD cash-fund pool notes (commit deferred / intent left). */
   usd_pool_notes?: string[];
   plan_handle?: string;
   execution_report?: PlanExecutionReport;
@@ -4178,8 +4178,10 @@ async function loadPoolRecords(
  * Pool routing for retained USD distributions valued at the ECB rate (C3).
  * A row dated after the opening is logged as `distribution_in` unless a later
  * state-dependent record (buy relief, checkpoint) is already committed — then
- * it is a review (`usd_pool_backdated_event`). A row on or before the opening
- * is inside the opening quantity and is not logged. Without a pool key
+ * it is a review (`usd_pool_backdated_event`); a row on or before an approved
+ * opening is a review too (`usd_pool_before_opening`): the opening already
+ * holds its USD, and a new journal for it would leave books and pool apart.
+ * The frontier check runs first; there is no exemption. Without a pool key
  * (`usd_pool_account_unknown`) or store (`usd_pool_unavailable`) the rows are
  * reviews: a retained USD distribution is never booked without its pool log.
  */
@@ -4190,12 +4192,11 @@ async function routeDistributionPool(params: {
   rows: readonly AccountStatementRow[];
   distributions: LightyearDistribution[];
   inLock: boolean;
-}): Promise<{ distributions: LightyearDistribution[]; poolEvents: Map<number, PendingPoolEvent>; notes: string[] }> {
+}): Promise<{ distributions: LightyearDistribution[]; poolEvents: Map<number, PendingPoolEvent> }> {
   const poolEvents = new Map<number, PendingPoolEvent>();
-  const notes: string[] = [];
   const candidates = params.distributions.filter(d =>
     d.currency === "USD" && d.fx_provenance?.source === "ecb" && isBookableDistribution(d));
-  if (candidates.length === 0) return { distributions: params.distributions, poolEvents, notes };
+  if (candidates.length === 0) return { distributions: params.distributions, poolEvents };
   const review = new Map<number, FxReviewReason>();
   const key = params.key;
   const loaded = key === null ? { ok: false as const, code: "usd_pool_account_unknown" as const } : await loadPoolRecords(params.api, params.store, key, params.inLock);
@@ -4206,13 +4207,15 @@ async function routeDistributionPool(params: {
     const frontier = poolFrontier(loaded.records.filter(record => poolKeyId(record.pool_key) === poolKeyId(key)));
     const openingOrder = view.opening ? checkpointOrder("opening", view.opening.as_of) : null;
     const rowsByIndex = new Map(params.rows.map(row => [row.row_index, row]));
-    let beforeOpening = 0;
     for (const d of candidates) {
       const ts = lightyearTimestampSeconds(rowsByIndex.get(d.row_index)?.date ?? "");
       if (ts === null) { review.set(d.row_index, fxReason("invalid_date")); continue; }
       const order = eventOrder(d.reference, ts);
-      if (openingOrder !== null && compareOrder(order, openingOrder) <= 0) { beforeOpening++; continue; }
-      if (frontier !== null && compareOrder(order, frontier.order) <= 0) { review.set(d.row_index, fxReason("usd_pool_backdated_event")); continue; }
+      if (frontier !== null && compareOrder(order, frontier.order) <= 0) {
+        const beforeOpening = openingOrder !== null && compareOrder(order, openingOrder) <= 0;
+        review.set(d.row_index, fxReason(beforeOpening ? "usd_pool_before_opening" : "usd_pool_backdated_event"));
+        continue;
+      }
       const usdCents = moneyToSafeCents(d.net_amount);
       const eurCents = moneyToSafeCents(d.net_eur ?? Number.NaN);
       if (usdCents === null || eurCents === null) { review.set(d.row_index, fxReason("distribution_amount_conflict")); continue; }
@@ -4221,12 +4224,10 @@ async function routeDistributionPool(params: {
         usd_cents: usdCents, eur_cents: eurCents, document_number: `LY:${d.reference}`, journal_broker_net_cents: eurCents,
       });
     }
-    if (beforeOpening > 0) notes.push(`usd_pool_before_opening: ${beforeOpening} retained USD distribution(s) are dated on or before the pool's opening and are already in its opening quantity; they book without a pool log.`);
   }
   return {
     distributions: params.distributions.map(d => review.has(d.row_index) ? { ...d, fx_review_reason: review.get(d.row_index)! } : d),
     poolEvents,
-    notes,
   };
 }
 
@@ -5193,7 +5194,7 @@ export function registerLightyearTools(
         const postingErrors = await validateProjectedPostings(api, accounts, projection.commands);
         if (postingErrors.length > 0) return { error: toolError({ error: "Account validation failed", details: postingErrors }) } as const;
         return {
-          projection, guard, poolKey: keyResolution.key, poolNotes: pool.notes,
+          projection, guard, poolKey: keyResolution.key,
           liveSnapshot: { income_account, interest_account, fund_distribution_account, reward_account, ...(tax_account !== undefined ? { tax_account } : {}) },
         } as const;
       };
@@ -5205,7 +5206,7 @@ export function registerLightyearTools(
         }
         const planned = await planDistributions(read, false);
         if ("error" in planned) return planned.error;
-        const { projection, poolKey, poolNotes } = planned;
+        const { projection, poolKey } = planned;
         const logsPool = projection.commands.some(command => command.poolEvent !== undefined);
         const planHandleIssued = runtimeSafetyContext.planStore.issue(
           LIGHTYEAR_DISTRIBUTIONS_PLAN_DOMAIN,
@@ -5236,7 +5237,7 @@ export function registerLightyearTools(
           }),
         );
         return {
-          content: [{ type: "text", text: toMcpJson(renderDistributionsPayload({ mode: "DRY_RUN", projection, planHandle: planHandleIssued, usdPoolNotes: poolNotes })) }],
+          content: [{ type: "text", text: toMcpJson(renderDistributionsPayload({ mode: "DRY_RUN", projection, planHandle: planHandleIssued })) }],
         };
       }
 
@@ -5296,7 +5297,7 @@ export function registerLightyearTools(
         if (storedPoolKey !== null && (planned.poolKey === null || poolKeyId(planned.poolKey) !== poolKeyId(storedPoolKey))) {
           return planErrorResult("plan_drift", "The USD pool this plan logs into changed since it was reviewed.");
         }
-        const poolNotes = [...planned.poolNotes];
+        const poolNotes: string[] = [];
         const { executionReport, createdByIndex } = await executeLightyearJournalCommands<DistributionCommand>({
           api, guard, commands: projection.commands,
           commandId: lightyearDistributionCommandId,

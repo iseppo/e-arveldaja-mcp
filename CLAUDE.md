@@ -613,7 +613,7 @@ owner-approved opening checkpoint (`book_lightyear_fx_revaluation` `mode: "openi
 from the statement and valued at the ECB rate; set once — redoing it means deleting the pool's
 entries from the store), `distribution_in` events (retained USD distributions,
 `book_lightyear_distributions` `fx_source: "ecb"`; without a pool key or store they are reviews, never
-booked unlogged), `buy_relief` events (buys funded from the
+booked unlogged; a new one dated on/before the approved opening is held `usd_pool_before_opening`), `buy_relief` events (buys funded from the
 fund, `book_lightyear_trades`, relief at average carrying value, realised FX on 8500) and
 revaluation checkpoints (`book_lightyear_fx_revaluation` `mode: "revalue"`, journal
 `LY-FX:<account>:USD:<date>`, quantity proof against the Lightyear holding). Every write runs
