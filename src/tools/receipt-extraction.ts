@@ -3080,8 +3080,18 @@ function extractSupplierNameFromText(
     });
   }
   const promotedNonprofitRow = anchoredNonprofitRows.size === 1 ? [...anchoredNonprofitRows][0] : undefined;
+  // Every branch obeys the same role and code-adjacency rules (A9): a line
+  // directly under a buyer or manager label is never a legal-form supplier,
+  // and an uppercase line inside such a block, or carrying an association or
+  // foundation form off the promoted row ("SA NÄIDISE HALDUS" under
+  // "Haldaja:"), never qualifies as a bare capitals name.
+  const underRoleLabel = (index: number) => index > 0 && NONPROFIT_EXCLUDED_ROLE_LABEL_RE.test(rows[index - 1]!.line);
   const isCompanyLine = (candidate: string, index: number) =>
-    generalCompanyPattern.test(candidate) || index === promotedNonprofitRow;
+    (generalCompanyPattern.test(candidate) && !underRoleLabel(index)) || index === promotedNonprofitRow;
+  const isUppercaseNameLine = (candidate: string, index: number) =>
+    /^[A-ZÄÖÜÕ0-9][A-ZÄÖÜÕ0-9 '&().,-]{4,}$/.test(candidate) &&
+    !inExcludedRole(index) &&
+    (!ESTONIAN_NONPROFIT_FORM_RE.test(candidate) || index === promotedNonprofitRow);
   const buyerSectionIndex = lines.findIndex(line => BUYER_OR_RECIPIENT_SECTION_RE.test(line));
   const searchRows = rows.slice(0, buyerSectionIndex >= 0 ? Math.max(buyerSectionIndex + 1, 1) : Math.min(rows.length, 12));
   for (const [index, row] of searchRows.entries()) {
@@ -3089,7 +3099,7 @@ function extractSupplierNameFromText(
     if (
       candidate &&
       candidate.length <= 80 &&
-      (isCompanyLine(candidate, index) || /^[A-ZÄÖÜÕ0-9][A-ZÄÖÜÕ0-9 '&().,-]{4,}$/.test(candidate))
+      (isCompanyLine(candidate, index) || isUppercaseNameLine(candidate, index))
     ) {
       return trimToLegalFormColumn(row.raw, candidate);
     }

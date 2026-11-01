@@ -5273,6 +5273,41 @@ describe("#5b supplier name from the registered association, not the manager foo
     expect(supplierOf(text, "m.pdf")).toBe("Õige Teenused OÜ");
   });
 
+  it("manager first in capitals: an uppercase foundation under 'Haldaja:' never becomes the supplier", () => {
+    const text = [
+      "Haldaja:",
+      "SA NÄIDISE HALDUS",
+      "Õige Teenused OÜ",
+      "Reg. kood: 10000001",
+      "Teenus 10,00",
+      "Kokku 10,00 €",
+    ];
+    expect(supplierOf(text, "m3.pdf")).toBe("Õige Teenused OÜ");
+  });
+
+  it("an uppercase foundation off the supplier code's row is no bare capitals supplier", () => {
+    const text = [
+      "SA NÄIDISE FOND",
+      "Õige Teenused OÜ",
+      "Reg. kood: 10000001",
+      "Teenus 10,00",
+      "Kokku 10,00 €",
+    ];
+    expect(supplierOf(text, "m4.pdf")).toBe("Õige Teenused OÜ");
+  });
+
+  it("a legal-form line directly under a manager label is not the supplier", () => {
+    const text = [
+      "Haldaja:",
+      "Näidise Haldus OÜ",
+      "Õige Teenused OÜ",
+      "Reg. kood: 10000001",
+      "Teenus 10,00",
+      "Kokku 10,00 €",
+    ];
+    expect(supplierOf(text, "m5.pdf")).toBe("Õige Teenused OÜ");
+  });
+
   it("manager first with its own code: the administrator block is excluded", () => {
     const text = [
       "Haldaja:",
