@@ -302,6 +302,26 @@ describe("book_lightyear_trades — USD sells kept in USD and pool-paid buys (pl
     expect(reviewCode(dry.payload, "OR-TESTFCB")).toBe("usd_pool_source_changed");
   });
 
+  it("a logged pool journal moved to another effective date breaks the pool for later commands", async () => {
+    // Opening 100 USD / €90 (Mar 31); the Apr 1 distribution logs +100 USD / €80. Its journal moved to Jun 1
+    // must not still fund an Apr 20 purchase as if it were dated Apr 1.
+    const div = ["01/04/2026 10:00:00", "DD-TESTDATE1", "AMD", "US0079031078", "Dividend", "0", "USD", "0", "100.00", "0", "0", "100.00", "0"];
+    load([div, B]);
+    const dist = setupPoolTool<{ created?: number }>("book_lightyear_distributions",
+      { broker_account: 1120, income_account: 8330, tax_account: 8610, fee_account: 8610, fx_source: "ecb" },
+      { pool: [OPENING], fetch: rateFetch("1.25") });
+    await dist.book();
+    expect(dist.created[0]).toMatchObject({ effective_date: "2026-04-01" });
+    const records = () => memoryUsdPoolStore(structuredClone(dist.store.records) as UsdPoolRecord[]);
+    const journals = (date: string) => [...dist.ledger.values()].map(j => ({ ...j, registered: true, effective_date: date }));
+
+    const kept = await fcTool({ store: records(), journals: journals("2026-04-01") }).run({ dry_run: true });
+    expect(resultFor(kept.payload, "OR-TESTFCB")).toMatchObject({ status: "would_create", pool: { relief_eur: 127.5 } });
+    const moved = await fcTool({ store: records(), journals: journals("2026-06-01") }).run({ dry_run: true });
+    expect(resultFor(moved.payload, "OR-TESTFCB")).toMatchObject({ status: "skipped" });
+    expect(reviewCode(moved.payload, "OR-TESTFCB")).toBe("usd_pool_event_mismatch");
+  });
+
   it("T-FC3: with no pool key (account not in the file name) a pool sell is a review and nothing is written", async () => {
     load([S, B], [S_GAIN]);
     const env = fcTool();

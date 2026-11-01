@@ -331,6 +331,15 @@ describe("recoverUsdPoolIntents", () => {
     expect(store.records.find(r => r.record === "event")).toMatchObject({ state: "intent" });
   });
 
+  it("a journal on another day than the intent's approved effective date is never committed", async () => {
+    const store = memoryUsdPoolStore([opening(10000, 9000), { ...intent(), effective_date: "2026-10-19" }]);
+    expect(await recoverUsdPoolIntents(poolApi([journal(77, "LY:OR-1", -35796, { effective_date: "2026-12-01" })]), store, KEY))
+      .toEqual({ ok: false, code: "usd_pool_uncertain_outcome" });
+    expect(store.records.find(r => r.record === "event")).toMatchObject({ state: "intent" });
+    expect(await recoverUsdPoolIntents(poolApi([journal(77, "LY:OR-1", -35796, { effective_date: "2026-10-19" })]), store, KEY)).toMatchObject({ ok: true });
+    expect(store.records.find(r => r.record === "event")).toMatchObject({ state: "committed", journal_id: 77 });
+  });
+
   it("a revaluation intent commits its checkpoint", async () => {
     const checkpoint: UsdPoolCheckpoint = {
       record: "checkpoint", pool_key: KEY, kind: "revaluation", as_of: "2026-10-30", ts: endOfDaySeconds("2026-10-30"),

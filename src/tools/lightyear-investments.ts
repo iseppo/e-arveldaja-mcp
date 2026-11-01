@@ -3199,7 +3199,7 @@ async function commitPoolEvent<C>(api: ApiContext, pool: LightyearPoolExecution<
   try {
     api.journals.invalidateListCache();
     const journal = await api.journals.get(journalId);
-    if (journalMatchesPoolRecord(journal, pool.key, { document_number: event.document_number, broker_net_cents: event.journal_broker_net_cents, postings: event.postings }) !== "ok") {
+    if (journalMatchesPoolRecord(journal, pool.key, { document_number: event.document_number, broker_net_cents: event.journal_broker_net_cents, postings: event.postings, effective_date: event.effective_date }) !== "ok") {
       pool.notes.push(`usd_pool_commit_deferred: journal ${journalId} (${event.document_number}) read back with other postings; the pool stays blocked until the next run's recovery checks it.`);
       return false;
     }
@@ -3271,9 +3271,11 @@ async function executeLightyearJournalCommands<C extends {
       // Every pool record stores the approved command's canonical postings (r1 #6); the readback, the
       // recovery and every later validation compare the live journal's posting multiset with them.
       const postings = canonicalPoolPostings(command.postings);
+      // The approved effective date is bound too: a journal moved to another day no longer matches (review 2026-11-01 #4).
+      const effectiveDate = pending?.source_evidence ? {} : { effective_date: command.date };
       const poolEvent = pending && {
-        ...pending, postings,
-        ...(pending.checkpoint ? { checkpoint: { ...pending.checkpoint, postings } } : {}),
+        ...pending, postings, ...effectiveDate,
+        ...(pending.checkpoint ? { checkpoint: { ...pending.checkpoint, postings, ...effectiveDate } } : {}),
       };
       if (poolEvent && params.pool && poolEvent.source_evidence) {
         // Journal-free conversion_out: no external write, so no intent stage — written once as committed.

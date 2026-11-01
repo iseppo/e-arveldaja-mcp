@@ -57,7 +57,7 @@ function rateFetch(rates: Array<[string, string]> = OCTOBER_RATES): FetchMock {
   return vi.fn(async () => ecbResponse(ecbCsv(rates))) as FetchMock;
 }
 
-interface CreatedJournal { document_number?: string; postings?: Array<{ accounts_id: number; type: string; amount: number }> }
+interface CreatedJournal { document_number?: string; effective_date?: string; postings?: Array<{ accounts_id: number; type: string; amount: number }> }
 
 function setup(options: { fetch?: FetchMock; today?: string; journals?: Journal[]; store?: UsdPoolStore } = {}) {
   const server = { registerTool: vi.fn() };
@@ -68,7 +68,7 @@ function setup(options: { fetch?: FetchMock; today?: string; journals?: Journal[
   });
   const get = vi.fn(async (id: number) => {
     const payload = created[id - 9001];
-    return { id, registered: false, document_number: payload?.document_number, postings: payload?.postings ?? [] } as unknown as Journal;
+    return { id, registered: false, document_number: payload?.document_number, effective_date: payload?.effective_date, postings: payload?.postings ?? [] } as unknown as Journal;
   });
   const accounts = [1120, 8320, 8330, 8400, 8600, 8610].map(id => ({ id, is_deleted: false, is_valid: true, code: String(id), title_est: `Konto ${id}`, name_est: `Konto ${id}` }));
   const api = {

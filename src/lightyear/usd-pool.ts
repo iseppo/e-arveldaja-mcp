@@ -63,6 +63,8 @@ export interface UsdPoolCheckpoint {
   approved?: true;
   /** Canonical postings of the revaluation journal ([] for an opening or a journal-free checkpoint). */
   postings?: PoolPosting[];
+  /** Approved effective date of the revaluation journal; readback, recovery and validation require it. */
+  effective_date?: string;
   recorded_at: string;
 }
 
@@ -86,6 +88,8 @@ export interface UsdPoolEvent {
   /** Journal-free conversion_out only: the proof captured at approval (plan §2, r1 #5). */
   source_evidence?: ConversionEvidence;
   evidence_digest?: string;
+  /** Approved effective date of the journal (YYYY-MM-DD); readback, recovery and validation require it. */
+  effective_date?: string;
   /** Normalized source rows at logging (poolSourceDigest): a later statement covering the day must reproduce them. */
   source_digest?: string;
   recorded_at: string;
@@ -524,9 +528,10 @@ type JournalCheck = "ok" | "mismatch" | "postings" | "unregistered";
 export function journalMatchesPoolRecord(
   journal: Journal,
   key: Pick<PoolKey, "broker_account" | "broker_dimension_id">,
-  expect: { document_number: string | null; broker_net_cents: number; postings: readonly PoolPosting[] | undefined },
+  expect: { document_number: string | null; broker_net_cents: number; postings: readonly PoolPosting[] | undefined; effective_date?: string },
 ): "ok" | "mismatch" | "postings" {
   if (journal.is_deleted === true || journal.document_number !== expect.document_number) return "mismatch";
+  if (expect.effective_date !== undefined && String(journal.effective_date ?? "").slice(0, 10) !== expect.effective_date) return "mismatch";
   if (journalBrokerNetCents(journal, key) !== expect.broker_net_cents) return "mismatch";
   if (!Array.isArray(expect.postings) || !samePostings(canonicalPoolPostings(journal.postings ?? []), expect.postings)) return "postings";
   return "ok";
@@ -535,7 +540,7 @@ export function journalMatchesPoolRecord(
 async function checkLoggedJournal(
   reader: JournalReader,
   key: PoolKey,
-  expect: { journal_id: number | null; document_number: string | null; broker_net_cents: number; postings: readonly PoolPosting[] | undefined },
+  expect: { journal_id: number | null; document_number: string | null; broker_net_cents: number; postings: readonly PoolPosting[] | undefined; effective_date?: string },
   requireRegistered: boolean,
 ): Promise<JournalCheck> {
   if (expect.journal_id === null) return "mismatch";
@@ -582,7 +587,7 @@ export async function recoverUsdPoolIntents(api: ApiContext, store: UsdPoolStore
     const journalId = matches[0]!.id!;
     let check: JournalCheck;
     try {
-      check = await checkLoggedJournal(reader, key, { journal_id: journalId, document_number: intent.document_number, broker_net_cents: intent.journal_broker_net_cents, postings: intent.postings }, false);
+      check = await checkLoggedJournal(reader, key, { journal_id: journalId, document_number: intent.document_number, broker_net_cents: intent.journal_broker_net_cents, postings: intent.postings, effective_date: intent.effective_date }, false);
     } catch {
       unresolved = true;
       continue;
@@ -635,11 +640,11 @@ function digestOf(value: unknown): string {
 }
 
 function checkpointDigestFields(c: UsdPoolCheckpoint) {
-  return [c.kind, c.as_of, c.usd_cents, c.eur_cents, c.fx_cents, c.journal_id, c.document_number, c.rate, c.rate_date];
+  return [c.kind, c.as_of, c.usd_cents, c.eur_cents, c.fx_cents, c.journal_id, c.document_number, c.rate, c.rate_date, c.effective_date ?? null];
 }
 
 function eventDigestFields(e: UsdPoolEvent) {
-  return [e.kind, e.ref, e.ts, e.usd_cents, e.eur_cents, e.journal_id, e.document_number, e.journal_broker_net_cents, e.postings ?? null, e.evidence_digest ?? null, e.source_digest ?? null];
+  return [e.kind, e.ref, e.ts, e.usd_cents, e.eur_cents, e.journal_id, e.document_number, e.journal_broker_net_cents, e.postings ?? null, e.evidence_digest ?? null, e.source_digest ?? null, e.effective_date ?? null];
 }
 
 /** Statement day of a pool timestamp (statement clock read as UTC). */
@@ -736,7 +741,7 @@ export async function validateUsdPool(params: ValidateUsdPoolParams): Promise<Us
           eventsSinceBase.push(record);
           continue;
         }
-        const check = await checkLoggedJournal(reader, key, { journal_id: record.journal_id, document_number: record.document_number, broker_net_cents: record.journal_broker_net_cents, postings: record.postings }, requireRegistered);
+        const check = await checkLoggedJournal(reader, key, { journal_id: record.journal_id, document_number: record.document_number, broker_net_cents: record.journal_broker_net_cents, postings: record.postings, effective_date: record.effective_date }, requireRegistered);
         if (check === "postings") return { ok: false, code: "usd_pool_chain_broken", detail: record.document_number };
         if (check !== "ok") {
           if (index < lastCheckpointIndex && check === "mismatch") return { ok: false, code: "usd_pool_chain_broken", detail: record.document_number };
@@ -748,7 +753,7 @@ export async function validateUsdPool(params: ValidateUsdPoolParams): Promise<Us
         continue;
       }
       if (record.journal_id !== null) {
-        const check = await checkLoggedJournal(reader, key, { journal_id: record.journal_id, document_number: record.document_number, broker_net_cents: record.fx_cents, postings: record.postings }, requireRegistered);
+        const check = await checkLoggedJournal(reader, key, { journal_id: record.journal_id, document_number: record.document_number, broker_net_cents: record.fx_cents, postings: record.postings, effective_date: record.effective_date }, requireRegistered);
         if (check === "unregistered") return { ok: false, code: "usd_pool_event_unregistered", detail: record.document_number ?? undefined };
         if (check !== "ok" || record.fx_cents === 0) return { ok: false, code: "usd_pool_chain_broken", detail: record.document_number ?? undefined };
       } else if (record.fx_cents !== 0 || !checkpointValueRecomputes(record) || !Array.isArray(record.postings) || record.postings.length !== 0) {
