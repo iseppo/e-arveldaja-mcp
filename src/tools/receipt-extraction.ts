@@ -496,6 +496,8 @@ export interface ExtractedAmountsWithMetadata extends ExtractedAmounts {
   total_gross_conflict?: boolean;
   /** Codes from explicitAmountConflictCodes: the document's labelled amounts contradict each other or were overridden. */
   explicit_amount_conflicts?: string[];
+  /** Internal: every net-labelled summary amount the document prints (not only the one picked); never in the extraction output. */
+  explicit_net_candidates?: number[];
   /** See ExtractedReceiptFields.gross_unlabelled. */
   gross_unlabelled?: boolean;
   /** See ExtractedReceiptFields.labelled_amount_over_max. */
@@ -2123,6 +2125,7 @@ function reconcileLayoutAmounts(bindings: ReadonlyMap<AmountField, LayoutAmountC
     vat_explicit: totalVat !== undefined && (vatBinding !== undefined || netBinding !== undefined),
     provenance,
     ...(explicitAmountConflicts.length > 0 ? { explicit_amount_conflicts: explicitAmountConflicts } : {}),
+    ...(explicitAmounts.net !== undefined ? { explicit_net_candidates: [explicitAmounts.net] } : {}),
   };
 }
 
@@ -2230,6 +2233,7 @@ export function mergeLayoutAmounts(layoutAmounts: ExtractedAmountsWithMetadata, 
     ...(layoutAmounts.explicit_amount_conflicts ?? []),
     ...(textAmounts.explicit_amount_conflicts ?? []),
   ])];
+  const explicitNetCandidates = [...(layoutAmounts.explicit_net_candidates ?? []), ...(textAmounts.explicit_net_candidates ?? [])];
   const mergedProvenance = preferTextGross
     ? layoutAmounts.provenance.filter(entry => entry.field !== "total_gross")
     : [...layoutAmounts.provenance];
@@ -2332,6 +2336,7 @@ export function mergeLayoutAmounts(layoutAmounts: ExtractedAmountsWithMetadata, 
     // The UNION of both paths' conflicts, whichever values were kept: a
     // conflict in the discarded path's labelled amounts must still hold the row.
     ...(explicitAmountConflicts.length > 0 ? { explicit_amount_conflicts: explicitAmountConflicts } : {}),
+    ...(explicitNetCandidates.length > 0 ? { explicit_net_candidates: explicitNetCandidates } : {}),
     // Only the kept gross can be unlabelled; the layout gross is label-bound.
     ...(preferTextGross && textAmounts.gross_unlabelled ? { gross_unlabelled: true } : {}),
     ...mergedHoldFlags(layoutAmounts, textAmounts),
@@ -2393,6 +2398,7 @@ function extractAmountsFromTextWithMetadata(text: string): ExtractedAmountsWithM
   let grossUnlabelled = false;
   const fallbackCandidates: ReceiptAmountCandidate[] = [];
   const componentAmounts: number[] = [];
+  const netLabelAmounts: number[] = [];
   let bestExplicitGrossCandidate: { amount: number; score: number; lineIndex: number } | undefined;
   let vatMetadata: AmountProvenanceMetadata | undefined;
   let netMetadata: AmountProvenanceMetadata | undefined;
@@ -2482,6 +2488,15 @@ function extractAmountsFromTextWithMetadata(text: string): ExtractedAmountsWithM
         source: "label",
         rationale: "line_score",
       };
+    }
+
+    // A net-labelled summary row: an item row prints money before its own
+    // "KM-ta" ("Remondifond … 17.70 0.00 KM-ta 17.70", the #5c rule) and is
+    // no document net.
+    const netLabel = classified.hasNetLikeLabel ? RECEIPT_NET_LABEL_RE.exec(classified.line) : null;
+    if (!classified.blockedAsReference && netLabel && classified.amounts.length > 0 &&
+      !MIXED_VAT_MONEY_BEFORE_RE.test(classified.line.slice(0, netLabel.index))) {
+      netLabelAmounts.push(Math.max(...classified.amounts));
     }
 
     if (
@@ -2669,6 +2684,7 @@ function extractAmountsFromTextWithMetadata(text: string): ExtractedAmountsWithM
     vat_explicit: totalVat !== undefined && (vatFromExplicitLine || netFromExplicitLine),
     provenance,
     ...(explicitAmountConflicts.length > 0 ? { explicit_amount_conflicts: explicitAmountConflicts } : {}),
+    ...(netLabelAmounts.length > 0 ? { explicit_net_candidates: netLabelAmounts } : {}),
     ...(grossUnlabelled ? { gross_unlabelled: true } : {}),
     ...(labelledAmountOverMax ? { labelled_amount_over_max: true } : {}),
     ...(zeroTotalStated ? { zero_total_stated: true } : {}),
@@ -4550,6 +4566,7 @@ export function extractReceiptFieldsFromText(
     provenance: _amountProvenance,
     extraction_notes: amountNotes,
     explicit_amount_conflicts: explicitAmountConflicts,
+    explicit_net_candidates: explicitNetCandidates,
     ...amountFields
   } = amounts;
   const buyerBlockSignal = options?.textItems && options.textItems.length > 0
@@ -4560,11 +4577,17 @@ export function extractReceiptFieldsFromText(
     })
     : undefined;
   const mixedVatRates = detectMixedVatRates(text, { ...amountFields, invoice_date });
+  // A proven breakdown explains only the net-labelled amounts it accounts for:
+  // its own subtotals or the computed taxable net. Any other labelled net
+  // ("Netosumma 200,00") keeps the conflict codes and the hold.
+  const mixedVatExplainsNets = mixedVatRates?.proven === true && (explicitNetCandidates ?? []).every(candidate =>
+    [...mixedVatRates.lines.map(line => line.net), ...(amountFields.total_net !== undefined ? [amountFields.total_net] : [])]
+      .some(explained => Math.abs(explained - candidate) <= AMOUNT_TRIO_TOLERANCE));
   const amountIssues = [...new Set([
     ...(explicitAmountConflicts ?? []),
     ...amountConsistencyIssues({ ...amountFields, invoice_date }),
     ...(mixedVatRates && !mixedVatRates.proven ? ["mixed_vat_rate_review"] : []),
-  ])].filter(code => !mixedVatRates?.proven || !MIXED_VAT_EXPLAINED_CODES.has(code));
+  ])].filter(code => !mixedVatExplainsNets || !MIXED_VAT_EXPLAINED_CODES.has(code));
   const extractionNotes = [
     ...(amountNotes ?? []),
     ...(supplierResult.extraction_notes ?? []),
