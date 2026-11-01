@@ -850,6 +850,40 @@ describe("lightyear investments tools", () => {
     expect(brk?.status).toBe("skipped");
   });
 
+  it("never lets an outside-tolerance sell take a same-identity sell's gains row, in either order", async () => {
+    // Two AMD sells in the same second, quantity 10 each. A converts USD1100 into
+    // EUR1000, B USD1105.50 into EUR1005. Only B's gains row is supplied (proceeds
+    // 1005, basis 900): B matches it exactly, A must not claim it by identity.
+    const sellA = ["13/07/2026 10:00:00", "OR-SAMESECA", "AMD", "US0079031078", "Sell", "10", "USD", "110", "1100.00", "", "0", "1100.00", ""];
+    const sellB = ["13/07/2026 10:00:00", "OR-SAMESECB", "AMD", "US0079031078", "Sell", "10", "USD", "110.55", "1105.50", "", "0", "1105.50", ""];
+    const convA = [
+      ["13/07/2026 10:00:10", "CN-SAMESECA", "EUR", "", "Conversion", "", "EUR", "", "1000.00", "1.1", "", "1000.00", ""],
+      ["13/07/2026 10:00:10", "CN-SAMESECA", "USD", "", "Conversion", "", "USD", "", "-1100.00", "0.90909", "0", "-1100.00", ""],
+    ];
+    const convB = [
+      ["13/07/2026 10:00:20", "CN-SAMESECB", "EUR", "", "Conversion", "", "EUR", "", "1005.00", "1.1", "", "1005.00", ""],
+      ["13/07/2026 10:00:20", "CN-SAMESECB", "USD", "", "Conversion", "", "USD", "", "-1105.50", "0.90909", "0", "-1105.50", ""],
+    ];
+    const gainsRows = [["13/07/2026 10:00:00", "AMD", "AMD", "US0079031078", "United States", "equity", "0", "10", "900", "1005", "105"]];
+    for (const rows of [[...convB, ...convA, sellB, sellA], [...convB, ...convA, sellA, sellB]]) {
+      const statement = buildStatementCsv(rows);
+      const gains = buildCapitalGainsCsv(gainsRows);
+      let reads = 0;
+      mockedReadFile.mockImplementation(async () => (reads++ === 0 ? statement : gains) as unknown as Awaited<ReturnType<typeof readFile>>);
+      const { handler } = setupLightyearTool("book_lightyear_trades");
+      const payload = parseMcpResponse((await handler({
+        file_path: "/tmp/lightyear.csv", capital_gains_file: "/tmp/gains.csv",
+        investment_account: 1550, broker_account: 1120, dry_run: true,
+      })).content[0]!.text) as { results: Array<{ reference?: string; status?: string; cost_basis?: number }>; warnings?: string[] };
+      const a = payload.results.find(r => r.reference?.includes("OR-SAMESECA"));
+      const b = payload.results.find(r => r.reference?.includes("OR-SAMESECB"));
+      expect(a?.status).toBe("skipped");
+      expect(b?.status).not.toBe("skipped");
+      expect(b?.cost_basis).toBe(900);
+      expect((payload.warnings ?? []).join("\n")).not.toContain("FIFO match by exact identity");
+    }
+  });
+
   it("drops the FIFO tolerance warning for a sell that is already booked", async () => {
     const statement = buildStatementCsv(realJuly13Rows());
     const gains = buildCapitalGainsCsv([[
@@ -4297,6 +4331,17 @@ describe("H18 bounded proceeds tolerance", () => {
     expect(warning).toContain("9989.99");
     expect(run.api.journals.create).not.toHaveBeenCalled();
     expect(vi.mocked(logAudit)).not.toHaveBeenCalled();
+  });
+
+  it("H18 keeps the 0.1 % tolerance for an EUR sell however its currency is spelled", async () => {
+    for (const ccy of ["EUR", "eur", " EUR "]) {
+      const row = h18StatementSell(`OR-H18-CCY`, "10000");
+      row[6] = ccy;
+      const { payload, run } = await h18Book([row], [h18GainsRow("10050", "Apple currency spelling", "US0378331011")]);
+      expect(payload.created).toBe(0);
+      expect(payload.warnings.join("\n")).not.toContain("FIFO match by exact identity");
+      expect(run.api.journals.create).not.toHaveBeenCalled();
+    }
   });
 
   it("H18 skips a material proceeds mismatch and performs zero mutation or audit", async () => {

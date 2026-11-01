@@ -2909,26 +2909,19 @@ export function withinProceedsTolerance(
 }
 
 /**
- * A gains row outside the proceeds tolerance still names the sell when it is the
- * only candidate with the sell's exact statement identity (date and time to the
- * second, ticker, quantity) and its proceeds are within
- * IDENTITY_PROCEEDS_RELATIVE_BOUND. Lightyear values gains-file proceeds at its own
- * reference rate, while the booked consideration is the EUR actually received
- * through the paired conversion (dealt rate, conversion fee) — on larger sells that
- * spread is 0.2–0.4 %. The bound keeps a gains file from another account out.
- * EUR sells have no rate between the two figures and keep the H18 tolerance.
+ * A gains row outside the proceeds tolerance still names a non-EUR sell when the
+ * sell's exact statement identity (date and time to the second, ticker, quantity)
+ * belongs to that one gains row and that one sell, nothing stronger claimed the
+ * row first, and the proceeds are within IDENTITY_PROCEEDS_RELATIVE_BOUND.
+ * Lightyear values gains-file proceeds at its own reference rate, while the booked
+ * consideration is the EUR actually received through the paired conversion (dealt
+ * rate, conversion fee) — on larger sells that spread is 0.2–0.4 %. The bound keeps
+ * a gains file from another account out. EUR sells have no rate between the two
+ * figures and keep the H18 tolerance.
  */
-function identityMatchOutsideTolerance(
-  sell: InvestmentTrade,
-  consideration: number,
-  gains: CapitalGainsRow[],
-  candidates: number[],
-): number | null {
-  if (sell.ccy === "EUR") return null;
-  const identity = candidates.filter(i => gains[i]!.date.trim() === sell.datetime.trim());
-  if (identity.length !== 1) return null;
-  const idx = identity[0]!;
-  return withinProceedsTolerance(consideration, gains[idx]!.proceeds_eur, 0.02, IDENTITY_PROCEEDS_RELATIVE_BOUND) ? idx : null;
+function sameSellIdentity(gain: CapitalGainsRow, sell: InvestmentTrade): boolean {
+  return gain.date.trim() === sell.datetime.trim() && gain.ticker === sell.ticker &&
+    Math.abs(gain.quantity - sell.quantity) < 0.000001;
 }
 
 function matchSellsToCapitalGains(
@@ -2938,6 +2931,7 @@ function matchSellsToCapitalGains(
 ): Map<string, CapitalGainsRow> {
   const result = new Map<string, CapitalGainsRow>();
   const consumedGains = new Set<number>();
+  const outsideTolerance: Array<{ sell: InvestmentTrade; consideration: number }> = [];
 
   for (const sell of sells) {
     if (sell.pool?.kind === "sell_in") {
@@ -2986,9 +2980,6 @@ function matchSellsToCapitalGains(
     }
 
     const eligibleMatches = [...exactMatches, ...tolerantMatches];
-    const identityIdx = eligibleMatches.length === 0 && outsideMatches.length > 0
-      ? identityMatchOutsideTolerance(sell, consideration, gains, outsideMatches)
-      : null;
 
     if (eligibleMatches.length === 1) {
       const idx = eligibleMatches[0]!;
@@ -3009,8 +3000,21 @@ function matchSellsToCapitalGains(
         `Skipping — verify cost basis manually and book the journal by hand.`
       );
       // Don't book — ambiguous cost basis is worse than missing it.
-    } else if (identityIdx !== null) {
-      const idx = identityIdx;
+    } else if (outsideMatches.length > 0) {
+      // Decided after every stronger match has claimed its row (see below).
+      outsideTolerance.push({ sell, consideration });
+    }
+  }
+
+  // Exact-identity fallback, run last so it never takes a row a proceeds or
+  // sell_in match owns, and never depends on statement order.
+  for (const { sell, consideration } of outsideTolerance) {
+    const identityRows = normalizedCurrency(sell.ccy) === "EUR" ? [] :
+      gains.flatMap((gain, i) => (sameSellIdentity(gain, sell) ? [i] : []));
+    const competingSells = sells.filter(other => other.datetime.trim() === sell.datetime.trim() &&
+      other.ticker === sell.ticker && Math.abs(other.quantity - sell.quantity) < 0.000001).length;
+    const idx = identityRows.length === 1 && competingSells === 1 && !consumedGains.has(identityRows[0]!) ? identityRows[0]! : null;
+    if (idx !== null && withinProceedsTolerance(consideration, gains[idx]!.proceeds_eur, 0.02, IDENTITY_PROCEEDS_RELATIVE_BOUND)) {
       const gain = gains[idx]!;
       warnings.push(
         `FIFO match by exact identity for sell ${sell.reference} (${sell.ticker} x${sell.quantity} at ${sell.datetime}): ` +
@@ -3019,13 +3023,13 @@ function matchSellsToCapitalGains(
       );
       result.set(sell.reference, gain);
       consumedGains.add(idx);
-    } else if (outsideMatches.length > 0) {
-      warnings.push(
-        `FIFO candidates for sell ${sell.reference} (${sell.ticker} x${sell.quantity} on ${sell.date}, ` +
-        `sell proceeds ${roundMoney(consideration)} EUR) are outside proceeds tolerance. ` +
-        `Skipping — manual review is required before booking.`
-      );
+      continue;
     }
+    warnings.push(
+      `FIFO candidates for sell ${sell.reference} (${sell.ticker} x${sell.quantity} on ${sell.date}, ` +
+      `sell proceeds ${roundMoney(consideration)} EUR) are outside proceeds tolerance. ` +
+      `Skipping — manual review is required before booking.`
+    );
   }
 
   return result;
