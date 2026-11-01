@@ -5346,3 +5346,50 @@ describe("#5b supplier name from the registered association, not the manager foo
     expect(supplierOf(text, "e.pdf")).toBe("Näidis Teenused OÜ");
   });
 });
+
+describe("two-column invoice: seller block on the right under a left-column buyer", () => {
+  // Synthetic layout: "Arve saaja" heads the page (buyer, left column); the
+  // seller's name, address and codes are a right-aligned block; the footer
+  // names a bank on its IBAN line.
+  const rows: Array<{ y: number; cells: Array<[number, string]> }> = [
+    { y: 93, cells: [[52, "Arve saaja"]] },
+    { y: 109, cells: [[52, "Näidis Ostja OÜ"], [432, "Sularahaarve 1633"]] },
+    { y: 129, cells: [[52, "Pargi tn 1-2"], [385, "Kuupäev"], [517, "02.08.2026"]] },
+    { y: 154, cells: [[52, "10111 Harju maakond"], [385, "Maksetähtpäev"], [517, "04.08.2026"]] },
+    { y: 190, cells: [[52, "Rg-kood 12000005"], [508, "Testmüüja OÜ"]] },
+    { y: 214, cells: [[489, "Kase tn 3-4"]] },
+    { y: 239, cells: [[470, "10222 Harju maakond"]] },
+    { y: 275, cells: [[485, "Rg-kood 12000011"]] },
+    { y: 287, cells: [[443, "KMKR nr EE100000007"]] },
+    { y: 314, cells: [[52, "Kirjeldus"], [301, "Kogus Ühik"], [392, "Hind km-ga"], [451, "Hind km-ta Summa km-ta"]] },
+    { y: 330, cells: [[54, "Majutus 02-04.08.26"], [322, "1"], [412, "105,30"], [475, "93,19"], [540, "93,19"]] },
+    { y: 362, cells: [[451, "Summa km-ta 13% 93,19"]] },
+    { y: 379, cells: [[464, "Käibemaks 13%"], [540, "12,11"]] },
+    { y: 395, cells: [[450, "Arve kokku (EUR) 105,30"]] },
+    { y: 774, cells: [[52, "Mobiil +3725000000"], [430, "Pank Üks IBAN EE382200221020145685"]] },
+    { y: 785, cells: [[52, "E-post info@example.invalid"], [498, "SWIFT HABAEE2X"]] },
+    { y: 797, cells: [[379, "Näidispank AS IBAN EE471000001020145685"]] },
+    { y: 808, cells: [[500, "SWIFT EEUHEE2X"]] },
+  ];
+  const items: LayoutTextItem[] = rows.flatMap(row =>
+    row.cells.map(([x, text]) => ({ text, x, y: row.y, width: text.length * 5, height: 11, pageNum: 1 })));
+  const text = rows.map(row => {
+    let line = "";
+    for (const [x, cell] of row.cells) line = line.padEnd(Math.max(line.length + 2, Math.round(x / 5)), " ") + cell;
+    return line;
+  }).join("\n");
+
+  it("names the right-column seller with its own registry code, never the buyer or the footer bank", () => {
+    const result = extractReceiptFieldsFromText(text, "invoice.pdf", { textItems: items });
+    expect(result.supplier_name).toBe("Testmüüja OÜ");
+    expect(result.supplier_reg_code).toBe("12000011");
+    expect(result.supplier_vat_no).toBe("EE100000007");
+  });
+
+  it("text only: a bank named on an IBAN line is never the supplier", () => {
+    const result = extractReceiptFieldsFromText(text, "invoice.pdf");
+    expect(result.supplier_name).not.toBe("Näidispank AS");
+    expect(result.supplier_name).not.toBe("Näidis Ostja OÜ");
+    expect(extractSupplierNameWithNotes("Näidispank AS IBAN EE471000001020145685\nKokku 10,00 €", "x.pdf").name).toBe("X");
+  });
+});
