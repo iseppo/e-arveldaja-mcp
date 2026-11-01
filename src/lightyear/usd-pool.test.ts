@@ -17,13 +17,16 @@ import {
   relieveCents,
   replayUsdOpening,
   statementPeriodFromFileName,
+  conversionEvidenceDigest,
   usdCentsToEurCents,
   usdPoolRecordKey,
   validateUsdPool,
   withUsdPoolLock,
+  type ConversionEvidence,
   type PoolKey,
   type StatementPoolEvent,
   type UsdPoolCheckpoint,
+  type PoolPosting,
   type UsdPoolEvent,
   type UsdPoolRecord,
 } from "./usd-pool.js";
@@ -36,7 +39,7 @@ function statementOf(events: Array<{ ref: string; ts: number; role: StatementPoo
     events: events.map((event, row_index) => ({ ...event, row_index })),
     rows: events.map((event, row_index) => ({
       row_index, reference: event.ref, ts: event.ts, type: event.role === "sweep" ? "Sell" : "Dividend", ticker: "ICSUSSDP", ccy: "USD",
-      quantity: 1, price_per_share: 1, gross_amount: 1, fee: 0, net_amount: 1,
+      quantity: 1, price_per_share: 1, gross_amount: 1, fee: 0, net_amount: 1, fx_rate: 0,
     })),
   };
 }
@@ -46,7 +49,7 @@ function opening(usd: number, eur: number, asOf = "2026-09-30", rate?: string): 
   return {
     record: "checkpoint", pool_key: KEY, kind: "opening", as_of: asOf, ts: endOfDaySeconds(asOf),
     usd_cents: usd, eur_cents: eur, fx_cents: 0, journal_id: null, document_number: null,
-    rate: rate ?? (usd === 0 ? "1.1000" : (usd / eur).toFixed(12)), rate_date: asOf, approved: true, recorded_at: "t",
+    rate: rate ?? (usd === 0 ? "1.1000" : (usd / eur).toFixed(12)), rate_date: asOf, approved: true, postings: [], recorded_at: "t",
   };
 }
 
@@ -54,10 +57,16 @@ function ts(day: string, time = "12:00:00"): number {
   return Date.parse(`${day}T${time}Z`) / 1000;
 }
 
+/** Canonical postings of {@link journal}: one broker line of the net. */
+function brokerPostings(brokerNetCents: number): PoolPosting[] {
+  return [{ accounts_id: 1020, accounts_dimensions_id: 11, type: brokerNetCents >= 0 ? "D" : "C", amount_cents: Math.abs(brokerNetCents) }];
+}
+
 function event(ref: string, day: string, kind: UsdPoolEvent["kind"], usd: number, eur: number, journalId: number, brokerNet = eur): UsdPoolEvent {
   return {
     record: "event", pool_key: KEY, ref, ts: ts(day), kind, usd_cents: usd, eur_cents: eur,
-    document_number: `LY:${ref}`, journal_id: journalId, journal_broker_net_cents: brokerNet, state: "committed", recorded_at: "t",
+    document_number: `LY:${ref}`, journal_id: journalId, journal_broker_net_cents: brokerNet, state: "committed",
+    postings: brokerPostings(brokerNet), recorded_at: "t",
   };
 }
 
@@ -216,7 +225,7 @@ describe("validateUsdPool", () => {
     const reval: UsdPoolCheckpoint = {
       record: "checkpoint", pool_key: KEY, kind: "revaluation", as_of: "2026-10-15", ts: endOfDaySeconds("2026-10-15"),
       usd_cents: 10775, eur_cents: 9700, fx_cents: 14, journal_id: 9, document_number: "LY-FX:CHZELUU:USD:2026-10-15",
-      rate: "1.1108", rate_date: "2026-10-15", recorded_at: "t",
+      rate: "1.1108", rate_date: "2026-10-15", postings: brokerPostings(14), recorded_at: "t",
     };
     const records = [opening(10000, 9000), event("IN-1", "2026-10-01", "distribution_in", 775, 686, 1), reval];
     const good = [journal(1, "LY:IN-1", 686), journal(9, "LY-FX:CHZELUU:USD:2026-10-15", 14)];
@@ -230,7 +239,7 @@ describe("validateUsdPool", () => {
     const reval: UsdPoolCheckpoint = {
       record: "checkpoint", pool_key: KEY, kind: "revaluation", as_of: "2026-10-15", ts: endOfDaySeconds("2026-10-15"),
       usd_cents: 10000, eur_cents: 9015, fx_cents: 14, journal_id: 9, document_number: "LY-FX:CHZELUU:USD:2026-10-15",
-      rate: "1.1108", rate_date: "2026-10-15", recorded_at: "t",
+      rate: "1.1108", rate_date: "2026-10-15", postings: brokerPostings(14), recorded_at: "t",
     };
     const journals = [journal(9, "LY-FX:CHZELUU:USD:2026-10-15", 14)];
     expect((await base([opening(10000, 9001), reval], journals)).ok).toBe(true);
@@ -253,7 +262,7 @@ describe("validateUsdPool", () => {
     const zero: UsdPoolCheckpoint = {
       record: "checkpoint", pool_key: KEY, kind: "revaluation", as_of: "2026-10-15", ts: endOfDaySeconds("2026-10-15"),
       usd_cents: 10000, eur_cents: 9000, fx_cents: 0, journal_id: null, document_number: null,
-      rate: "1.11111", rate_date: "2026-10-15", recorded_at: "t",
+      rate: "1.11111", rate_date: "2026-10-15", postings: [], recorded_at: "t",
     };
     expect((await base([opening(10000, 9000), zero], [])).ok).toBe(true);
     expect(await base([opening(10000, 9000), { ...zero, rate: "1.2" }], [])).toMatchObject({ ok: false, code: "usd_pool_chain_broken" });
@@ -326,11 +335,11 @@ describe("recoverUsdPoolIntents", () => {
     const checkpoint: UsdPoolCheckpoint = {
       record: "checkpoint", pool_key: KEY, kind: "revaluation", as_of: "2026-10-30", ts: endOfDaySeconds("2026-10-30"),
       usd_cents: 10000, eur_cents: 8951, fx_cents: 54, journal_id: null, document_number: "LY-FX:CHZELUU:USD:2026-10-30",
-      rate: "1.1172", rate_date: "2026-10-30", recorded_at: "t",
+      rate: "1.1172", rate_date: "2026-10-30", postings: brokerPostings(54), recorded_at: "t",
     };
     const store = memoryUsdPoolStore([opening(10000, 8897), {
       record: "event", pool_key: KEY, ref: "LY-FX:CHZELUU:USD:2026-10-30", ts: checkpoint.ts, kind: "revaluation", usd_cents: 0, eur_cents: 54,
-      document_number: "LY-FX:CHZELUU:USD:2026-10-30", journal_id: null, journal_broker_net_cents: 54, state: "intent", checkpoint, recorded_at: "t",
+      document_number: "LY-FX:CHZELUU:USD:2026-10-30", journal_id: null, journal_broker_net_cents: 54, state: "intent", checkpoint, postings: brokerPostings(54), recorded_at: "t",
     }]);
     expect((await recoverUsdPoolIntents(poolApi([journal(5, "LY-FX:CHZELUU:USD:2026-10-30", 54)]), store, KEY)).ok).toBe(true);
     expect(store.records.filter(r => r.record === "event")).toHaveLength(0);
@@ -344,11 +353,11 @@ describe("recoverUsdPoolIntents — checkpoint write failure (review wpc 2)", ()
     const checkpoint: UsdPoolCheckpoint = {
       record: "checkpoint", pool_key: KEY, kind: "revaluation", as_of: "2026-10-15", ts: endOfDaySeconds("2026-10-15"),
       usd_cents: 10000, eur_cents: 9500, fx_cents: 500, journal_id: null, document_number: "LY-FX:CHZELUU:USD:2026-10-15",
-      rate: "1.0526", rate_date: "2026-10-15", recorded_at: "t",
+      rate: "1.0526", rate_date: "2026-10-15", postings: brokerPostings(500), recorded_at: "t",
     };
     const intent: UsdPoolEvent = {
       record: "event", pool_key: KEY, ref: "LY-FX:CHZELUU:USD:2026-10-15", ts: checkpoint.ts, kind: "revaluation", usd_cents: 0, eur_cents: 500,
-      document_number: "LY-FX:CHZELUU:USD:2026-10-15", journal_id: null, journal_broker_net_cents: 500, state: "intent", checkpoint, recorded_at: "t",
+      document_number: "LY-FX:CHZELUU:USD:2026-10-15", journal_id: null, journal_broker_net_cents: 500, state: "intent", checkpoint, postings: brokerPostings(500), recorded_at: "t",
     };
     const store = memoryUsdPoolStore([opening(10000, 9000, "2026-09-30", "1.1111111111"), intent]);
     const upsert = store.upsert.bind(store);
@@ -415,5 +424,118 @@ describe("replayUsdOpening", () => {
       row("2026-01-13", "10:00:00", "Buy", "USD", -400, {}, 0),
       row("2026-01-13", "10:00:00", "Conversion", "USD", 400, {}, 1),
     ], endOfDaySeconds("2026-12-31"), fund)).toMatchObject({ ok: true, value: { usd_cents: 0 } });
+  });
+});
+
+describe("validateUsdPool — journal-free conversion_out evidence (plan §2, r1 #5)", () => {
+  // Opening 137 USD / €114; CN-FREE converts 0.37 USD → €0.31 with no fee: relief 37 × 114 / 137 = 30.79 → 31 = the EUR net.
+  const CN_TS = ts("2026-10-05");
+  const LEGS = [
+    { ccy: "EUR", gross_cents: 31, fee_cents: 0, net_cents: 31, fx_rate: "1.19" },
+    { ccy: "USD", gross_cents: -37, fee_cents: 0, net_cents: -37, fx_rate: "0.84" },
+  ];
+  const EVIDENCE: ConversionEvidence = {
+    ref: "CN-FREE", ts: CN_TS, date_string: "05/10/2026 12:00:00", legs: LEGS,
+    state_before: { usd_cents: 13700, eur_cents: 11400 }, relief_eur_cents: 31, fee_eur_cents: 0, fx_eur_cents: 0,
+  };
+  const free = (overrides: Partial<UsdPoolEvent> = {}, evidence: ConversionEvidence = EVIDENCE): UsdPoolEvent => ({
+    record: "event", pool_key: KEY, ref: "CN-FREE", ts: CN_TS, kind: "conversion_out", usd_cents: -37, eur_cents: -31,
+    document_number: "LY:CN-FREE", journal_id: null, journal_broker_net_cents: 0, state: "committed", postings: [],
+    source_evidence: evidence, evidence_digest: conversionEvidenceDigest(evidence), recorded_at: "t", ...overrides,
+  });
+  const covering = (usdGross = -0.37) => ({
+    events: [{ ref: "CN-FREE", row_index: 1, ts: CN_TS, role: "conversion_out" as const }],
+    rows: [
+      { row_index: 0, reference: "CN-FREE", ts: CN_TS, type: "Conversion", ticker: "", ccy: "EUR", quantity: 0, price_per_share: 0, gross_amount: 0.31, fee: 0, net_amount: 0.31, fx_rate: 1.19 },
+      { row_index: 1, reference: "CN-FREE", ts: CN_TS, type: "Conversion", ticker: "", ccy: "USD", quantity: 0, price_per_share: 0, gross_amount: usdGross, fee: 0, net_amount: usdGross, fx_rate: 0.84 },
+    ],
+  });
+  const notCovering = { events: [], rows: [], period: { from: "2026-10-10", to: "2026-10-30" } };
+  const run = (event: UsdPoolEvent, statement: Parameters<typeof validateUsdPool>[0]["statement"] = covering(), journals: Journal[] = [], start = opening(13700, 11400)) =>
+    validateUsdPool({ api: poolApi(journals), store: memoryUsdPoolStore([start, event]), key: KEY, until: UNTIL, newRecords: [UNTIL], statement, requireRegistered: false });
+
+  it("is accepted on its evidence: the pool replays to 136.63 USD / €113.69", async () => {
+    const result = await run(free());
+    expect(result).toMatchObject({ ok: true });
+    if (result.ok) expect(result.value.events).toMatchObject([{ ref: "CN-FREE", usd_cents: -37, eur_cents: -31 }]);
+  });
+
+  it("a run whose statement does not cover the day accepts it on the stored evidence", async () => {
+    expect(await run(free(), notCovering)).toMatchObject({ ok: true });
+  });
+
+  it.each([
+    ["evidence removed", () => run(free({ source_evidence: undefined }))],
+    ["digest altered", () => run(free({ evidence_digest: "0".repeat(64) }))],
+    ["statement edited to −0.38 USD on a covering run", () => run(free(), covering(-0.38))],
+    ["a live LY:CN-FREE journal appears", () => run(free(), covering(), [journal(77, "LY:CN-FREE", 0)])],
+    ["ts shifted by 1 s", () => run(free({ ts: CN_TS + 1 }))],
+    ["ref changed", () => run(free({ ref: "CN-OTHER", document_number: "LY:CN-OTHER" }), notCovering)],
+    ["eur_cents −30 instead of −31", () => run(free({ eur_cents: -30 }))],
+    ["journal_broker_net_cents 1", () => run(free({ journal_broker_net_cents: 1 }))],
+    ["journal_id set", () => run(free({ journal_id: 5 }), covering(), [journal(5, "LY:CN-FREE", 0)])],
+    ["state_before not the replay", () => run(free(), covering(), [], opening(13700, 11401))],
+    ["Codex case: evidence 10 USD → €9 on 100 USD / €90, event delta −20 USD / −€9", () => {
+      const evidence: ConversionEvidence = {
+        ...EVIDENCE, legs: [{ ...LEGS[0]!, gross_cents: 900, net_cents: 900 }, { ...LEGS[1]!, gross_cents: -1000, net_cents: -1000 }],
+        state_before: { usd_cents: 10000, eur_cents: 9000 }, relief_eur_cents: 900,
+      };
+      return run(free({ usd_cents: -2000, eur_cents: -900 }, evidence), notCovering, [], opening(10000, 9000));
+    }],
+  ])("%s → usd_pool_chain_broken", async (_label, check) => {
+    expect(await check()).toMatchObject({ ok: false, code: "usd_pool_chain_broken" });
+  });
+});
+
+describe("validateUsdPool — canonical postings on every pool record (r1 #6)", () => {
+  const posting = (accounts_id: number, type: "D" | "C", amount_cents: number, accounts_dimensions_id: number | null = null): PoolPosting =>
+    ({ accounts_id, accounts_dimensions_id, type, amount_cents });
+  const asJournal = (id: number, documentNumber: string, postings: PoolPosting[]): Journal => ({
+    id, document_number: documentNumber, effective_date: "2026-10-01", registered: true, is_deleted: false,
+    postings: postings.map(p => ({ accounts_id: p.accounts_id, ...(p.accounts_dimensions_id !== null ? { accounts_dimensions_id: p.accounts_dimensions_id } : {}), type: p.type, amount: p.amount_cents / 100 })),
+  });
+  const kinds: Array<[string, UsdPoolRecord, PoolPosting[], (postings: PoolPosting[]) => PoolPosting[], (postings: PoolPosting[]) => PoolPosting[]]> = [];
+  const distribution = [posting(1020, "D", 8000, 11), posting(8320, "C", 8000)];
+  kinds.push(["distribution_in", { ...event("DD-1", "2026-10-01", "distribution_in", 10000, 8000, 1), postings: distribution }, distribution,
+    p => p.map(x => x.accounts_id === 8320 ? { ...x, accounts_dimensions_id: 5 } : x), p => p.map(x => x.accounts_id === 8320 ? { ...x, accounts_id: 8330 } : x)]);
+  const sale = [posting(1020, "D", 8000, 11), posting(8335, "D", 100), posting(1100, "C", 7000), posting(8330, "C", 1100)];
+  kinds.push(["sell_in", { ...event("OR-S", "2026-10-02", "sell_in", 10000, 8000, 1), postings: sale }, sale,
+    p => p.map(x => x.accounts_id === 1100 ? { ...x, accounts_dimensions_id: 3 } : x), p => p.map(x => x.accounts_id === 8330 ? { ...x, accounts_id: 8320 } : x)]);
+  const purchase = [posting(1100, "D", 4400), posting(8335, "D", 100), posting(1020, "C", 4500, 11)];
+  kinds.push(["buy_relief", { ...event("OR-B", "2026-10-03", "buy_relief", -5000, -4500, 1, -4500), postings: purchase }, purchase,
+    p => p.map(x => x.accounts_id === 1100 ? { ...x, accounts_dimensions_id: 3 } : x), p => p.map(x => x.accounts_id === 8335 ? { ...x, accounts_id: 8320 } : x)]);
+  const revaluation = [posting(1020, "D", 54, 11), posting(8500, "C", 54)];
+  kinds.push(["revaluation", {
+    record: "checkpoint", pool_key: KEY, kind: "revaluation", as_of: "2026-10-15", ts: endOfDaySeconds("2026-10-15"),
+    usd_cents: 10000, eur_cents: 9054, fx_cents: 54, journal_id: 1, document_number: "LY-FX:CHZELUU:USD:2026-10-15",
+    rate: "1.1045", rate_date: "2026-10-15", postings: revaluation, recorded_at: "t",
+  }, revaluation, p => p.map(x => x.accounts_id === 8500 ? { ...x, accounts_dimensions_id: 4 } : x), p => p.map(x => x.accounts_id === 8500 ? { ...x, accounts_id: 8530 } : x)]);
+
+  const numberOf = (record: UsdPoolRecord) => record.document_number!;
+  const run = (record: UsdPoolRecord, postings: PoolPosting[]) =>
+    validateUsdPool({
+      api: poolApi([asJournal(1, numberOf(record), postings)]), store: memoryUsdPoolStore([opening(10000, 9000), record]),
+      key: KEY, until: UNTIL, newRecords: [UNTIL], statement: NO_STATEMENT, requireRegistered: false,
+    });
+
+  it.each(kinds)("%s: equal postings validate; a changed dimension or a swapped account breaks the chain", async (_kind, record, postings, dimensionChanged, accountSwapped) => {
+    expect((await run(record, postings)).ok).toBe(true);
+    expect(await run(record, dimensionChanged(postings))).toMatchObject({ ok: false, code: "usd_pool_chain_broken" });
+    expect(await run(record, accountSwapped(postings))).toMatchObject({ ok: false, code: "usd_pool_chain_broken" });
+  });
+
+  it("a record without postings breaks the chain (r2: no legacy records)", async () => {
+    const [, record, postings] = kinds[0]!;
+    expect(await run({ ...record, postings: undefined }, postings)).toMatchObject({ ok: false, code: "usd_pool_chain_broken" });
+    expect(await validateUsdPool({
+      api: poolApi([]), store: memoryUsdPoolStore([{ ...opening(10000, 9000), postings: undefined }]),
+      key: KEY, until: UNTIL, newRecords: [UNTIL], statement: NO_STATEMENT, requireRegistered: false,
+    })).toMatchObject({ ok: false, code: "usd_pool_chain_broken" });
+  });
+
+  it("Codex r2 same-net reclassification: D 1100 44.00 / D 8335 1.00 / C 1020 45.00 → D 1100 14.00 / D 8335 31.00 breaks the chain", async () => {
+    const [, record, postings] = kinds[2]!;
+    const reclassified = postings.map(x => x.accounts_id === 1100 ? { ...x, amount_cents: 1400 } : x.accounts_id === 8335 ? { ...x, amount_cents: 3100 } : x);
+    expect(await run(record, reclassified)).toMatchObject({ ok: false, code: "usd_pool_chain_broken" });
   });
 });

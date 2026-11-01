@@ -72,7 +72,7 @@ function opening(usd: number, eur: number, rate: string, asOf = "2026-09-30"): U
   return {
     record: "checkpoint", pool_key: KEY, kind: "opening", as_of: asOf, ts: endOfDaySeconds(asOf),
     usd_cents: usd, eur_cents: eur, fx_cents: 0, journal_id: null, document_number: null,
-    rate, rate_date: asOf, approved: true, recorded_at: "t",
+    rate, rate_date: asOf, approved: true, postings: [], recorded_at: "t",
   };
 }
 
@@ -80,6 +80,7 @@ function poolEvent(ref: string, iso: string, usd: number, eur: number, journalId
   return {
     record: "event", pool_key: KEY, ref, ts: Date.parse(iso) / 1000, kind: "distribution_in", usd_cents: usd, eur_cents: eur,
     document_number: `LY:${ref}`, journal_id: journalId, journal_broker_net_cents: eur, state: "committed", recorded_at: "t",
+    postings: [{ accounts_id: 1120, accounts_dimensions_id: null, type: "D", amount_cents: eur }, { accounts_id: 8320, accounts_dimensions_id: null, type: "C", amount_cents: eur }],
   };
 }
 

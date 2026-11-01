@@ -250,7 +250,7 @@ describe("USD pool roles: order-independent 1:1 pairing and complete classificat
 
   it("mixed second (Codex r1 #2): a logged +100 USD / €80 inflow and a 50 USD spend in one second are refused, and so is every later spend", async () => {
     const dividend = ["19/10/2026 14:43:49", "DD-TESTMIX", "AMD", "US0079031078", "Dividend", "0", "USD", "0", "100.00", "0", "0", "100.00", "0"];
-    const pool = [poolOpening(10000, 9000, "1.1111111111"), poolDistribution("DD-TESTMIX", "2026-10-19T14:43:49Z", 10000, 8000, 601)];
+    const pool = [poolOpening(10000, 9000, "1.1111111111"), poolDistribution("DD-TESTMIX", "2026-10-19T14:43:49Z", 10000, 8000, 601, 8330)];
     const journals = [poolJournal(601, "DD-TESTMIX", 8000, 8330)];
     load([dividend, fundSell("19/10/2026 14:43:40", "OR-TESTMXSW1", "50.00"), buy("19/10/2026 14:43:49", "OR-TESTMXBY1", "50.00"),
       fundSell("20/10/2026 10:00:00", "OR-TESTMXSW2", "10.00"), buy("20/10/2026 10:00:10", "OR-TESTMXBY2", "10.00")]);
@@ -272,14 +272,23 @@ describe("USD pool roles: order-independent 1:1 pairing and complete classificat
     }
   });
 
-  it("D2 visible: a fund-paid buy after a USD→EUR conversion that no tool books yet reviews instead of using a wrong balance", async () => {
+  it("D2 visible: a fund-paid buy after a USD→EUR conversion is valued from the balance that conversion leaves, never the stale one", async () => {
     load([
       ...convOut("12/10/2026 20:35:07", "CN-TESTD2V", "50.00", "0.18", "42.50"),
       fundSell("19/10/2026 14:43:15", "OR-TESTD2VSW", "20.00"),
       buy("19/10/2026 14:43:49", "OR-TESTD2VBY", "20.00"),
     ]);
+    // Opening 100 USD / €90; the conversion (booked by the same plan, Q4) relieves 50 USD / €45, so the 20 USD buy
+    // relieves 20 × 45 / 50 = €18.00 (not 20 × 90 / 100 from the stale balance — the same here — nor a guess).
     const dry = await tradesTool({ pool: [poolOpening(10000, 9000, "1.1111111111")] }).run({ dry_run: true });
-    expect(reviewCode(dry.payload, "OR-TESTD2VBY")).toBe("usd_pool_prerequisite_unbooked");
+    expect(dry.payload.results.find(row => String(row.reference).includes("CN-TESTD2V"))).toMatchObject({ status: "would_create", pool: { kind: "conversion_out", relief_eur: 45 } });
+    expect(dry.payload.results.find(row => String(row.reference).includes("OR-TESTD2VBY"))).toMatchObject({ status: "would_create", pool: { relief_eur: 18 } });
+    // Without that conversion booked first (a journal booked outside the pool log), the buy reviews instead.
+    const outside = await tradesTool({
+      pool: [poolOpening(10000, 9000, "1.1111111111")],
+      journals: [{ id: 801, document_number: "LY:CN-TESTD2V", effective_date: "2026-10-12", registered: true, is_deleted: false, postings: [] }],
+    }).run({ dry_run: true });
+    expect(reviewCode(outside.payload, "OR-TESTD2VBY")).toBe("usd_pool_prerequisite_unbooked");
   });
 
   it("parse, portfolio and trades flag the same trades for conversion review", async () => {

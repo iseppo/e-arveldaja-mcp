@@ -72,7 +72,11 @@ import {
   defaultUsdPoolStore,
   endOfDaySeconds,
   eventOrder,
+  canonicalPoolPostings,
+  conversionEvidenceDigest,
+  conversionLegsFromRows,
   journalBrokerNetCents,
+  journalMatchesPoolRecord,
   lightyearAccountFromFileName,
   poolFrontier,
   poolRecordsFor,
@@ -93,6 +97,8 @@ import {
   type OpeningReplayRow,
   type OpeningReplaySummary,
   type UsdPoolCheckpoint,
+  type ConversionEvidence,
+  type ConversionLegEvidence,
   type PoolKey,
   type PoolCommand,
   type UsdPoolSnapshot,
@@ -3077,7 +3083,7 @@ async function commitPoolEvent<C>(api: ApiContext, pool: LightyearPoolExecution<
   try {
     api.journals.invalidateListCache();
     const journal = await api.journals.get(journalId);
-    if (journal.document_number !== event.document_number || journalBrokerNetCents(journal, pool.key) !== event.journal_broker_net_cents) {
+    if (journalMatchesPoolRecord(journal, pool.key, { document_number: event.document_number, broker_net_cents: event.journal_broker_net_cents, postings: event.postings }) !== "ok") {
       pool.notes.push(`usd_pool_commit_deferred: journal ${journalId} (${event.document_number}) read back with other postings; the pool stays blocked until the next run's recovery checks it.`);
       return false;
     }
@@ -3145,7 +3151,25 @@ async function executeLightyearJournalCommands<C extends {
         : { outcome: "ready" };
     },
     mutate: async () => {
-      const poolEvent = params.pool?.eventOf(command);
+      const pending = params.pool?.eventOf(command);
+      // Every pool record stores the approved command's canonical postings (r1 #6); the readback, the
+      // recovery and every later validation compare the live journal's posting multiset with them.
+      const postings = canonicalPoolPostings(command.postings);
+      const poolEvent = pending && {
+        ...pending, postings,
+        ...(pending.checkpoint ? { checkpoint: { ...pending.checkpoint, postings } } : {}),
+      };
+      if (poolEvent && params.pool && poolEvent.source_evidence) {
+        // Journal-free conversion_out: no external write, so no intent stage — written once as committed.
+        try {
+          params.pool.store.upsert([{ ...poolEvent, postings: [], state: "committed", journal_id: null, recorded_at: new Date().toISOString() }]);
+        } catch {
+          createdByIndex.set(index, { status: "failed" });
+          return { outcome: "failed", error_code: "usd_pool_intent_write_failed", mutation_occurred: false };
+        }
+        createdByIndex.set(index, { status: "recorded" });
+        return { outcome: "completed" };
+      }
       if (poolEvent && params.pool) {
         try {
           params.pool.store.upsert([{ ...poolEvent, state: "intent", journal_id: null, recorded_at: new Date().toISOString() }]);
@@ -3236,6 +3260,7 @@ interface TradeResultRow {
   type: string;
   date: string;
   eur_amount: number;
+  /** would_create / created, …; a journal-free pool conversion (no fee, no FX) is would_record / recorded. */
   status: string;
   journal_id?: number;
   cost_basis?: number;
@@ -3320,6 +3345,8 @@ interface TradesProjectionParams {
   fxAccount?: number;
   /** C4: pool the funded buys relieve. */
   poolKey?: PoolKey | null;
+  /** Q4: unbooked conversion_out conversions, valued (or reviewed) by valuePoolTrades. */
+  conversions?: PoolConversion[];
 }
 
 /** Statement content of a trade row: same-reference rows collapse only when it is identical. */
@@ -3379,6 +3406,112 @@ function poolCommandReadiness(
     kept.push(pooled);
   }
   return { pool: kept, held };
+}
+
+/**
+ * Planned rows of the run's conversion_out conversions (plan Q4): D fee, ±FX,
+ * one broker line `EUR net − relief`. Fee 0 and FX 0 books no journal: a
+ * journal-free event carrying its statement evidence.
+ */
+function conversionPlannedRows(
+  params: TradesProjectionParams,
+  warnings: string[],
+  duplicates: Array<{ reference: string; ticker: string; date: string }>,
+): Array<{ ts: number; ref: string; row: PlannedTradeRow }> {
+  const rows: Array<{ ts: number; ref: string; row: PlannedTradeRow }> = [];
+  const brokerDim = params.broker_dimension_id ? { accounts_dimensions_id: params.broker_dimension_id } : {};
+  const cents = (value: number) => value / 100;
+  for (const conversion of params.conversions ?? []) {
+    if (conversion.recorded) { duplicates.push({ reference: conversion.reference, ticker: "", date: conversion.date }); continue; }
+    const base = { reference: conversion.reference, ticker: "", type: "Conversion", date: conversion.date };
+    const push = (row: PlannedTradeRow) => rows.push({ ts: conversion.ts, ref: conversion.reference, row });
+    const ownIds = params.ownRefCandidates?.get(conversion.reference);
+    if (ownIds) {
+      const reason = fxReason("reference_journal_date_mismatch");
+      warnings.push(`${fxReviewWarning(conversion.reference, reason)} Candidate journal id(s): ${ownIds.join(", ")}.`);
+      push({ kind: "result", row: { ...base, eur_amount: 0, status: "skipped", skip_reason: reason.message, candidate_journal_ids: ownIds } });
+      continue;
+    }
+    const valuation = conversion.valuation;
+    if (!valuation || conversion.review_reason !== null || conversion.legs === null || !params.poolKey || params.fxAccount === undefined) {
+      const reason = conversion.review_reason ?? fxReason("usd_pool_unavailable");
+      warnings.push(fxReviewWarning(conversion.reference, reason));
+      push({ kind: "result", row: { ...base, eur_amount: 0, status: "skipped", skip_reason: reason.message } });
+      continue;
+    }
+    const postings: LyPosting[] = [];
+    if (conversion.fee_eur_cents > 0) postings.push({ accounts_id: params.feeAccount, type: "D", amount: cents(conversion.fee_eur_cents) });
+    if (valuation.fx_eur_cents > 0) postings.push({ accounts_id: params.fxAccount, type: "D", amount: cents(valuation.fx_eur_cents) });
+    if (valuation.fx_eur_cents < 0) postings.push({ accounts_id: params.fxAccount, type: "C", amount: cents(-valuation.fx_eur_cents) });
+    if (valuation.broker_net_cents > 0) postings.push({ accounts_id: params.broker_account, ...brokerDim, type: "D", amount: cents(valuation.broker_net_cents) });
+    if (valuation.broker_net_cents < 0) postings.push({ accounts_id: params.broker_account, ...brokerDim, type: "C", amount: cents(-valuation.broker_net_cents) });
+    const journalFree = postings.length === 0;
+    const evidence: ConversionEvidence | undefined = journalFree
+      ? {
+        ref: conversion.reference, ts: conversion.ts, date_string: conversion.datetime, legs: conversion.legs,
+        state_before: valuation.state_before, relief_eur_cents: valuation.relief_eur_cents, fee_eur_cents: 0, fx_eur_cents: 0,
+      }
+      : undefined;
+    const evidenceDigest = evidence ? conversionEvidenceDigest(evidence) : undefined;
+    const fxResult = valuation.fx_eur_cents === 0
+      ? undefined
+      : { account: params.fxAccount, amount: cents(Math.abs(valuation.fx_eur_cents)), kind: valuation.fx_eur_cents > 0 ? "loss" as const : "gain" as const };
+    const resultRow: TradeResultRow = {
+      ...base, eur_amount: cents(conversion.eur_net_cents), status: journalFree ? "would_record" : "would_create",
+      pool: {
+        kind: "conversion_out", conversion_reference: conversion.reference,
+        pool_usd: -cents(conversion.usd_gross_cents), pool_eur: -cents(valuation.relief_eur_cents), relief_eur: cents(valuation.relief_eur_cents),
+      },
+      ...(fxResult ? { fx_result: fxResult } : {}),
+    };
+    const poolRecord = stripUndefinedDeep({
+      kind: "conversion_out", usd_cents: -conversion.usd_gross_cents, eur_net_cents: conversion.eur_net_cents,
+      fee_eur_cents: conversion.fee_eur_cents, relief_eur_cents: valuation.relief_eur_cents, fx_eur_cents: valuation.fx_eur_cents,
+      broker_net_cents: valuation.broker_net_cents, pool_snapshot_digest: valuation.snapshot_digest, evidence_digest: evidenceDigest,
+    }) as PlanRecord;
+    const usdText = cents(conversion.usd_gross_cents).toFixed(2);
+    const command: TradeCommand = {
+      reference: conversion.reference, date: conversion.date, ticker: "", tradeType: "Conversion",
+      title: `Lightyear Conversion: ${usdText} USD → ${cents(conversion.eur_net_cents).toFixed(2)} EUR (USD-st, kursivahe ${cents(-valuation.fx_eur_cents)} EUR)`,
+      postings, resultRow,
+      auditSummary: `Lightyear USD→EUR conversion: ${usdText} USD relieved at ${cents(valuation.relief_eur_cents)} EUR, FX ${cents(-valuation.fx_eur_cents)} EUR`,
+      auditDetails: { effective_date: conversion.date, type: "Conversion", pool: poolRecord, postings: postings.map(p => ({ accounts_id: p.accounts_id, type: p.type, amount: p.amount })) },
+      reviewProjection: stripUndefinedDeep({ ...base, eur_amount: cents(conversion.eur_net_cents), journal_free: journalFree || undefined, pool: poolRecord }) as PlanRecord,
+      pool: poolRecord,
+      poolEvent: {
+        record: "event", pool_key: params.poolKey, ref: conversion.reference, ts: conversion.ts, kind: "conversion_out",
+        usd_cents: -conversion.usd_gross_cents, eur_cents: -valuation.relief_eur_cents,
+        document_number: `LY:${conversion.reference}`, journal_broker_net_cents: valuation.broker_net_cents,
+        ...(evidence ? { source_evidence: evidence, evidence_digest: evidenceDigest } : {}),
+      },
+    };
+    push({ kind: "command", command });
+  }
+  return rows;
+}
+
+/**
+ * Insert the conversion rows into the trade rows in statement (ts, ref) order.
+ * `planned` holds one row per `newTrades` entry, in their (date, time) order.
+ */
+function mergeConversionRows(planned: PlannedTradeRow[], newTrades: readonly InvestmentTrade[], conversions: Array<{ ts: number; ref: string; row: PlannedTradeRow }>): void {
+  if (conversions.length === 0) return;
+  if (planned.length !== newTrades.length) throw new Error("trades projection: one planned row per trade expected");
+  let lastTs = Number.NEGATIVE_INFINITY;
+  const keyed = planned.map((row, index) => {
+    const trade = newTrades[index]!;
+    lastTs = lightyearTimestampSeconds(trade.datetime) ?? lastTs;
+    return { ts: lastTs, ref: trade.reference, row };
+  });
+  const pending = [...conversions].sort((a, b) => a.ts - b.ts || (a.ref < b.ref ? -1 : a.ref > b.ref ? 1 : 0));
+  const merged: PlannedTradeRow[] = [];
+  let next = 0;
+  for (const entry of keyed) {
+    while (next < pending.length && (pending[next]!.ts < entry.ts || (pending[next]!.ts === entry.ts && pending[next]!.ref < entry.ref))) merged.push(pending[next++]!.row);
+    merged.push(entry.row);
+  }
+  while (next < pending.length) merged.push(pending[next++]!.row);
+  planned.splice(0, planned.length, ...merged);
 }
 
 function computeTradesProjection(params: TradesProjectionParams): TradesProjection {
@@ -3717,6 +3850,9 @@ function computeTradesProjection(params: TradesProjectionParams): TradesProjecti
     });
     planned.push({ kind: "command", command: commands[commands.length - 1]! });
   }
+
+  mergeConversionRows(planned, newTrades, conversionPlannedRows(params, warnings, duplicates));
+  commands.splice(0, commands.length, ...planned.flatMap(row => row.kind === "command" ? [row.command] : []));
 
   const skippedSells = planned.filter(p => p.kind === "result" && p.row.status === "skipped" && p.row.type === "Sell");
   if (skippedSells.length > 0 && !params.hasCapitalGainsFile) {
@@ -4500,7 +4636,7 @@ export function statementPoolEvents(
   const poolRows = rows.map((row): PoolStatementRow => ({
     row_index: row.row_index, reference: row.reference, ts: lightyearTimestampSeconds(row.date), type: row.type,
     ticker: row.ticker, ccy: row.ccy, quantity: row.quantity, price_per_share: row.price_per_share,
-    gross_amount: row.gross_amount, fee: row.fee, net_amount: row.net_amount,
+    gross_amount: row.gross_amount, fee: row.fee, net_amount: row.net_amount, fx_rate: row.fx_rate,
   }));
   const convertedDistributionRows = new Set(distributions.distributions
     .filter(d => d.fx_provenance?.source === "statement_conversion").map(d => d.row_index));
@@ -4511,7 +4647,8 @@ export function statementPoolEvents(
     retainedDistributionRows: distributions.unconvertedRowIndexes,
     convertedDistributionRows,
   });
-  return { events, rows: poolRows.filter(row => normalizedCurrency(row.ccy) === "USD") };
+  // USD rows plus both legs of every conversion (journal-free evidence compares the EUR leg too).
+  return { events, rows: poolRows.filter(row => normalizedCurrency(row.ccy) === "USD" || row.type === "Conversion") };
 }
 
 /** Pool roles of a whole statement as the pool-dependent tools see them (trade + distribution extraction). */
@@ -4543,6 +4680,81 @@ function divideHalfUp(numerator: bigint, denominator: bigint): number {
 }
 
 /**
+ * A USD→EUR conversion no trade or distribution claims (statement role
+ * conversion_out, plan Q4): the USD leaving the pool relieves it at average
+ * carrying value; the dealt EUR value is the EUR net plus the fee in EUR.
+ */
+export interface PoolConversion {
+  reference: string;
+  date: string;
+  datetime: string;
+  ts: number;
+  /** USD leaving the pool: |USD leg gross| (fee included). */
+  usd_gross_cents: number;
+  eur_net_cents: number;
+  /** USD-leg fee → half-up(fee × EUR net / USD net); EUR-leg fee → that fee. */
+  fee_eur_cents: number;
+  /** Normalized statement legs (journal-free evidence); null when the rows are not one EUR + one USD leg. */
+  legs: ConversionLegEvidence[] | null;
+  review_reason: FxReviewReason | null;
+  /** A journal-free conversion_out already committed to the pool log: done, like a booked journal. */
+  recorded?: true;
+  valuation?: {
+    relief_eur_cents: number;
+    /** relief − (EUR net + fee): > 0 loss (D fx_account), < 0 gain (C fx_account). */
+    fx_eur_cents: number;
+    /** EUR net − relief: the one broker line (D if > 0, C if < 0). */
+    broker_net_cents: number;
+    state_before: { usd_cents: number; eur_cents: number };
+    snapshot_digest: string;
+  };
+}
+
+/** The statement's conversion_out conversions (pool roles on only when cash-fund tickers are skipped). */
+function extractPoolConversions(rows: AccountStatementRow[], extraction: TradeExtractionResult, fundingTickers: ReadonlySet<string>): PoolConversion[] {
+  if (fundingTickers.size === 0) return [];
+  const distributions = extractDistributions(rows, tradeReservedConversionRefsWithFunding(rows, fundingTickers));
+  const { events } = statementPoolEvents(rows, extraction, distributions, fundingTickers);
+  const refs = [...new Set(events.filter(event => event.role === "conversion_out").map(event => event.ref))];
+  return refs.map(ref => {
+    const group = rows.filter(row => row.reference === ref);
+    const conversionRows = group.filter(row => row.type === "Conversion");
+    const usdRows = conversionRows.filter(row => normalizedCurrency(row.ccy) === "USD");
+    const eurRows = conversionRows.filter(row => normalizedCurrency(row.ccy) === "EUR");
+    const anchor = usdRows[0] ?? conversionRows[0]!;
+    const conversion: PoolConversion = {
+      reference: ref, date: statementDay(anchor.date) ?? parseLightyearDate(anchor.date), datetime: anchor.date,
+      ts: lightyearTimestampSeconds(anchor.date) ?? 0,
+      usd_gross_cents: 0, eur_net_cents: 0, fee_eur_cents: 0, legs: conversionLegsFromRows(conversionRows, ref), review_reason: null,
+    };
+    // A same-reference row that is not one of the two legs (another trade, a third leg) holds it (T-FC9).
+    if (group.length !== conversionRows.length) { conversion.review_reason = fxReason("reference_conflict"); return conversion; }
+    if (conversionRows.length !== 2 || usdRows.length !== 1 || eurRows.length !== 1 || conversion.legs === null) {
+      conversion.review_reason = fxReason("invalid_conversion_pair");
+      return conversion;
+    }
+    const usd = usdRows[0]!;
+    const eur = eurRows[0]!;
+    const amountFailure = validateConversionAmounts(eur, usd);
+    if (amountFailure) { conversion.review_reason = amountFailure; return conversion; }
+    const usdGross = moneyToSafeCents(Math.abs(usd.gross_amount));
+    const usdNet = moneyToSafeCents(Math.abs(usd.net_amount));
+    const usdFee = moneyToSafeCents(usd.fee);
+    const eurNet = moneyToSafeCents(Math.abs(eur.net_amount));
+    const eurFee = moneyToSafeCents(eur.fee);
+    if (usdGross === null || usdNet === null || usdFee === null || eurNet === null || eurFee === null || usdNet === 0 || !(usd.gross_amount < 0) || !(eur.net_amount > 0)) {
+      conversion.review_reason = fxReason("conversion_amount_conflict");
+      return conversion;
+    }
+    if (usdFee > 0 && eurFee > 0) { conversion.review_reason = fxReason("conversion_fee_conflict"); return conversion; }
+    conversion.usd_gross_cents = usdGross;
+    conversion.eur_net_cents = eurNet;
+    conversion.fee_eur_cents = usdFee > 0 ? divideHalfUp(BigInt(usdFee) * BigInt(eurNet), BigInt(usdNet)) : eurFee;
+    return conversion;
+  });
+}
+
+/**
  * Value the USD-pool trades of a trades run (plan Q3, generalised C4):
  * - sell kept in USD: net and fee at the frozen ECB rate of the trade day
  *   (consideration = net + fee, agreeing with the gross at ECB within 1 cent);
@@ -4568,16 +4780,28 @@ async function valuePoolTrades(params: {
   held: ReadonlyMap<string, FxReviewCode>;
   /** Statement period from the file name, when it carries one. */
   period: { from: string; to: string } | null;
+  /** Unbooked conversion_out conversions (plan Q4); held ones carry their code in `heldConversions`. */
+  conversions: PoolConversion[];
+  heldConversions: ReadonlyMap<string, FxReviewCode>;
 }): Promise<void> {
   const { pool } = params;
-  if (pool.length === 0) return;
-  const reviewAll = (code: FxReviewCode) => { for (const trade of pool) trade.fx_review_reason = fxReason(code); };
+  let conversions = params.conversions;
+  if (pool.length === 0 && conversions.length === 0) return;
+  const reviewAll = (code: FxReviewCode) => {
+    for (const trade of pool) trade.fx_review_reason = fxReason(code);
+    for (const conversion of conversions) conversion.review_reason = fxReason(code);
+  };
   // No pool key or store: a pool-affecting trade is a review, never booked unlogged (FC3).
   if (params.key === null) return reviewAll("usd_pool_account_unknown");
   const key = params.key;
   const loaded = await loadPoolRecords(params.api, params.store, key, params.inLock);
   if (!loaded.ok) return reviewAll(loaded.code);
   const view = poolRecordsFor(loaded.records, key);
+  // A journal-free conversion has no LY: journal to mark it booked: its committed pool event does.
+  const recordedFree = new Set(view.events.filter(event => event.state === "committed" && event.journal_id === null && event.kind === "conversion_out").map(event => event.ref));
+  for (const conversion of conversions) if (recordedFree.has(conversion.reference)) conversion.recorded = true;
+  conversions = conversions.filter(conversion => conversion.recorded !== true);
+  if (pool.length === 0 && conversions.length === 0) return;
   if (!view.opening || view.opening.approved !== true) return reviewAll("usd_pool_checkpoint_missing");
   const openingOrder = checkpointOrder("opening", view.opening.as_of);
   const frontier = poolFrontier(loaded.records.filter(record => poolKeyId(record.pool_key) === poolKeyId(key)));
@@ -4585,35 +4809,40 @@ async function valuePoolTrades(params: {
   const statement = statementPoolEvents(params.rows, params.extraction, distributions, params.fundingTickers);
   // Per-command pre-checks, frontier first (FC4), then a second holding pool inflow and outflow (Codex r1 #2).
   const mixed = checkMixedSeconds(statement.events, openingOrder);
+  // Every pool command of the run: trades and conversions, by reference.
+  const subjects = [
+    ...pool.map(trade => ({ ref: trade.reference, ts: trade.pool!.ts, date: trade.date })),
+    ...conversions.map(conversion => ({ ref: conversion.reference, ts: conversion.ts, date: conversion.date })),
+  ];
   const preBlocked = new Map<string, FxReviewCode>();
-  for (const trade of pool) {
-    const order = eventOrder(trade.reference, trade.pool!.ts);
+  for (const subject of subjects) {
+    const order = eventOrder(subject.ref, subject.ts);
     if (frontier !== null && compareOrder(order, frontier.order) <= 0) {
-      preBlocked.set(trade.reference, compareOrder(order, openingOrder) <= 0 ? "usd_pool_before_opening" : "usd_pool_backdated_event");
-    } else if (mixed !== null && trade.pool!.ts >= mixed) {
-      preBlocked.set(trade.reference, "usd_pool_ambiguous_order");
+      preBlocked.set(subject.ref, compareOrder(order, openingOrder) <= 0 ? "usd_pool_before_opening" : "usd_pool_backdated_event");
+    } else if (mixed !== null && subject.ts >= mixed) {
+      preBlocked.set(subject.ref, "usd_pool_ambiguous_order");
     }
   }
-  const open = pool.filter(trade => !preBlocked.has(trade.reference));
+  const open = subjects.filter(subject => !preBlocked.has(subject.ref));
   let snapshot: UsdPoolSnapshot | null = null;
   if (open.length > 0) {
-    const orders = open.map(trade => eventOrder(trade.reference, trade.pool!.ts));
+    const orders = open.map(subject => eventOrder(subject.ref, subject.ts));
     const until = orders.reduce((latest, order) => compareOrder(order, latest) > 0 ? order : latest);
     const validated = await validateUsdPool({
-      api: params.api, store: params.store, key, until, newRecords: orders, statement,
-      plannedRefs: new Set(pool.map(trade => trade.reference)),
+      api: params.api, store: params.store, key, until, newRecords: orders, statement: { ...statement, period: params.period },
+      plannedRefs: new Set(subjects.map(subject => subject.ref)),
       requireRegistered: false,
     });
     if (!validated.ok) return reviewAll(validated.code);
     snapshot = validated.value;
-    // The statement must cover the whole interval from the last checkpoint through the last pool trade.
-    const lastDay = open.reduce((latest, trade) => trade.date > latest ? trade.date : latest, open[0]!.date);
+    // The statement must cover the whole interval from the last checkpoint through the last pool command.
+    const lastDay = open.reduce((latest, subject) => subject.date > latest ? subject.date : latest, open[0]!.date);
     if (!statementCoversPoolSince(params.period, params.rows, snapshot.base, lastDay)) return reviewAll("usd_pool_statement_gap");
   }
 
   type Prepared = { trade: InvestmentTrade; ecb: EcbRateRecord | null; ecbCents: number | null; feeCents: number | null };
   const prepared = new Map<string, Prepared>();
-  const commands: PoolCommand[] = pool.map(trade => {
+  const tradeCommands: PoolCommand[] = pool.map(trade => {
     const tradePool = trade.pool!;
     const outcome = replayFrozenFx(params.fxOutcomes, "USD", trade.date);
     const rate = outcome.ok ? outcome.rate.rate : null;
@@ -4633,8 +4862,27 @@ async function valuePoolTrades(params: {
       ? { ...base, usd_delta_cents: tradePool.pool_usd_cents, eur: { fixed: ecbCents ?? 0 } }
       : { ...base, usd_delta_cents: -tradePool.pool_usd_cents, eur: "relief" as const };
   });
+  const conversionByRef = new Map(conversions.map(conversion => [conversion.reference, conversion]));
+  const conversionCommands: PoolCommand[] = conversions.map(conversion => {
+    const blocked = preBlocked.get(conversion.reference) ?? params.heldConversions.get(conversion.reference) ?? conversion.review_reason?.code;
+    return { ref: conversion.reference, ts: conversion.ts, usd_delta_cents: -conversion.usd_gross_cents, eur: "relief" as const, ...(blocked !== undefined ? { blocked } : {}) };
+  });
   const emptySnapshot = (): UsdPoolSnapshot => ({ pool_key: key, opening: view.opening!, base: view.opening!, events: [], snapshot_digest: "" });
-  for (const projected of projectPool(snapshot ?? emptySnapshot(), commands)) {
+  for (const projected of projectPool(snapshot ?? emptySnapshot(), [...tradeCommands, ...conversionCommands])) {
+    const conversion = conversionByRef.get(projected.ref);
+    if (conversion) {
+      if (!projected.ok) { conversion.review_reason = fxReason(projected.code as FxReviewCode); continue; }
+      const relief = projected.relief_eur_cents!;
+      conversion.valuation = {
+        relief_eur_cents: relief,
+        fx_eur_cents: relief - (conversion.eur_net_cents + conversion.fee_eur_cents),
+        broker_net_cents: conversion.eur_net_cents - relief,
+        state_before: projected.state_before,
+        snapshot_digest: snapshot!.snapshot_digest,
+      };
+      conversion.review_reason = null;
+      continue;
+    }
     const entry = prepared.get(projected.ref)!;
     const trade = entry.trade;
     if (!projected.ok) { trade.fx_review_reason = fxReason(projected.code as FxReviewCode); continue; }
@@ -5079,7 +5327,7 @@ export function registerLightyearTools(
   );
 
   registerTool(server, "book_lightyear_trades",
-    "Book Lightyear stock Buy/Sell trades. DRY RUN by default. For sells, capital_gains_file is required for FIFO cost basis and recognized gain/loss. A USD trade with no 1:1 conversion goes through the USD pool (the USD held at Lightyear): a sell kept in USD is valued at the ECB rate and matched to its capital-gains row by exact date and time; a buy paid partly (at most one EUR→USD conversion up to 60 s before it) or fully from the pool is valued at the dealt rate for the converted part and the ECB rate for the pool part, relieves the pool at average carrying value and books the difference on fx_account.",
+    "Book Lightyear stock Buy/Sell trades. DRY RUN by default. For sells, capital_gains_file is required for FIFO cost basis and recognized gain/loss. A USD trade with no 1:1 conversion goes through the USD pool (the USD held at Lightyear): a sell kept in USD is valued at the ECB rate and matched to its capital-gains row by exact date and time; a buy paid partly (at most one EUR→USD conversion up to 60 s before it) or fully from the pool is valued at the dealt rate for the converted part and the ECB rate for the pool part, relieves the pool at average carrying value and books the difference on fx_account. A USD→EUR conversion with no trade relieves the pool too: the conversion fee goes to fee_account, the difference between the relief and the EUR received plus fee to fx_account; with no fee and no difference it is recorded in the pool without a journal (status would_record / recorded).",
     {
       file_path: z.string().optional().describe("AccountStatement path/base64 input. Provide exactly one of file_path or file_ref."),
       file_ref: z.string().optional().describe("Opaque Lightyear AccountStatement file reference."),
@@ -5170,11 +5418,23 @@ export function registerLightyearTools(
           sourceSnapshots.push(gainsSnapshot);
         }
         const guard = await BookingGuard.load(api);
-        const existing = resolveExistingRefs(guard.journals, trades.map(t => ({ reference: t.reference, date: t.date })));
+        // USD→EUR conversions no trade or distribution claims relieve the pool (plan Q4).
+        const statementConversions = extractPoolConversions(rows, extraction, fundingTickers);
+        const existing = resolveExistingRefs(guard.journals, [
+          ...trades.map(t => ({ reference: t.reference, date: t.date })),
+          ...statementConversions.map(c => ({ reference: c.reference, date: c.date })),
+        ]);
         const existingRefs = existing.refs;
+        const journalsByDay = indexJournalsByDay(guard.journals);
         const ownRefCandidates = findOwnRefDateMismatches(
-          indexJournalsByDay(guard.journals), trades, t => t.reference, t => !existingRefs.has(t.reference), existing.journalIds,
+          journalsByDay, trades, t => t.reference, t => !existingRefs.has(t.reference), existing.journalIds,
         );
+        const conversions = statementConversions.filter(c => !existingRefs.has(c.reference));
+        const conversionDateMismatches = findOwnRefDateMismatches(
+          journalsByDay, conversions, c => c.reference, () => true, existing.journalIds,
+        );
+        for (const [reference, ids] of conversionDateMismatches) ownRefCandidates.set(reference, ids);
+        const heldConversions = new Map<string, FxReviewCode>([...conversionDateMismatches.keys()].map(reference => [reference, "reference_journal_date_mismatch"]));
         // FX warnings matter only for rows this run can still book: drop the
         // ones for skipped tickers and already-booked references, and count them.
         const suppressedWarnings = { already_booked: 0, skipped_ticker: 0 };
@@ -5191,6 +5451,7 @@ export function registerLightyearTools(
         await valuePoolTrades({
           api, store: usdPoolStore, key: keyResolution.key, rows, extraction, pool: poolTrades, fundingTickers, fxOutcomes, inLock, held: readiness.held,
           period: statementPeriodFromFileName(statementSnapshot.canonicalPath() ?? file_path),
+          conversions, heldConversions,
         });
         const poolRefs = new Set(poolTrades.map(t => t.reference));
         const relevantFxWarnings = extraction.warnings.filter(warning => {
@@ -5212,7 +5473,7 @@ export function registerLightyearTools(
           })],
           hasCapitalGainsFile: hasGainsFile,
           investment_account, investment_dimension_id, broker_account, broker_dimension_id,
-          gainAccount, lossAccount, feeAccount, fxAccount, poolKey: keyResolution.key,
+          gainAccount, lossAccount, feeAccount, fxAccount, poolKey: keyResolution.key, conversions,
         });
         projection.suppressedWarnings = suppressedWarnings;
         return { projection, sourceIdentities: sourceSnapshots.map(sourceIdentityRecord), sourceSnapshots, sourcePaths, fxOutcomes, poolKey: keyResolution.key };
@@ -5699,7 +5960,7 @@ export function registerLightyearTools(
             checkpoint: {
               record: "checkpoint", pool_key: key, kind: "opening", as_of, ts: asOfTs,
               usd_cents: replay.value.usd_cents, eur_cents: eur, fx_cents: 0, journal_id: null, document_number: null,
-              rate: outcome.rate.rate, rate_date: outcome.rate.rate_date, approved: true, recorded_at: "",
+              rate: outcome.rate.rate, rate_date: outcome.rate.rate_date, approved: true, postings: [], recorded_at: "",
             },
           });
         }
@@ -5749,7 +6010,8 @@ export function registerLightyearTools(
           record: "checkpoint", pool_key: key, kind: "revaluation", as_of, ts: asOfTs,
           usd_cents: state.usd_cents, eur_cents: target, fx_cents: fx, journal_id: null,
           document_number: fx === 0 ? null : documentNumber,
-          rate: outcome.rate.rate, rate_date: outcome.rate.rate_date, recorded_at: "",
+          // A journal-free checkpoint has no postings; a journal's are stamped from its command at execute.
+          rate: outcome.rate.rate, rate_date: outcome.rate.rate_date, postings: [], recorded_at: "",
         };
         if (fx === 0) return done({ kind: "checkpoint_only", checkpoint, carrying_eur_cents: state.eur_cents, snapshot_digest: snapshotState.snapshot_digest });
         const brokerDim = broker_dimension_id ? { accounts_dimensions_id: broker_dimension_id } : {};

@@ -60,6 +60,8 @@ export interface UsdPoolCheckpoint {
   rate_date: string;
   /** Opening checkpoints only: stored through a reviewed plan (owner approval). */
   approved?: true;
+  /** Canonical postings of the revaluation journal ([] for an opening or a journal-free checkpoint). */
+  postings?: PoolPosting[];
   recorded_at: string;
 }
 
@@ -78,10 +80,44 @@ export interface UsdPoolEvent {
   state: "intent" | "committed";
   /** Revaluation intents carry the checkpoint they commit. */
   checkpoint?: UsdPoolCheckpoint;
+  /** Canonical postings of the approved command ([] for a journal-free event). Required (r2: no legacy records). */
+  postings?: PoolPosting[];
+  /** Journal-free conversion_out only: the proof captured at approval (plan §2, r1 #5). */
+  source_evidence?: ConversionEvidence;
+  evidence_digest?: string;
   recorded_at: string;
 }
 
 export type UsdPoolRecord = UsdPoolEvent | UsdPoolCheckpoint;
+
+/** One journal posting in canonical form: integer cents, explicit null dimension. */
+export interface PoolPosting {
+  accounts_id: number;
+  accounts_dimensions_id: number | null;
+  type: "D" | "C";
+  amount_cents: number;
+}
+
+/** A statement leg of a conversion, as normalized for journal-free evidence (amounts signed as on the statement). */
+export interface ConversionLegEvidence {
+  ccy: string;
+  gross_cents: number;
+  fee_cents: number;
+  net_cents: number;
+  fx_rate: string;
+}
+
+export interface ConversionEvidence {
+  ref: string;
+  ts: number;
+  date_string: string;
+  /** Both legs, sorted by currency. */
+  legs: ConversionLegEvidence[];
+  state_before: { usd_cents: number; eur_cents: number };
+  relief_eur_cents: number;
+  fee_eur_cents: 0;
+  fx_eur_cents: 0;
+}
 
 export interface UsdPoolState {
   usd_cents: number;
@@ -330,6 +366,114 @@ export function relieveCents(state: { usd_cents: number; eur_cents: number }, sp
   return Number.isSafeInteger(relief) ? { ok: true, value: relief } : { ok: false, code: "usd_pool_insufficient" };
 }
 
+// ---- canonical postings and journal-free evidence ----------------------------------
+
+function comparePostings(a: PoolPosting, b: PoolPosting): number {
+  return a.accounts_id - b.accounts_id
+    || (a.accounts_dimensions_id ?? -1) - (b.accounts_dimensions_id ?? -1)
+    || (a.type < b.type ? -1 : a.type > b.type ? 1 : 0)
+    || a.amount_cents - b.amount_cents;
+}
+
+/** The sorted posting multiset of a command or a live journal (deleted postings dropped). */
+export function canonicalPoolPostings(postings: ReadonlyArray<{
+  accounts_id: number;
+  accounts_dimensions_id?: number | null;
+  type?: string;
+  amount: number;
+  base_amount?: number | null;
+  is_deleted?: boolean;
+}>): PoolPosting[] {
+  return postings
+    .filter(posting => posting.is_deleted !== true)
+    .map(posting => ({
+      accounts_id: posting.accounts_id,
+      accounts_dimensions_id: posting.accounts_dimensions_id ?? null,
+      type: posting.type as "D" | "C",
+      amount_cents: Math.round((posting.base_amount ?? posting.amount) * 100),
+    }))
+    .sort(comparePostings);
+}
+
+function samePostings(a: readonly PoolPosting[], b: readonly PoolPosting[]): boolean {
+  if (a.length !== b.length) return false;
+  const left = [...a].sort(comparePostings);
+  const right = [...b].sort(comparePostings);
+  return left.every((posting, index) => comparePostings(posting, right[index]!) === 0);
+}
+
+export function conversionEvidenceDigest(evidence: ConversionEvidence): string {
+  return createHash("sha256").update(JSON.stringify([
+    evidence.ref, evidence.ts, evidence.date_string,
+    evidence.legs.map(leg => [leg.ccy, leg.gross_cents, leg.fee_cents, leg.net_cents, leg.fx_rate]),
+    [evidence.state_before.usd_cents, evidence.state_before.eur_cents],
+    evidence.relief_eur_cents, evidence.fee_eur_cents, evidence.fx_eur_cents,
+  ])).digest("hex");
+}
+
+function sameLegs(a: readonly ConversionLegEvidence[], b: readonly ConversionLegEvidence[]): boolean {
+  return JSON.stringify(a.map(leg => [leg.ccy, leg.gross_cents, leg.fee_cents, leg.net_cents, leg.fx_rate]))
+    === JSON.stringify(b.map(leg => [leg.ccy, leg.gross_cents, leg.fee_cents, leg.net_cents, leg.fx_rate]));
+}
+
+/** Statement legs of one conversion reference, normalized like {@link ConversionEvidence.legs}; null when not a clean 2-leg EUR/USD pair. */
+export function conversionLegsFromRows(
+  rows: ReadonlyArray<Pick<PoolStatementRow, "type" | "reference" | "ccy" | "gross_amount" | "fee" | "net_amount" | "fx_rate">>,
+  ref: string,
+): ConversionLegEvidence[] | null {
+  const group = rows.filter(row => row.type === "Conversion" && row.reference === ref);
+  const legs: ConversionLegEvidence[] = [];
+  for (const row of group) {
+    const gross = Math.round(row.gross_amount * 100);
+    const fee = Math.round(row.fee * 100);
+    const net = Math.round(row.net_amount * 100);
+    if (![gross, fee, net].every(Number.isSafeInteger)) return null;
+    legs.push({ ccy: row.ccy.trim().toUpperCase(), gross_cents: gross, fee_cents: fee, net_cents: net, fx_rate: String(row.fx_rate) });
+  }
+  legs.sort((a, b) => (a.ccy < b.ccy ? -1 : a.ccy > b.ccy ? 1 : 0));
+  return legs.length === 2 && legs[0]!.ccy === "EUR" && legs[1]!.ccy === "USD" ? legs : null;
+}
+
+/**
+ * The journal-free conversion_out evidence contract (plan §2, conditions 1–6),
+ * checked against the replayed state before the event. `statementCovers` says
+ * whether this run's statement covers the event's day (condition 4).
+ */
+function journalFreeEventProven(
+  event: UsdPoolEvent,
+  replayed: { usd_cents: number; eur_cents: number },
+  statement: { rows: readonly PoolStatementRow[]; covers: (ts: number) => boolean },
+  liveNumbers: ReadonlySet<string | null | undefined>,
+): boolean {
+  const evidence = event.source_evidence;
+  if (event.kind !== "conversion_out" || !evidence || typeof event.evidence_digest !== "string") return false;
+  // 1. digest
+  if (conversionEvidenceDigest(evidence) !== event.evidence_digest) return false;
+  // 2. leg arithmetic; the USD leg leaves without a fee and the EUR net is the relief
+  const eurLeg = evidence.legs.find(leg => leg.ccy === "EUR");
+  const usdLeg = evidence.legs.find(leg => leg.ccy === "USD");
+  if (evidence.legs.length !== 2 || !eurLeg || !usdLeg) return false;
+  if (!evidence.legs.every(leg => Math.abs(leg.gross_cents) - leg.fee_cents === Math.abs(leg.net_cents))) return false;
+  if (usdLeg.fee_cents !== 0 || usdLeg.gross_cents >= 0 || eurLeg.fee_cents !== 0 || eurLeg.net_cents !== evidence.relief_eur_cents) return false;
+  if (evidence.fee_eur_cents !== 0 || evidence.fx_eur_cents !== 0) return false;
+  // 3. state before = the replay, and its relief recomputes
+  if (evidence.state_before.usd_cents !== replayed.usd_cents || evidence.state_before.eur_cents !== replayed.eur_cents) return false;
+  const relief = relieveCents(evidence.state_before, -usdLeg.gross_cents);
+  if (!relief.ok || relief.value !== evidence.relief_eur_cents) return false;
+  // 4. the statement, when it covers the day, still shows the same legs
+  if (statement.covers(evidence.ts)) {
+    const legs = conversionLegsFromRows(statement.rows, evidence.ref);
+    if (!legs || !sameLegs(legs, evidence.legs)) return false;
+  }
+  // 5. no journal books it
+  if (liveNumbers.has(`LY:${evidence.ref}`)) return false;
+  // 6. the event applies exactly the deltas the evidence implies
+  return event.ref === evidence.ref && event.ts === evidence.ts && event.document_number === `LY:${evidence.ref}`
+    && event.usd_cents === usdLeg.gross_cents && event.eur_cents === -evidence.relief_eur_cents
+    && event.journal_broker_net_cents === 0 && event.journal_id === null
+    && Array.isArray(event.postings) && event.postings.length === 0;
+}
+
 // ---- journals -------------------------------------------------------------------
 
 /** Net broker-dimension posting of a journal in EUR cents (D positive, C negative). */
@@ -368,18 +512,32 @@ class JournalReader {
   }
 }
 
-type JournalCheck = "ok" | "mismatch" | "unregistered";
+/** "postings": the live journal's posting multiset differs from the stored one, or the record has none (r1 #6). */
+type JournalCheck = "ok" | "mismatch" | "postings" | "unregistered";
+
+/** The live journal still equals the pool record: number, broker net and the whole posting multiset. */
+export function journalMatchesPoolRecord(
+  journal: Journal,
+  key: Pick<PoolKey, "broker_account" | "broker_dimension_id">,
+  expect: { document_number: string | null; broker_net_cents: number; postings: readonly PoolPosting[] | undefined },
+): "ok" | "mismatch" | "postings" {
+  if (journal.is_deleted === true || journal.document_number !== expect.document_number) return "mismatch";
+  if (journalBrokerNetCents(journal, key) !== expect.broker_net_cents) return "mismatch";
+  if (!Array.isArray(expect.postings) || !samePostings(canonicalPoolPostings(journal.postings ?? []), expect.postings)) return "postings";
+  return "ok";
+}
 
 async function checkLoggedJournal(
   reader: JournalReader,
   key: PoolKey,
-  expect: { journal_id: number | null; document_number: string | null; broker_net_cents: number },
+  expect: { journal_id: number | null; document_number: string | null; broker_net_cents: number; postings: readonly PoolPosting[] | undefined },
   requireRegistered: boolean,
 ): Promise<JournalCheck> {
   if (expect.journal_id === null) return "mismatch";
   const journal = await reader.get(expect.journal_id);
-  if (!journal || journal.is_deleted === true || journal.document_number !== expect.document_number) return "mismatch";
-  if (journalBrokerNetCents(journal, key) !== expect.broker_net_cents) return "mismatch";
+  if (!journal) return "mismatch";
+  const match = journalMatchesPoolRecord(journal, key, expect);
+  if (match !== "ok") return match;
   if (requireRegistered && journal.registered !== true) return "unregistered";
   return "ok";
 }
@@ -419,7 +577,7 @@ export async function recoverUsdPoolIntents(api: ApiContext, store: UsdPoolStore
     const journalId = matches[0]!.id!;
     let check: JournalCheck;
     try {
-      check = await checkLoggedJournal(reader, key, { journal_id: journalId, document_number: intent.document_number, broker_net_cents: intent.journal_broker_net_cents }, false);
+      check = await checkLoggedJournal(reader, key, { journal_id: journalId, document_number: intent.document_number, broker_net_cents: intent.journal_broker_net_cents, postings: intent.postings }, false);
     } catch {
       unresolved = true;
       continue;
@@ -457,8 +615,11 @@ export interface ValidateUsdPoolParams {
   until: PoolOrder;
   /** Every new record this run would add; each must order after the frontier. */
   newRecords: readonly PoolOrder[];
-  /** The statement's USD rows and their roles (classifyStatementPool). */
-  statement: { events: readonly StatementPoolEvent[]; rows: readonly PoolStatementRow[] };
+  /**
+   * The statement's USD rows and their roles (classifyStatementPool). `period`
+   * (from the file name) says which days it covers; without it, the span of its rows.
+   */
+  statement: { events: readonly StatementPoolEvent[]; rows: readonly PoolStatementRow[]; period?: { from: string; to: string } | null };
   /** Refs this plan itself books (not yet committed). */
   plannedRefs?: ReadonlySet<string>;
   requireRegistered: boolean;
@@ -473,7 +634,22 @@ function checkpointDigestFields(c: UsdPoolCheckpoint) {
 }
 
 function eventDigestFields(e: UsdPoolEvent) {
-  return [e.kind, e.ref, e.ts, e.usd_cents, e.eur_cents, e.journal_id, e.document_number, e.journal_broker_net_cents];
+  return [e.kind, e.ref, e.ts, e.usd_cents, e.eur_cents, e.journal_id, e.document_number, e.journal_broker_net_cents, e.postings ?? null, e.evidence_digest ?? null];
+}
+
+/** Statement day of a pool timestamp (statement clock read as UTC). */
+function statementDayOf(ts: number): string {
+  return new Date(ts * 1000).toISOString().slice(0, 10);
+}
+
+function statementCoverage(statement: ValidateUsdPoolParams["statement"]): (ts: number) => boolean {
+  if (statement.period) {
+    const { from, to } = statement.period;
+    return ts => statementDayOf(ts) >= from && statementDayOf(ts) <= to;
+  }
+  const days = statement.rows.flatMap(row => row.ts === null ? [] : [statementDayOf(row.ts)]).sort();
+  if (days.length === 0) return () => false;
+  return ts => statementDayOf(ts) >= days[0]! && statementDayOf(ts) <= days[days.length - 1]!;
 }
 
 /** Opening/zero-FX checkpoints are verified by recomputation with their stored rate. */
@@ -524,7 +700,11 @@ export async function validateUsdPool(params: ValidateUsdPoolParams): Promise<Us
   }
   const reader = new JournalReader(api);
 
-  if (!checkpointValueRecomputes(opening)) return { ok: false, code: "usd_pool_chain_broken", detail: `opening:${opening.as_of}` };
+  if (!checkpointValueRecomputes(opening) || !Array.isArray(opening.postings) || opening.postings.length !== 0) {
+    return { ok: false, code: "usd_pool_chain_broken", detail: `opening:${opening.as_of}` };
+  }
+  const liveNumbers = new Set(liveJournals.filter(j => j.is_deleted !== true).map(j => j.document_number));
+  const covers = statementCoverage(params.statement);
   const openingOrder = orderOf(opening);
   const chain: UsdPoolRecord[] = [
     ...view.events,
@@ -541,7 +721,18 @@ export async function validateUsdPool(params: ValidateUsdPoolParams): Promise<Us
     for (let index = 0; index < chain.length; index++) {
       const record = chain[index]!;
       if (record.record === "event") {
-        const check = await checkLoggedJournal(reader, key, { journal_id: record.journal_id, document_number: record.document_number, broker_net_cents: record.journal_broker_net_cents }, requireRegistered);
+        if (record.journal_id === null || record.source_evidence !== undefined) {
+          // A journal-free conversion_out stands only on its evidence; evidence never rides on a journal-backed event.
+          if (!journalFreeEventProven(record, { usd_cents: usd, eur_cents: eur }, { rows: params.statement.rows, covers }, liveNumbers)) {
+            return { ok: false, code: "usd_pool_chain_broken", detail: record.document_number };
+          }
+          usd += record.usd_cents;
+          eur += record.eur_cents;
+          eventsSinceBase.push(record);
+          continue;
+        }
+        const check = await checkLoggedJournal(reader, key, { journal_id: record.journal_id, document_number: record.document_number, broker_net_cents: record.journal_broker_net_cents, postings: record.postings }, requireRegistered);
+        if (check === "postings") return { ok: false, code: "usd_pool_chain_broken", detail: record.document_number };
         if (check !== "ok") {
           if (index < lastCheckpointIndex && check === "mismatch") return { ok: false, code: "usd_pool_chain_broken", detail: record.document_number };
           return { ok: false, code: check === "unregistered" ? "usd_pool_event_unregistered" : "usd_pool_event_mismatch", detail: record.document_number };
@@ -552,10 +743,10 @@ export async function validateUsdPool(params: ValidateUsdPoolParams): Promise<Us
         continue;
       }
       if (record.journal_id !== null) {
-        const check = await checkLoggedJournal(reader, key, { journal_id: record.journal_id, document_number: record.document_number, broker_net_cents: record.fx_cents }, requireRegistered);
+        const check = await checkLoggedJournal(reader, key, { journal_id: record.journal_id, document_number: record.document_number, broker_net_cents: record.fx_cents, postings: record.postings }, requireRegistered);
         if (check === "unregistered") return { ok: false, code: "usd_pool_event_unregistered", detail: record.document_number ?? undefined };
         if (check !== "ok" || record.fx_cents === 0) return { ok: false, code: "usd_pool_chain_broken", detail: record.document_number ?? undefined };
-      } else if (record.fx_cents !== 0 || !checkpointValueRecomputes(record)) {
+      } else if (record.fx_cents !== 0 || !checkpointValueRecomputes(record) || !Array.isArray(record.postings) || record.postings.length !== 0) {
         return { ok: false, code: "usd_pool_chain_broken", detail: `revaluation:${record.as_of}` };
       }
       if (record.usd_cents !== usd || record.eur_cents !== eur + record.fx_cents) {
@@ -573,7 +764,6 @@ export async function validateUsdPool(params: ValidateUsdPoolParams): Promise<Us
   // Completeness: every statement pool row since the opening and before `until`.
   const interval = { after: openingOrder, until };
   const { events, rows } = params.statement;
-  const liveNumbers = new Set(liveJournals.filter(j => j.is_deleted !== true).map(j => j.document_number));
   const bookedRefs = new Set(events.filter(event => liveNumbers.has(`LY:${event.ref}`) || liveNumbers.has(event.ref)).map(event => event.ref));
   const complete = checkStatementCompleteness(events, {
     interval, committedRefs: new Set(view.events.map(e => e.ref)), plannedRefs: params.plannedRefs ?? new Set(), bookedRefs,

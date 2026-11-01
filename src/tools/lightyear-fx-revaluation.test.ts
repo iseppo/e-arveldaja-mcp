@@ -64,7 +64,7 @@ function opening(usd: number, eur: number, rate: string, asOf = "2026-09-30"): U
   return {
     record: "checkpoint", pool_key: KEY, kind: "opening", as_of: asOf, ts: endOfDaySeconds(asOf),
     usd_cents: usd, eur_cents: eur, fx_cents: 0, journal_id: null, document_number: null,
-    rate, rate_date: asOf, approved: true, recorded_at: "t",
+    rate, rate_date: asOf, approved: true, postings: [], recorded_at: "t",
   };
 }
 
@@ -72,6 +72,7 @@ function poolEvent(ref: string, iso: string, kind: UsdPoolEvent["kind"], usd: nu
   return {
     record: "event", pool_key: KEY, ref, ts: Date.parse(iso) / 1000, kind, usd_cents: usd, eur_cents: eur,
     document_number: `LY:${ref}`, journal_id: journalId, journal_broker_net_cents: brokerNet, state: "committed", recorded_at: "t",
+    postings: [{ accounts_id: 1120, accounts_dimensions_id: null, type: brokerNet >= 0 ? "D" : "C", amount_cents: Math.abs(brokerNet) }],
   };
 }
 
@@ -280,7 +281,7 @@ describe("book_lightyear_fx_revaluation (C5)", () => {
     const second = "/tmp/AccountStatement-LY-TESTACCT2-2026-09-01_2026-10-30_en.csv";
     mockedResolveFileInput.mockResolvedValue({ path: second });
     const otherKey: PoolKey = { ...KEY, lightyear_account: "TESTACCT2", broker_account: 1120, broker_dimension_id: 7 };
-    const pool = POOL.map(record => ({ ...record, pool_key: otherKey }));
+    const pool = POOL.map(record => ({ ...record, pool_key: otherKey, postings: record.postings?.map(p => ({ ...p, accounts_dimensions_id: 7 })) }));
     const journals = JOURNALS.map(j => ({ ...j, postings: j.postings!.map(p => ({ ...p, accounts_dimensions_id: 7 })) }));
     const dry = await setup({ pool, journals }).run({ dry_run: true, file_path: second, broker_dimension_id: 7 });
     expect(dry.payload.document_number).toBe("LY-FX:TESTACCT2:USD:2026-10-30");

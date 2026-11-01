@@ -2,8 +2,8 @@
   "profile": "full",
   "measurement": {
     "toolCount": 147,
-    "toolsListBytes": 180416,
-    "descriptionsBytes": 26088,
+    "toolsListBytes": 180704,
+    "descriptionsBytes": 26376,
     "inputSchemasBytes": 118829,
     "largestTool": {
       "name": "import_wise_transactions",
@@ -5469,7 +5469,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Book Lightyear stock Buy/Sell trades. DRY RUN by default. For sells, capital_gains_file is required for FIFO cost basis and recognized gain/loss. A USD trade with no 1:1 conversion goes through the USD pool (the USD held at Lightyear): a sell kept in USD is valued at the ECB rate and matched to its capital-gains row by exact date and time; a buy paid partly (at most one EUR→USD conversion up to 60 s before it) or fully from the pool is valued at the dealt rate for the converted part and the ECB rate for the pool part, relieves the pool at average carrying value and books the difference on fx_account.",
+      "description": "Book Lightyear stock Buy/Sell trades. DRY RUN by default. For sells, capital_gains_file is required for FIFO cost basis and recognized gain/loss. A USD trade with no 1:1 conversion goes through the USD pool (the USD held at Lightyear): a sell kept in USD is valued at the ECB rate and matched to its capital-gains row by exact date and time; a buy paid partly (at most one EUR→USD conversion up to 60 s before it) or fully from the pool is valued at the dealt rate for the converted part and the ECB rate for the pool part, relieves the pool at average carrying value and books the difference on fx_account. A USD→EUR conversion with no trade relieves the pool too: the conversion fee goes to fee_account, the difference between the relief and the EUR received plus fee to fx_account; with no fee and no difference it is recorded in the pool without a journal (status would_record / recorded).",
       "execution": {
         "taskSupport": "forbidden"
       },

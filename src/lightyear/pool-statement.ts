@@ -32,6 +32,8 @@ export interface PoolStatementRow {
   gross_amount: number;
   fee: number;
   net_amount: number;
+  /** The statement's FX rate column (conversions; journal-free evidence). */
+  fx_rate: number;
 }
 
 /** Trade↔conversion pairing decided by the trade extraction (order-independent). */

@@ -297,7 +297,7 @@ describe("book_lightyear_distributions fx_source=ecb", () => {
     const store = memoryUsdPoolStore([{
       record: "checkpoint", pool_key: key, kind: "opening", as_of: "2026-09-30", ts: endOfDaySeconds("2026-09-30"),
       usd_cents: 10000, eur_cents: 9500, fx_cents: 0, journal_id: null, document_number: null,
-      rate: "1.0526315789", rate_date: "2026-09-30", approved: true, recorded_at: "t",
+      rate: "1.0526315789", rate_date: "2026-09-30", approved: true, postings: [], recorded_at: "t",
     }]);
     loadStatement([
       ["18/09/2026 10:00:00", "DD-TESTOLD001", "NVDA", "US67066G1040", "Dividend", "0", "USD", "0", "10.00", "0", "0", "10.00", "0"],
@@ -357,7 +357,7 @@ describe("book_lightyear_distributions fx_source=ecb", () => {
       processA.upsert([{
         record: "checkpoint", pool_key: key, kind: "opening", as_of: "2026-09-30", ts: endOfDaySeconds("2026-09-30"),
         usd_cents: 10000, eur_cents: 9000, fx_cents: 0, journal_id: null, document_number: null,
-        rate: "1.1111111111", rate_date: "2026-09-30", approved: true, recorded_at: "t",
+        rate: "1.1111111111", rate_date: "2026-09-30", approved: true, postings: [], recorded_at: "t",
       }]);
       expect(processB.read()).toHaveLength(1); // B caches the opening only
       loadStatement([["01/10/2026 10:00:00", "DD-TESTBACK01", "NVDA", "US67066G1040", "Dividend", "0", "USD", "0", "100.00", "0", "0", "100.00", "0"]]);
@@ -367,7 +367,7 @@ describe("book_lightyear_distributions fx_source=ecb", () => {
       processA.upsert([{
         record: "event", pool_key: key, ref: "OR-TESTA20", ts: Date.parse("2026-10-20T12:00:00Z") / 1000, kind: "buy_relief",
         usd_cents: -5000, eur_cents: -4500, document_number: "LY:OR-TESTA20", journal_id: 7001, journal_broker_net_cents: -4500,
-        state: "committed", recorded_at: "t",
+        state: "committed", postings: [{ accounts_id: 1120, accounts_dimensions_id: null, type: "C", amount_cents: 4500 }], recorded_at: "t",
       }]);
       expect(processB.read()).toHaveLength(1); // still stale outside the lock
       const exec = await env.run({ fx_source: "ecb", dry_run: false, plan_handle: dry.payload.plan_handle });

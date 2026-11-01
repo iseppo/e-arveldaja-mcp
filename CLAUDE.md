@@ -621,13 +621,21 @@ identity — exact statement date+time, ticker, quantity — else `pool_sell_gai
 commands; gain/loss = ECB consideration − Lightyear FIFO cost basis), `buy_relief` events (`book_lightyear_trades`: a USD
 buy with no 1:1 conversion is paid N:1 — at most one remaining EUR→USD conversion in [buy − 60 s, buy] with a smaller
 gross, pool part = buy gross − conversion USD — or 100 % from the pool; relief at average carrying value, realised FX
-= relief − ECB value of the pool part, on 8500) and
+= relief − ECB value of the pool part, on 8500), `conversion_out` events (`book_lightyear_trades`: a USD→EUR
+conversion with no trade relieves the pool; fee in EUR = the fee on the EUR leg, or USD fee × EUR net / USD net;
+FX = relief − (EUR net + fee) on 8500; broker net = EUR net − relief; fee 0 and FX 0 books no journal — the event
+carries `source_evidence` + `evidence_digest` and `validateUsdPool` accepts it only when the digest, the leg
+arithmetic, the replayed state before it, the statement legs (when the statement covers its day), the absence of any
+`LY:<ref>` journal and its own deltas all agree) and
 revaluation checkpoints (`book_lightyear_fx_revaluation` `mode: "revalue"`, journal
 `LY-FX:<account>:USD:<date>`, quantity proof against the Lightyear holding). Every write runs
 under `withUsdPoolLock` (which drops the store's read cache once the lock is held, so records another
 process committed are seen) as intent → create → readback → commit; a readback or commit failure stops the plan's remaining commands
 (`partial_execution`, the created journal id reported, the intent kept); `recoverUsdPoolIntents` resolves
-leftovers from the ledger and never recreates a journal. `validateUsdPool` replays the whole
+leftovers from the ledger and never recreates a journal. Every pool record carries its canonical `postings`
+(account, dimension, side, cents; the opening and journal-free records `[]`): readback, recovery and validation
+compare the journal's posting multiset with it, not only the broker net (a mismatch is `usd_pool_commit_deferred`,
+`usd_pool_uncertain_outcome`, `usd_pool_chain_broken`); a record without postings breaks the chain. `validateUsdPool` replays the whole
 chain from the opening against fresh journals; records ordered before the latest committed relief
 or checkpoint are refused (`usd_pool_backdated_event`). Order: opening once → distributions →
 trades → confirm drafts → period-end revaluation. FX amounts come only from the pool log and the

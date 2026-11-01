@@ -204,7 +204,7 @@ describe("book_lightyear_trades — USD sells kept in USD and pool-paid buys (pl
       buy("12/06/2026 13:49:05", "OR-TESTQ3B6", "99.44", "0.10"),
     ]);
     const env = tradesTool({
-      pool: [poolOpening(0, 0, "1.1567", "2026-05-31"), poolDistribution("DD-TESTQ3D6", "2026-06-12T10:00:00Z", 60, 52, 601)],
+      pool: [poolOpening(0, 0, "1.1567", "2026-05-31"), poolDistribution("DD-TESTQ3D6", "2026-06-12T10:00:00Z", 60, 52, 601, 8330)],
       journals: [poolJournal(601, "DD-TESTQ3D6", 52, 8330)],
       fetch: rateFetch("1.1567"),
     });
@@ -278,6 +278,7 @@ describe("book_lightyear_trades — USD sells kept in USD and pool-paid buys (pl
     event: {
       record: "event", pool_key: OPENING.pool_key, ref, ts: Date.parse(iso) / 1000, kind: "buy_relief", usd_cents: -usd, eur_cents: -eur,
       document_number: `LY:${ref}`, journal_id: journalId, journal_broker_net_cents: -eur, state: "committed", recorded_at: "t",
+      postings: [{ accounts_id: 1120, accounts_dimensions_id: null, type: "C", amount_cents: eur }, { accounts_id: 1550, accounts_dimensions_id: null, type: "D", amount_cents: eur }],
     },
     journal: {
       id: journalId, document_number: `LY:${ref}`, effective_date: iso.slice(0, 10), registered: true, is_deleted: false,

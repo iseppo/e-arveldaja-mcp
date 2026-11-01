@@ -42,15 +42,20 @@ export function poolOpening(usd: number, eur: number, rate: string, asOf = "2025
   return {
     record: "checkpoint", pool_key: key, kind: "opening", as_of: asOf, ts: endOfDaySeconds(asOf),
     usd_cents: usd, eur_cents: eur, fx_cents: 0, journal_id: null, document_number: null,
-    rate, rate_date: asOf, approved: true, recorded_at: "t",
+    rate, rate_date: asOf, approved: true, postings: [], recorded_at: "t",
   };
 }
 
-/** A committed distribution_in event (statement time `iso`, read as UTC like the statement clock). */
-export function poolDistribution(ref: string, iso: string, usd: number, eur: number, journalId: number): UsdPoolEvent {
+/** A committed distribution_in event (statement time `iso`, read as UTC like the statement clock); postings as {@link poolJournal}. */
+export function poolDistribution(ref: string, iso: string, usd: number, eur: number, journalId: number, incomeAccount = 8320): UsdPoolEvent {
   return {
     record: "event", pool_key: POOL_KEY, ref, ts: Date.parse(iso) / 1000, kind: "distribution_in", usd_cents: usd, eur_cents: eur,
-    document_number: `LY:${ref}`, journal_id: journalId, journal_broker_net_cents: eur, state: "committed", recorded_at: "t",
+    document_number: `LY:${ref}`, journal_id: journalId, journal_broker_net_cents: eur, state: "committed",
+    postings: [
+      { accounts_id: 1120, accounts_dimensions_id: null, type: "D", amount_cents: eur },
+      { accounts_id: incomeAccount, accounts_dimensions_id: null, type: "C", amount_cents: eur },
+    ],
+    recorded_at: "t",
   };
 }
 
