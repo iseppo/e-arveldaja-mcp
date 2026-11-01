@@ -92,7 +92,7 @@ class CamtOperationsImpl implements CamtOperations {
 
     let projection;
     try {
-      projection = await buildImportProjection(this.api, loaded, accountsDimensionsId, dateFrom, dateTo, false, skipInterAccountLegs);
+      projection = await buildImportProjection(this.api, loaded, accountsDimensionsId, dateFrom, dateTo, false, skipInterAccountLegs, snapshot.identity.digest_sha256);
     } catch (error) {
       if (!(error instanceof CamtJournalSnapshotError)) throw error;
       return fail(error.code, error.message, error.code === "journal_snapshot_unavailable" ? "safe" : "never");

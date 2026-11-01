@@ -64,6 +64,7 @@ import {
   type CamtImportExecution,
 } from "./presenter.js";
 import { isRecord } from "../record-utils.js";
+import { retainedCamtMovementOccurrences } from "./statement-context.js";
 import type {
   CamtBalance,
   CamtImportProjection,
@@ -375,6 +376,8 @@ export async function buildImportProjection(
   dateTo: string | undefined,
   freshBankAccounts = false,
   skipInterAccountLegs: CamtSkipInterAccountLegs = "none",
+  /** The statement's own digest, left out of the retained-statement counts (B3b). */
+  statementDigest?: string,
 ): Promise<CamtImportProjection> {
   const ledgerTransactions = (await api.transactions.listAll()).filter(isNonVoidTransaction);
   const journalCoverage = await loadCamtJournalSnapshot(api, accountsDimensionsId, freshBankAccounts);
@@ -389,6 +392,7 @@ export async function buildImportProjection(
     reportProgress: (index, total) => reportProgress(index, total),
     reviewAcknowledgements: readCamtReviewAcknowledgements(),
     skipInterAccountLegs,
+    otherStatementOccurrences: identity => retainedCamtMovementOccurrences(identity, statementDigest),
   });
 }
 
@@ -732,7 +736,7 @@ export async function executeCamtImport(
   try {
     // Uncached bank accounts: a changed `x=i` decision changes a stored
     // description, which the fingerprint compare below reports as plan_drift.
-    projection = await buildImportProjection(api, loaded, accountsDimensionsId, dateFrom, dateTo, true, skipInterAccountLegs);
+    projection = await buildImportProjection(api, loaded, accountsDimensionsId, dateFrom, dateTo, true, skipInterAccountLegs, snapshot.identity.digest_sha256);
   } catch (error) {
     if (error instanceof CamtJournalSnapshotError) return { ok: false, code: error.code, message: error.message };
     throw error;

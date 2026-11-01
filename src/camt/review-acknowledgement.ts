@@ -114,7 +114,7 @@ export function checkCamtAcknowledgementCandidate(
 export function refusalMessage(code: CamtAckRefusalCode): string {
   switch (code) {
     case "camt_ack_nonunique_movement":
-      return "The statement holds more than one identical movement, so one journal cannot be shown to book this one; the review stays.";
+      return "The statement, or the statements kept in the inbox together, hold more than one identical movement, so one journal cannot be shown to book this one; the review stays.";
     case "camt_ack_multiple_candidates":
       return "More than one journal may book this movement (a possible double booking); the review stays until it is resolved.";
     case "camt_ack_journal_already_claimed":

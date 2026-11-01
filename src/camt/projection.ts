@@ -160,6 +160,8 @@ interface CamtProjectionInput {
   readonly reviewAcknowledgements?: readonly CamtReviewAcknowledgementRecord[];
   /** #11: leave out own-account transfer legs of this direction (default "none"). */
   readonly skipInterAccountLegs?: CamtSkipInterAccountLegs;
+  /** B3b: occurrences of a movement identity in the OTHER statements an inbox scan retained. */
+  readonly otherStatementOccurrences?: (movementIdentity: string) => number;
 }
 
 export const CAMT_INTER_ACCOUNT_OTHER_SIDE_KEPT = "inter_account_other_side_kept";
@@ -178,7 +180,8 @@ function interAccountTransferTag(
 /**
  * #10(b): give each acknowledgeable journal review its acknowledgement
  * candidate, and quiet the ones whose full key a stored acknowledgement
- * matches. A movement must occur once in the statement, the review must name
+ * matches. A movement must occur once in the statement and the other retained
+ * statements of the inbox (B3b), the review must name
  * exactly one journal that moves exactly the row's signed EUR cents, and no
  * other row (or another movement's acknowledgement) may name that journal;
  * otherwise the candidate is refused and any stored acknowledgement ignored.
@@ -189,6 +192,7 @@ function applyReviewAcknowledgements(
   entries: readonly ParsedCamtEntry[],
   accountsDimensionsId: number,
   records: readonly CamtReviewAcknowledgementRecord[],
+  otherStatementOccurrences: (movementIdentity: string) => number = () => 0,
 ): void {
   const occurrences = new Map<string, number>();
   for (const entry of entries) {
@@ -207,7 +211,7 @@ function applyReviewAcknowledgements(
     const key = { accounts_dimensions_id: accountsDimensionsId, movement_identity: row.movement_identity, review_code: row.review_code, journal_ids: journalIds };
     let refused: CamtAckRefusalCode | undefined;
     if (journalIds.length !== 1) refused = "camt_ack_multiple_candidates";
-    else if (occurrences.get(row.movement_identity) !== 1) refused = "camt_ack_nonunique_movement";
+    else if (occurrences.get(row.movement_identity) !== 1 || otherStatementOccurrences(row.movement_identity) > 0) refused = "camt_ack_nonunique_movement";
     else if (!source.booksExactly) refused = "camt_ack_journal_mismatch";
     else if ((journalRows.get(journalIds[0]!) ?? 0) > 1 || findClaimingAcknowledgement(records, key)) refused = "camt_ack_journal_already_claimed";
     if (refused === undefined && stored.has(camtReviewAcknowledgementKey(key))) {
@@ -463,7 +467,7 @@ export async function computeCamtImportProjection(input: CamtProjectionInput): P
     seenBatchDuplicateKeys.add(batchDuplicateKey);
   }
 
-  applyReviewAcknowledgements(skipped, acknowledgeable, parsed.entries, accountsDimensionsId, input.reviewAcknowledgements ?? []);
+  applyReviewAcknowledgements(skipped, acknowledgeable, parsed.entries, accountsDimensionsId, input.reviewAcknowledgements ?? [], input.otherStatementOccurrences);
 
   return {
     parsed,

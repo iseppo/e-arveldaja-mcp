@@ -31,7 +31,8 @@ import {
 } from "./estonian-tax.js";
 import { canonicalPlanJson, stripUndefinedDeep } from "./camt-plan.js";
 import type { ExecutionPlanInput, PlanRecord } from "../plan-store.js";
-import { camtContainmentIdentity, camtDuplicateStructuredCorroborators, storedBankReferenceLookupKey } from "../camt/duplicate-identity.js";
+import { camtContainmentIdentity, camtDuplicateStructuredCorroborators, camtMovementIdentity, storedBankReferenceLookupKey } from "../camt/duplicate-identity.js";
+import { recordRetainedCamtStatements } from "../camt/statement-context.js";
 import { createAccountingOperations } from "../accounting-operations.js";
 import { ownerExpenseQuestionEffect, type ReviewGuidance } from "../estonian-accounting-guidance.js";
 import {
@@ -410,6 +411,8 @@ export async function analyzeInboxCamtFiles(
     notAStatement?: boolean;
     /** Movement identities of an analyzed statement (multiset). */
     identities?: string[];
+    /** camtMovementIdentity of each movement: the acknowledgement identity (B3b). */
+    acknowledgementIdentities?: string[];
   }>();
   let bytesRead = 0;
   let budgetExceeded = camtFiles.length > budget.maxFiles;
@@ -440,6 +443,7 @@ export async function analyzeInboxCamtFiles(
     let period: { from: string; to: string } | undefined;
     let statement: { from: string; to: string; currency: string } | undefined;
     let identities: string[] | undefined;
+    let acknowledgementIdentities: string[] | undefined;
     let notAStatement = false;
     try {
       const preflight = preflightCamt053Xml(snapshot.text());
@@ -455,6 +459,7 @@ export async function analyzeInboxCamtFiles(
           period = { from, to };
           statement = { from, to, currency };
           identities = entries.map(camtContainmentIdentity);
+          acknowledgementIdentities = entries.map(camtMovementIdentity);
         }
       }
     } catch {
@@ -475,6 +480,7 @@ export async function analyzeInboxCamtFiles(
       ...(statement !== undefined ? { statement } : {}),
       ...(notAStatement ? { notAStatement } : {}),
       ...(identities !== undefined ? { identities } : {}),
+      ...(acknowledgementIdentities !== undefined ? { acknowledgementIdentities } : {}),
     });
   }
 
@@ -495,6 +501,15 @@ export async function analyzeInboxCamtFiles(
     if (entry.identities === undefined || fingerprint.accountKey === undefined || fingerprint.period === undefined) return [];
     return [{ ...fingerprint, scopeKey: fingerprint.accountKey, identities: entry.identities }];
   }));
+  // B3b: the statements kept for import, so a journal-review acknowledgement
+  // applies only to a movement that occurs once across all of them.
+  recordRetainedCamtStatements(
+    [...analyzed.values()].map(entry => entry.fingerprint.digest),
+    new Map([...analyzed.values()].flatMap(entry => entry.acknowledgementIdentities !== undefined &&
+      grouped.get(entry.fingerprint.index)!.duplicate_of === undefined && !superseded.has(entry.fingerprint.index)
+      ? [[entry.fingerprint.digest, entry.acknowledgementIdentities] as const]
+      : [])),
+  );
   const covers = new Map<number, number[]>();
   for (const [index, cover] of [...superseded.entries()].sort(([left], [right]) => left - right)) {
     const list = covers.get(cover);

@@ -28,6 +28,9 @@ import {
 } from "./accounting-inbox.js";
 import { registerReceiptInboxTools } from "./receipt-inbox.js";
 import { registerLightyearTools } from "./lightyear-investments.js";
+import { preflightCamt053Xml } from "../camt/parser.js";
+import { camtMovementIdentity } from "../camt/duplicate-identity.js";
+import { resetRetainedCamtStatements, retainedCamtMovementOccurrences } from "../camt/statement-context.js";
 import * as auditLogModule from "../audit-log.js";
 import {
   createAccountingWorkflowApi,
@@ -4358,6 +4361,27 @@ describe("accounting_inbox CAMT duplicates and overlaps", () => {
       expect(files).toHaveLength(2);
       expect(files.some(file => file.coverage !== undefined)).toBe(false);
       expect(payload.camt_overlap).not.toHaveProperty("superseded_count");
+    });
+
+    it("B3b: the same €50 movement in two retained statements counts twice for acknowledgements; a superseded statement does not", async () => {
+      resetRetainedCamtStatements();
+      const september = { from: "2026-09-01", to: "2026-09-30" };
+      const statementOne = fixtureCamtStatementXml({ period: september, entries: [row("2026-09-20", "50.00"), row("2026-09-02", "10.00", "R1")] });
+      const statementTwo = fixtureCamtStatementXml({ period: september, entries: [row("2026-09-20", "50.00"), row("2026-09-25", "7.00", "R9")] });
+      const parsed = preflightCamt053Xml(statementOne);
+      if (!parsed.ok) throw new Error("fixture did not parse");
+      const shared = camtMovementIdentity(parsed.value.entries.find(entry => entry.amount === 50)!);
+      const both = await workspaceWith([{ name: "one.xml", xml: statementOne, mtime: OLDER }, { name: "two.xml", xml: statementTwo, mtime: NEWER }]);
+      const payload = await setup().scan(both);
+      expect((payload.detected_inputs.camt_files as CamtFilePayload[]).some(file => file.coverage !== undefined)).toBe(false);
+      expect(retainedCamtMovementOccurrences(shared)).toBe(2);
+      // A rescan where the second statement is only a subset of a larger one keeps one occurrence per kept statement.
+      resetRetainedCamtStatements();
+      const larger = fixtureCamtStatementXml({ period: { from: "2026-09-01", to: "2026-10-31" }, entries: [row("2026-09-20", "50.00"), row("2026-09-02", "10.00", "R1"), row("2026-10-03", "4.00", "R5")] });
+      const contained = await workspaceWith([{ name: "one.xml", xml: statementOne, mtime: OLDER }, { name: "larger.xml", xml: larger, mtime: NEWER }]);
+      await setup().scan(contained);
+      expect(retainedCamtMovementOccurrences(shared)).toBe(1);
+      resetRetainedCamtStatements();
     });
 
     it("counts a repeated same-amount row: one fewer occurrence in the larger file keeps the smaller one", async () => {

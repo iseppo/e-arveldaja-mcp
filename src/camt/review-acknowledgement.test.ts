@@ -7,9 +7,10 @@ import type { ParsedCamtEntry, Transaction } from "./types.js";
 import { computeCamtImportProjection } from "./projection.js";
 import { summarizeEntries } from "./parser.js";
 import { camtMovementIdentity } from "./duplicate-identity.js";
-import { camtNormalizedArgs, camtPlanFingerprint } from "./executor.js";
+import { buildImportProjection, camtNormalizedArgs, camtPlanFingerprint } from "./executor.js";
 import { renderCamtImportCompact, renderCamtImportPayload, renderCamtImportSlim, type CamtImportRenderData } from "./presenter.js";
 import { camtReviewAcknowledgementStore } from "./review-acknowledgement-store.js";
+import { recordRetainedCamtStatements, resetRetainedCamtStatements, retainedCamtMovementOccurrences } from "./statement-context.js";
 import type { CamtReviewAcknowledgementCandidate, CamtReviewAcknowledgementRecord } from "./review-acknowledgement.js";
 import {
   buildCamtReviewAcknowledgementExecuteResponse,
@@ -31,8 +32,10 @@ beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "camt-ack-"));
   process.env.EARVELDAJA_RULES_DIR = dir;
   camtReviewAcknowledgementStore.reset();
+  resetRetainedCamtStatements();
 });
 afterEach(() => {
+  resetRetainedCamtStatements();
   delete process.env.EARVELDAJA_RULES_DIR;
   delete process.env.EARVELDAJA_RULES_FILE;
   camtReviewAcknowledgementStore.reset();
@@ -51,13 +54,19 @@ const manual = (id: number, amount = 50, o: Partial<Journal> = {}): Journal => (
   postings: [p(1020, DIM, "D", amount), p(1410, LOAN, "C", amount)], ...o,
 });
 
-const project = (journals: Journal[], entries: ParsedCamtEntry[], acks: CamtReviewAcknowledgementRecord[] = []) => computeCamtImportProjection({
+const project = (
+  journals: Journal[],
+  entries: ParsedCamtEntry[],
+  acks: CamtReviewAcknowledgementRecord[] = [],
+  otherStatementOccurrences?: (identity: string) => number,
+) => computeCamtImportProjection({
   loaded: { entries, summary: summarizeEntries(entries), statement_metadata: { iban: "EE000", period: {} } },
   accountsDimensionsId: DIM, dateFrom: undefined, dateTo: undefined, ledgerTransactions: [] as Transaction[],
   journalCoverage: { journals, accountId: 1020, bankAccounts: [], accountDimensions: [],
     interAccountResolver: () => ({ resolveInterAccount: () => ({ status: "none" }), hasOtherLabelledInterAccount: () => false }) },
   resolveClient: async () => ({}), reportProgress: async () => {},
   reviewAcknowledgements: acks,
+  ...(otherStatementOccurrences ? { otherStatementOccurrences } : {}),
 });
 
 const ackOf = (e: ParsedCamtEntry, journalIds: number[], o: Partial<CamtReviewAcknowledgementRecord> = {}): CamtReviewAcknowledgementRecord => ({
@@ -138,6 +147,53 @@ describe("CAMT journal-review acknowledgements in the projection (#10b)", () => 
     const longer = [entry({ date: "2026-09-29", amount: 12, bank_reference: "STMT-OTHER" }), e];
     const projection = await project([manual(901)], longer, [ackOf(e, [901])]);
     expect(projection.skipped.filter(row => row.acknowledged_review !== undefined)).toHaveLength(1);
+  });
+
+  it("B3b: two retained statements with the same ref-less €50 plus different rows → one acknowledgement quiets neither", async () => {
+    const refless = entry({ bank_reference: undefined });
+    const statementA = [refless, entry({ date: "2026-09-28", amount: 12, bank_reference: "STMT-A-12" })];
+    const statementB = [{ ...refless }, entry({ date: "2026-10-02", amount: 30, bank_reference: "STMT-B-30" })];
+    const [digestA, digestB] = ["a".repeat(64), "b".repeat(64)];
+    const ack = ackOf(refless, [901]);
+    const journals = [manual(901), manual(905, 12, { effective_date: "2026-09-28" }), manual(906, 30, { effective_date: "2026-10-02" })];
+    // Each statement alone: the movement is unique there and the acknowledgement applies.
+    expect((await project(journals, statementA, [ack])).skipped.some(row => row.acknowledged_review !== undefined)).toBe(true);
+    recordRetainedCamtStatements([digestA, digestB], new Map([[digestA, statementA.map(camtMovementIdentity)], [digestB, statementB.map(camtMovementIdentity)]]));
+    expect(retainedCamtMovementOccurrences(camtMovementIdentity(refless))).toBe(2);
+    for (const [statement, digest] of [[statementA, digestA], [statementB, digestB]] as const) {
+      const projection = await project(journals, [...statement], [ack], identity => retainedCamtMovementOccurrences(identity, digest));
+      const row = projection.skipped.find(candidate => candidate.movement_identity === camtMovementIdentity(refless))!;
+      expect(row).toMatchObject({ review_code: "camt_journal_posting_review", acknowledgement: { refused: "camt_ack_nonunique_movement" } });
+      expect(projection.skipped.some(candidate => candidate.acknowledged_review !== undefined)).toBe(false);
+    }
+    // A later scan that no longer retains B: the acknowledgement applies to A again.
+    recordRetainedCamtStatements([digestB], new Map());
+    const again = await project(journals, statementA, [ack], identity => retainedCamtMovementOccurrences(identity, digestA));
+    expect(again.skipped.some(row => row.acknowledged_review !== undefined)).toBe(true);
+  });
+
+  it("B3b: the import projection counts the other retained statements, never its own digest", async () => {
+    const refless = entry({ bank_reference: undefined });
+    const statement = [refless];
+    camtReviewAcknowledgementStore.upsert([ackOf(refless, [901])]);
+    const api = {
+      transactions: { listAll: vi.fn(async () => []) },
+      journals: { listAllWithPostings: vi.fn(async () => [manual(901)]) },
+      readonly: {
+        getAccountDimensions: vi.fn(async () => [{ id: DIM, accounts_id: 1020, is_deleted: false }] as AccountDimension[]),
+        getBankAccounts: vi.fn(async () => []),
+      },
+    } as unknown as ApiContext;
+    const loaded = { entries: statement, summary: summarizeEntries(statement), statement_metadata: { iban: "EE000", period: {} } };
+    const [own, other] = ["c".repeat(64), "d".repeat(64)];
+    const acknowledged = async () => (await buildImportProjection(api, loaded, DIM, undefined, undefined, false, "none", own))
+      .skipped.some(row => row.skip_code === "camt_review_acknowledged");
+    // Only this statement retained: its own occurrence is not a second one.
+    recordRetainedCamtStatements([own], new Map([[own, [camtMovementIdentity(refless)]]]));
+    expect(await acknowledged()).toBe(true);
+    // Another retained statement holds the same movement: the review returns.
+    recordRetainedCamtStatements([other], new Map([[other, [camtMovementIdentity(refless)]]]));
+    expect(await acknowledged()).toBe(false);
   });
 
   it("a second acknowledgement binding the same journal is refused (camt_ack_journal_already_claimed)", async () => {
@@ -261,6 +317,20 @@ describe("acknowledging a CAMT journal review via prepare_action / execute_revie
     expect(payloadOf(await buildCamtReviewAcknowledgementPrepareResponse(item(override), apiWith(() => manual(901)), context)))
       .toMatchObject({ status: "error", error_code: code });
     expect(context.planStore.activeCount).toBe(before);
+  });
+
+  it("B3b: prepare and execute refuse a movement two retained statements share", async () => {
+    const context = createTestRuntimeSafetyContext();
+    const api = apiWith(() => manual(901));
+    const prepared = payloadOf(await buildCamtReviewAcknowledgementPrepareResponse(item(), api, context)) as Extract<CamtReviewAcknowledgementPayload, { status: "ready_for_approval" }>;
+    expect(prepared.status).toBe("ready_for_approval");
+    // The inbox now keeps a second statement holding the same movement.
+    recordRetainedCamtStatements(["a".repeat(64), "b".repeat(64)], new Map([["a".repeat(64), [camtMovementIdentity(e)]], ["b".repeat(64), [camtMovementIdentity(e)]]]));
+    expect(payloadOf(await buildCamtReviewAcknowledgementExecuteResponse(item(), prepared.plan_handle, api, context)))
+      .toMatchObject({ status: "error", error_code: "camt_ack_nonunique_movement" });
+    expect(camtReviewAcknowledgementStore.read()).toEqual([]);
+    expect(payloadOf(await buildCamtReviewAcknowledgementPrepareResponse(item(), api, createTestRuntimeSafetyContext())))
+      .toMatchObject({ status: "error", error_code: "camt_ack_nonunique_movement" });
   });
 
   it("a journal that does not move the row's amount in its direction → refused", async () => {
