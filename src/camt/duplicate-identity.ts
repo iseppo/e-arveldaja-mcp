@@ -1383,7 +1383,8 @@ export function camtMovementIdentity(entry: ParsedCamtEntry): string {
 /**
  * Statement-containment identity (#2): the movement identity plus every
  * distinguishing reference the batch-duplicate key leaves out (the bank's
- * InstrId, counterparty registry code, original amount and currency), so two
+ * InstrId, the full uncapped source reference, counterparty registry code,
+ * original amount and currency), so two
  * payments that differ only there never count as the same movement when one
  * statement is tested for containment in another. Not a duplicate key: the
  * historical duplicate aliases stay on camtMovementIdentity.
@@ -1392,6 +1393,9 @@ export function camtContainmentIdentity(entry: ParsedCamtEntry): string {
   return createHash("sha256").update(JSON.stringify([
     ...batchDuplicateIdentityParts(entry),
     normalizeBatchDuplicateKeyPart(entry.instruction_id),
+    // The FULL source reference: the duplicate parts carry it capped at the
+    // ref_number length, so two references differing past that cap stay apart.
+    normalizeBatchDuplicateKeyPart(entry.reference_number),
     normalizeBatchDuplicateKeyPart(entry.counterparty_reg_code),
     entry.original_amount !== undefined ? centsKey(entry.original_amount) : "",
     entry.original_currency ?? "",

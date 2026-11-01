@@ -160,4 +160,12 @@ describe("camtContainmentIdentity (#2 review)", () => {
     expect(camtContainmentIdentity(entry("111"))).not.toBe(camtContainmentIdentity(entry("222")));
     expect(camtContainmentIdentity(entry("111"))).toBe(camtContainmentIdentity(entry("111")));
   });
+
+  it("keeps references that differ only past the 20-character cap apart; the duplicate identity is unchanged", () => {
+    const withRef = (reference_number: string) => ({ ...entry(), reference_number });
+    const [a, b] = [withRef("12345678901234567890A"), withRef("12345678901234567890B")];
+    expect(camtMovementIdentity(a)).toBe(camtMovementIdentity(b));
+    expect(camtContainmentIdentity(a)).not.toBe(camtContainmentIdentity(b));
+    expect(camtContainmentIdentity(a)).toBe(camtContainmentIdentity(withRef("12345678901234567890A")));
+  });
 });
