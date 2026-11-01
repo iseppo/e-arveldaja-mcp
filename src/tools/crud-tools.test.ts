@@ -29,7 +29,8 @@ import {
   PurchaseInvoiceTotalsCorrectionError,
   type PurchaseInvoiceTotalsCorrectionCode,
 } from "../api/purchase-invoices.api.js";
-import { buildCamtDescriptionWithMetadata } from "../camt/duplicate-identity.js";
+import { buildCamtDescriptionWithMetadata, buildDuplicateLookup, findDuplicateTransactionIds } from "../camt/duplicate-identity.js";
+import type { Transaction } from "../types/api.js";
 import { toolMetadataText } from "../__fixtures__/tool-metadata.js";
 
 vi.mock("../audit-log.js", () => ({ logAudit: vi.fn() }));
@@ -3610,15 +3611,18 @@ describe("M1 update_transaction preserves importer markers", () => {
   it("keeps the camt marker on its own trailing line and drops caller-forged markers", async () => {
     const marker = "[e-arveldaja-mcp:camt br=ABC dir=CRDT sig=0123456789abcdef]";
     const { handler, update } = harness({ description: `Old\n${marker}`, bank_ref_number: "ABC" });
-    await handler({ id: 9, data: { description: "New [source_direction=OUT]" } });
-    expect(update.mock.calls[0]![1].description).toBe(`New\n${marker}`);
+    await handler({ id: 9, data: { description: `Old [source_direction=OUT]\n${marker.replace("ABC", "XYZ")}` } });
+    expect(update.mock.calls[0]![1].description).toBe(`Old\n${marker}`);
+    const plain = harness({ description: "Old" });
+    await plain.handler({ id: 9, data: { description: `New\n${marker}` } });
+    expect(plain.update.mock.calls[0]![1].description).toBe("New");
   });
 
   it.each(["i=EE471000001020145685", "x=i"])("keeps dense C2/C3 marker byte-identical: %s", counterparty => {
     const marker = `[e-arveldaja-mcp:camt b=KUdEdAe48RG7TgYnsyTjlQ ${counterparty} d=DBIT s=0123456789abcdef]`;
     const { handler, update } = harness({ description: `Old\n${marker}` });
-    return handler({ id: 9, data: { description: "New" } }).then(() => {
-      expect(update.mock.calls[0]![1].description).toBe(`New\n${marker}`);
+    return handler({ id: 9, data: { description: "Old" } }).then(() => {
+      expect(update.mock.calls[0]![1].description).toBe(`Old\n${marker}`);
     });
   });
 
@@ -3645,22 +3649,49 @@ describe("M1 update_transaction preserves importer markers", () => {
     expect(body.description).toBe(`WISE:TRANSFER-1 Pay ${fullRef} [source_direction=OUT]`);
   });
 
-  it("carries a trusted CAMT bank ref into bank_ref_number when identity fields change", async () => {
-    const entry = {
-      date: "2026-07-01", amount: 10, currency: "EUR", direction: "CRDT" as const,
-      counterparty_name: "Payer", description: "Invoice 5", bank_reference: "BREF-1",
-      duplicate: false, duplicate_transaction_ids: [],
-    };
-    const description = buildCamtDescriptionWithMetadata(entry.description, entry)!;
-    const stored = {
-      description, date: entry.date, type: "D", amount: 10, cl_currencies_id: "EUR",
-      ref_number: null, bank_account_no: null, bank_account_name: "Payer", bank_ref_number: null,
-    };
+  // Review r2 #3: the API ignores bank_ref_number, so a CAMT row's identity is only its signed marker.
+  const camtEntry = {
+    date: "2026-07-01", amount: 100, currency: "USD", direction: "CRDT" as const,
+    counterparty_name: "Payer", description: "Invoice 5", bank_reference: "BREF-1",
+    duplicate: false, duplicate_transaction_ids: [],
+  };
+  const camtStored = () => ({
+    description: buildCamtDescriptionWithMetadata(camtEntry.description, camtEntry)!, date: camtEntry.date, type: "D", amount: 100,
+    cl_currencies_id: "USD", base_amount: 80, ref_number: null, bank_account_no: null, bank_account_name: "Payer", bank_ref_number: null,
+    accounts_dimensions_id: 100, status: "PROJECT",
+  });
+  /** The stored row after the PATCH as the live API applies it (bank_ref_number ignored). */
+  const applied = (stored: Record<string, unknown>, body: Record<string, unknown>) => {
+    const { bank_ref_number: _ignored, ...kept } = body;
+    return { id: 9, ...stored, ...kept } as unknown as Transaction;
+  };
+  const reimportIds = (row: Transaction) => findDuplicateTransactionIds(camtEntry, buildDuplicateLookup([row], 100), new Set(), 100);
+
+  it("refuses an edit that would break a CAMT row's signed identity, with no PATCH (review r2 #3)", async () => {
+    expect(reimportIds(applied(camtStored(), {}))).toEqual([9]);
+    // What the old PATCH (new text + bank_ref_number) left once the API dropped bank_ref_number: re-importable.
+    const marker = camtStored().description.split("\n").pop()!;
+    expect(reimportIds(applied(camtStored(), { description: `Invoice 5 (paid)\n${marker}`, bank_ref_number: "BREF-1" }))).toEqual([]);
+    for (const data of [
+      { description: "Invoice 5 (paid)" }, { description: null }, { ref_number: "RF18" }, { bank_account_name: "Other" }, { bank_account_no: "EE382200221020145685" },
+    ]) {
+      const { handler, update } = harness(camtStored());
+      const result = await handler({ id: 9, data }) as { isError?: boolean; content: Array<{ text: string }> };
+      expect(result.isError).toBe(true);
+      expect(parseMcpResponse(result.content[0]!.text)).toMatchObject({ category: "camt_identity_would_break" });
+      expect(update).not.toHaveBeenCalled();
+    }
+  });
+
+  it("a value-preserving edit on a CAMT row is sent without bank_ref_number and the row stays a duplicate on re-import (review r2 #3)", async () => {
+    const stored = camtStored();
     const { handler, update } = harness(stored);
-    await handler({ id: 9, data: { description: "Invoice 5 (paid)" } });
+    const result = await handler({ id: 9, data: { description: "Invoice 5", ref_number: "  ", bank_account_name: "Payer" } }) as { isError?: boolean };
+    expect(result.isError).toBeFalsy();
     const body = update.mock.calls[0]![1];
-    expect(body.bank_ref_number).toBe("BREF-1");
-    expect(body.description).toMatch(/^Invoice 5 \(paid\)\n\[e-arveldaja-mcp:camt /);
+    expect(body).not.toHaveProperty("bank_ref_number");
+    expect(body.description).toBe(stored.description);
+    expect(reimportIds(applied(stored, body))).toEqual([9]);
   });
 
   it("refuses an identity edit on a hash-only CAMT row", async () => {

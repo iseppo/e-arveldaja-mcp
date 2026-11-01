@@ -783,7 +783,7 @@ API data remains raw.
 **Non-goals — do NOT reimplement in MCP (e-arveldaja does these natively; reimplementing risks double-booking):**
 - **No KMD/VAT return (käibedeklaratsioon)** — e-arveldaja generates it from the confirmed ledger and files it to EMTA. The tax-rules layer is advisory only.
 - **No EMTA prepayment-account tax-expense entries** — a bank transfer to EMTA is booked as a prepayment-account (ettemaksukonto, acct 1516) top-up; the draw-down tax entries come from e-arveldaja's EMTA prepayment-account statement.
-- **`update_transaction` is deliberately metadata-scoped** — bank-reference/description fields only; never amounts, postings, or distributions.
+- **`update_transaction` is deliberately metadata-scoped** — bank-reference/description fields only; never amounts, postings, or distributions. On a CAMT-marked row every writable field is covered by the signed marker and `bank_ref_number` is read-only (never sent), so an edit that changes one is refused (`camt_identity_would_break`, no PATCH).
 
 ## Changelog style
 

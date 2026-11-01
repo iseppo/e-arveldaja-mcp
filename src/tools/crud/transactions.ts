@@ -31,10 +31,7 @@ import {
 } from "../../bank-transaction-create.js";
 import { canonicalRefNumber } from "../../ref-number.js";
 import { stripWisePrefix, withWiseSourceDirection } from "../../wise/preflight.js";
-import {
-  extractCamtDescriptionMetadata,
-  isTrustedCamtDescriptionMetadata,
-} from "../../camt/duplicate-identity.js";
+import { CAMT_DESCRIPTION_METADATA_PREFIX } from "../../camt/duplicate-identity.js";
 import {
   annotateDistinctSourceReferences,
   findDuplicateBankPostings,
@@ -83,8 +80,8 @@ export type TransactionMetadataUpdateResult =
  * - `ref_number` is canonicalized like createBankTransaction (over-cap value
  *   woven into the description before the trailing marker);
  * - the result must fit the 150-char description cap (refused, never truncated);
- * - a trusted CAMT row whose identity lives only in the marker keeps it via
- *   bank_ref_number, or the edit is refused when that cannot be preserved.
+ * - on a CAMT-marked row, a change to any field the signed marker covers is
+ *   refused (camt_identity_would_break); bank_ref_number is never sent.
  */
 export function buildTransactionMetadataUpdate(
   stored: Pick<Transaction,
@@ -136,31 +133,21 @@ export function buildTransactionMetadataUpdate(
     };
   }
 
-  // A CAMT row without a stored bank_ref_number is deduplicated via its signed
-  // marker, whose signature covers these fields — changing any of them makes
-  // the marker untrusted and the row re-importable.
-  // The bank reference that will be stored after this update: a supplied
-  // null/blank value leaves the row without a usable direct reference.
-  const identityChanges = CAMT_IDENTITY_FIELDS.some(field =>
+  // A CAMT row's dedup identity is its signed marker, whose signature covers
+  // every field update_transaction can write; bank_ref_number is read-only in
+  // the API, so it cannot carry the identity across an edit either. Any change
+  // to these fields would make the row re-importable (double booking), and a
+  // valid marker for the new values cannot be regenerated (the signature binds
+  // the statement's own text), so such an edit is refused (review r2 #3).
+  const identityChanges = CAMT_IDENTITY_FIELDS.filter(field =>
     field in payload && (payload[field] ?? "") !== (stored[field] ?? ""));
-  const effectiveBankRef = "bank_ref_number" in payload ? payload.bank_ref_number : stored.bank_ref_number;
-  if (
-    identityChanges &&
-    !(typeof effectiveBankRef === "string" && effectiveBankRef.trim()) &&
-    CAMT_METADATA_MARKER.test(storedDescription) &&
-    isTrustedCamtDescriptionMetadata(stored)
-  ) {
-    const bankRef = extractCamtDescriptionMetadata(storedDescription).bank_ref_number;
-    if (!bankRef) {
-      return {
-        ok: false,
-        category: "camt_identity_would_break",
-        error: "This CAMT-imported row carries its bank reference only as a hash inside the description marker; changing description/ref_number/bank_account_no/bank_account_name would make it re-importable (double booking).",
-        next_action: "Leave these fields unchanged (bank_ref_number is read-only, so the reference cannot be added by an update).",
-      };
-    }
-    payload.bank_ref_number = bankRef;
-    notes.push("bank_ref_number was set from the CAMT marker so the row stays deduplicated after the edit.");
+  if (identityChanges.length > 0 && storedDescription.includes(CAMT_DESCRIPTION_METADATA_PREFIX)) {
+    return {
+      ok: false,
+      category: "camt_identity_would_break",
+      error: `This row was imported from a CAMT bank statement; its duplicate-import identity is signed over description, ref_number, bank_account_no and bank_account_name, so changing ${identityChanges.join(", ")} would make the statement row importable again (double booking).`,
+      next_action: "Leave these fields unchanged on CAMT-imported rows (bank_ref_number is read-only, so the identity cannot be moved to it).",
+    };
   }
 
   return { ok: true, payload, notes };
