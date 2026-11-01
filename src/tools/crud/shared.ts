@@ -350,8 +350,9 @@ export function invoiceListFilterParams(opts: { dateLabel: string; clientLabel: 
   };
 }
 
+// bank_ref_number is read-only upstream: a PATCH reports success without
+// storing it, so a caller-supplied value is refused rather than "updated".
 const TRANSACTION_METADATA_FIELDS = new Set([
-  "bank_ref_number",
   "bank_account_name",
   "bank_account_no",
   "description",
@@ -368,6 +369,12 @@ export function validateTransactionUpdateData(data: Record<string, unknown>): st
   }
 
   for (const field of fields) {
+    if (field === "bank_ref_number") {
+      errors.push(
+        `Field "bank_ref_number" is read-only in the e-arveldaja API (a PATCH reports success without storing it), so update_transaction cannot change it. Allowed fields: ${allowedFields}.`
+      );
+      continue;
+    }
     if (!TRANSACTION_METADATA_FIELDS.has(field)) {
       errors.push(
         `Field "${field}" is not supported by update_transaction. Allowed fields: ${allowedFields}.`

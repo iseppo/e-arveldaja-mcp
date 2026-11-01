@@ -156,7 +156,7 @@ export function buildTransactionMetadataUpdate(
         ok: false,
         category: "camt_identity_would_break",
         error: "This CAMT-imported row carries its bank reference only as a hash inside the description marker; changing description/ref_number/bank_account_no/bank_account_name would make it re-importable (double booking).",
-        next_action: "Include the statement's bank reference as bank_ref_number in the same update, or leave these fields unchanged.",
+        next_action: "Leave these fields unchanged (bank_ref_number is read-only, so the reference cannot be added by an update).",
       };
     }
     payload.bank_ref_number = bankRef;
@@ -732,9 +732,9 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
     });
   });
 
-  registerTool(server, "update_transaction", "Update transaction metadata fields such as bank reference, counterparty name, bank account number, description, or payment reference. Importer markers in the stored description are preserved.", {
+  registerTool(server, "update_transaction", "Update transaction metadata fields such as counterparty name, bank account number, description, or payment reference. Importer markers in the stored description are preserved. The bank reference (bank_ref_number) is read-only in the API and is refused. Verify the change with a fresh get_transaction before reporting it as repaired.", {
     id: coerceId.describe("Transaction ID"),
-    data: jsonObjectInput.describe("Object with allowed metadata fields only: bank_ref_number, bank_account_name, bank_account_no, description (max 150 chars incl. preserved importer markers), ref_number (canonicalized like create_transaction)."),
+    data: jsonObjectInput.describe("Object with allowed metadata fields only: bank_account_name, bank_account_no, description (max 150 chars incl. preserved importer markers), ref_number (canonicalized like create_transaction). bank_ref_number is read-only and refused."),
   }, { ...mutate, title: "Update Transaction" }, async ({ id, data }) => {
     const parsed = desandboxAllStrings(parseJsonObject(data, "data"));
     const validationErrors = validateTransactionUpdateData(parsed);

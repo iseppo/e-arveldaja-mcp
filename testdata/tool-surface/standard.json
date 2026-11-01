@@ -2,9 +2,9 @@
   "profile": "standard",
   "measurement": {
     "toolCount": 127,
-    "toolsListBytes": 145987,
-    "descriptionsBytes": 20737,
-    "inputSchemasBytes": 94665,
+    "toolsListBytes": 146153,
+    "descriptionsBytes": 20878,
+    "inputSchemasBytes": 94690,
     "largestTool": {
       "name": "import_wise_transactions",
       "bytes": 5627
@@ -1505,7 +1505,7 @@
         "openWorldHint": false,
         "readOnlyHint": false
       },
-      "description": "Update transaction metadata fields such as bank reference, counterparty name, bank account number, description, or payment reference. Importer markers in the stored description are preserved.",
+      "description": "Update transaction metadata fields such as counterparty name, bank account number, description, or payment reference. Importer markers in the stored description are preserved. The bank reference (bank_ref_number) is read-only in the API and is refused. Verify the change with a fresh get_transaction before reporting it as repaired.",
       "execution": {
         "taskSupport": "forbidden"
       },
@@ -1526,7 +1526,7 @@
                 "type": "string"
               }
             ],
-            "description": "Object with allowed metadata fields only: bank_ref_number, bank_account_name, bank_account_no, description (max 150 chars incl. preserved importer markers), ref_number (canonicalized like create_transaction)."
+            "description": "Object with allowed metadata fields only: bank_account_name, bank_account_no, description (max 150 chars incl. preserved importer markers), ref_number (canonicalized like create_transaction). bank_ref_number is read-only and refused."
           },
           "id": {
             "description": "Transaction ID",

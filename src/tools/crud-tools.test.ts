@@ -1495,6 +1495,21 @@ describe("update_transaction", () => {
     expect(api.transactions.update).not.toHaveBeenCalled();
   });
 
+  it("refuses bank_ref_number: it is read-only upstream, so it is never reported as updated", async () => {
+    const { api, handler } = getCrudToolHarness("update_transaction");
+
+    const result = await handler({
+      id: 1,
+      data: '{"bank_ref_number":"RF123","description":"x"}',
+    }) as { isError?: boolean; content: Array<{ text: string }> };
+
+    expect(result.isError).toBe(true);
+    const payload = parseMcpResponse(result.content[0]!.text) as { error: string; details: string[] };
+    expect(payload.error).toBe("Transaction metadata validation failed");
+    expect(payload.details.join(" ")).toContain("read-only");
+    expect(api.transactions.update).not.toHaveBeenCalled();
+  });
+
   it("allows safe metadata enrichment fields", async () => {
     const { api, handler } = getCrudToolHarness("update_transaction", {
       transactions: {
@@ -1505,11 +1520,11 @@ describe("update_transaction", () => {
 
     const result = await handler({
       id: 1,
-      data: '{"bank_ref_number":"RF123","description":"CAMT import metadata"}',
+      data: '{"bank_account_name":"Payer OÜ","description":"CAMT import metadata"}',
     }) as { content: Array<{ text: string }> };
 
     expect(api.transactions.update).toHaveBeenCalledWith(1, {
-      bank_ref_number: "RF123",
+      bank_account_name: "Payer OÜ",
       description: "CAMT import metadata",
     });
     expect(parseMcpResponse(result.content[0]!.text)).toMatchObject({
@@ -3668,7 +3683,7 @@ describe("M1 update_transaction preserves importer markers", () => {
     expect(update).not.toHaveBeenCalled();
   });
 
-  it("refuses an identity edit on a hash-only CAMT row when bank_ref_number is supplied blank", async () => {
+  it("refuses a caller-supplied bank_ref_number (even blank) on a hash-only CAMT row", async () => {
     const entry = {
       date: "2026-07-01", amount: 10, currency: "EUR", direction: "CRDT" as const,
       counterparty_name: "Payer", counterparty_iban: "EE382200221020145685",
@@ -3684,7 +3699,7 @@ describe("M1 update_transaction preserves importer markers", () => {
       const { handler, update } = harness(stored);
       const result = await handler({ id: 9, data: { description: "Edited", bank_ref_number: blank } }) as { isError?: boolean; content: Array<{ text: string }> };
       expect(result.isError).toBe(true);
-      expect(parseMcpResponse(result.content[0]!.text)).toMatchObject({ category: "camt_identity_would_break" });
+      expect(parseMcpResponse(result.content[0]!.text)).toMatchObject({ error: "Transaction metadata validation failed" });
       expect(update).not.toHaveBeenCalled();
     }
   });
