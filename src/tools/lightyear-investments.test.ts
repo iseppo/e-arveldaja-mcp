@@ -2768,7 +2768,7 @@ describe("H17 distribution currency and EUR provenance", () => {
     const run = setupLightyearTool("book_lightyear_distributions");
     const payload = parseMcpResponse((await run.handler({ file_path: "/tmp/lightyear.csv", broker_account: 1120, income_account: 8320, tax_account: 8610, fee_account: 8610, dry_run: false })).content[0]!.text) as any;
     expect(payload.results[0]).toMatchObject({ status: "created", currency: "USD", gross_eur: 2.01, net_eur: 1.15, tax_eur: 0.57, fee_eur: 0.29 });
-    expect(payload.results[0].fx_provenance).toEqual({ rate: 2, orientation: "foreign_per_eur", conversion_reference: "CN-DECIMAL-H17", conversion_row_indexes: [1, 0] });
+    expect(payload.results[0].fx_provenance).toEqual({ source: "statement_conversion", rate: 2, orientation: "foreign_per_eur", conversion_reference: "CN-DECIMAL-H17", conversion_row_indexes: [1, 0] });
     expect(run.api.journals.create.mock.calls[0]![0].postings).toEqual([
       { accounts_id: 1120, type: "D", amount: 1.15 },
       { accounts_id: 8610, type: "D", amount: 0.57 },

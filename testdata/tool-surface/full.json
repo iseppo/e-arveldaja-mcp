@@ -2,9 +2,9 @@
   "profile": "full",
   "measurement": {
     "toolCount": 146,
-    "toolsListBytes": 176178,
-    "descriptionsBytes": 24717,
-    "inputSchemasBytes": 116222,
+    "toolsListBytes": 177093,
+    "descriptionsBytes": 25038,
+    "inputSchemasBytes": 116814,
     "largestTool": {
       "name": "import_wise_transactions",
       "bytes": 5627
@@ -5550,7 +5550,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Create journal entries for Lightyear dividend, interest, and reward distributions, including withheld tax. DRY RUN by default.",
+      "description": "Create journal entries for Lightyear dividend, interest, and reward distributions, including withheld tax. DRY RUN by default. With fx_source=\"ecb\", a foreign distribution that stays in its currency (no conversion on the statement) is valued at the ECB reference rate of its statement day; the rate (or the failed lookup) is bound into the reviewed plan and execute never refetches. Retained USD distributions are logged in the USD cash-fund pool.",
       "execution": {
         "taskSupport": "forbidden"
       },
@@ -5583,8 +5583,16 @@
             "type": "string"
           },
           "fund_distribution_account": {
-            "description": "Account for fund Distribution rows (default: auto-detect 'Tulu fondiosakute ümberhindlusest', standard 8320).",
+            "description": "Account for fund Distribution rows — both Lightyear cash funds (BRICEKSP, ICSUSSDP) alike (default: auto-detect 'Tulu fondiosakute ümberhindlusest', standard 8320).",
             "type": "number"
+          },
+          "fx_source": {
+            "description": "Rate source for foreign distributions: \"statement\" (default) needs the paired Lightyear conversion; \"ecb\" values a distribution that has no conversion at all at the ECB rate of its statement day (weekend/holiday: last earlier published rate). Today's rate is never final.",
+            "enum": [
+              "statement",
+              "ecb"
+            ],
+            "type": "string"
           },
           "income_account": {
             "description": "Income account for Dividend rows (dividends from directly-held shares → 8330 'Tulu aktsiatelt ja osadelt'). Fund Distribution rows use fund_distribution_account and Interest rows use interest_account.",
@@ -5593,6 +5601,11 @@
           "interest_account": {
             "description": "Account for Interest rows (default: auto-detect 'Intressitulu hoiustelt', standard 8400).",
             "type": "number"
+          },
+          "lightyear_account": {
+            "description": "Lightyear account id (e.g. CHZELUU) for the USD pool when the statement's file name does not carry it.",
+            "pattern": "^[A-Z0-9]{3,32}$",
+            "type": "string"
           },
           "plan_handle": {
             "description": "Execution-plan handle from the reviewed dry run. Required for dry_run=false.",
