@@ -141,7 +141,48 @@ describe("USD pool roles: order-independent 1:1 pairing and complete classificat
     expect(dry.payload.results.some(row => row.eur_amount === 80)).toBe(false);
   });
 
-  it("a cent of tolerance joining 115.05 / 115.06 groups is resolved by the exact-cent edges when they pair every member", () => {
+  it("Codex #3: exact-cent edges that are not same-second never override a competing tolerated assignment", () => {
+    // Exact-cent assignment: 115.06@10:00:00↔€80@10:01:10 (70 s), 115.05@10:01:00↔€100@10:00:20, 115.05@17:00:00↔€90@17:00:20
+    // (costs €80/€100/€90). Competing tolerated assignment within 20 s: €100/€80/€90. Neither is proven → ambiguous.
+    const rows = [
+      buy("09/06/2026 10:00:00", "OR-TESTCDX01", "115.06"),
+      buy("09/06/2026 10:01:00", "OR-TESTCDX02", "115.05"),
+      buy("09/06/2026 17:00:00", "OR-TESTCDX03", "115.05"),
+      ...convIn("09/06/2026 10:00:20", "CN-TESTCDX01", "115.05", "100.00"),
+      ...convIn("09/06/2026 10:01:10", "CN-TESTCDX02", "115.06", "80.00"),
+      ...convIn("09/06/2026 17:00:20", "CN-TESTCDX03", "115.05", "90.00"),
+    ];
+    expect(assignments(rows)).toEqual({ "OR-TESTCDX01": null, "OR-TESTCDX02": null, "OR-TESTCDX03": null });
+    expect(new Set(roles(rows).values())).toEqual(new Set(["pairing_ambiguous"]));
+    // Same-second but one edge only tolerated (115.06 trade ↔ 115.05 conversion in its second): ambiguous.
+    const tolerated = [
+      buy("09/06/2026 16:21:12", "OR-TESTCDX04", "115.06"), ...convIn("09/06/2026 16:21:12", "CN-TESTCDX04", "115.05", "99.00"),
+      buy("09/06/2026 16:21:55", "OR-TESTCDX05", "115.05"), ...convIn("09/06/2026 16:21:55", "CN-TESTCDX05", "115.05", "98.99"),
+    ];
+    expect(new Set(roles(tolerated).values())).toEqual(new Set(["pairing_ambiguous"]));
+    // Two exact same-second conversions for one trade: ambiguous.
+    const doubled = [
+      buy("09/06/2026 16:21:12", "OR-TESTCDX06", "115.06"), ...convIn("09/06/2026 16:21:12", "CN-TESTCDX06", "115.06", "99.00"),
+      buy("09/06/2026 16:21:55", "OR-TESTCDX07", "115.05"), ...convIn("09/06/2026 16:21:12", "CN-TESTCDX07", "115.06", "98.99"),
+    ];
+    expect(new Set(roles(doubled).values())).toEqual(new Set(["pairing_ambiguous"]));
+    // Every trade has a same-second exact edge, but one has two: ambiguous.
+    const twoForOne = [
+      buy("09/06/2026 16:21:12", "OR-TESTCDX08", "115.06"),
+      ...convIn("09/06/2026 16:21:12", "CN-TESTCDX08", "115.06", "99.00"), ...convIn("09/06/2026 16:21:12", "CN-TESTCDX09", "115.06", "99.01"),
+      buy("09/06/2026 16:21:55", "OR-TESTCDX09", "115.05"), ...convIn("09/06/2026 16:21:55", "CN-TESTCDX10", "115.05", "98.99"),
+    ];
+    expect(new Set(roles(twoForOne).values())).toEqual(new Set(["pairing_ambiguous"]));
+    // Two trades in one conversion's second: ambiguous.
+    const oneForTwo = [
+      buy("09/06/2026 16:21:12", "OR-TESTCDX10", "115.06"), buy("09/06/2026 16:21:12", "OR-TESTCDX11", "115.06"),
+      ...convIn("09/06/2026 16:21:12", "CN-TESTCDX11", "115.06", "99.00"),
+      buy("09/06/2026 16:29:09", "OR-TESTCDX12", "115.05"), ...convIn("09/06/2026 16:29:09", "CN-TESTCDX12", "115.05", "98.99"),
+    ];
+    expect(new Set(roles(oneForTwo).values())).toEqual(new Set(["pairing_ambiguous"]));
+  });
+
+  it("a cent of tolerance joining 115.05 / 115.06 groups is resolved when every member has exactly one same-second exact-cent edge", () => {
     const rows = [
       buy("09/06/2026 16:21:12", "OR-TESTCNT01", "115.06"), ...convIn("09/06/2026 16:21:12", "CN-TESTCNT01", "115.06", "99.00"),
       buy("09/06/2026 16:21:55", "OR-TESTCNT02", "115.05"), ...convIn("09/06/2026 16:21:55", "CN-TESTCNT02", "115.05", "98.99"),

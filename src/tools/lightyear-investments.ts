@@ -1186,14 +1186,14 @@ function fxReviewWarning(
  * cent). A connected component with one trade and one conversion pairs;
  * otherwise only edges within ±60 s count, and they pair when every node has at
  * most one and they cover the smaller side; unmatched trades fall through to
- * the pool stages, unmatched conversions block (ambiguous). Any other component
- * is ambiguous: its trades are invalid_conversion_pair, its conversions block.
+ * the pool stages, unmatched conversions block (ambiguous). Otherwise the
+ * component pairs only when its same-second edges are exact to the cent and
+ * give every trade and conversion exactly one; any other component is
+ * ambiguous: its trades are invalid_conversion_pair, its conversions block.
  */
 function assignOneToOne(
   candidates: ReadonlyMap<number, ReadonlyArray<{ ref: string; ts: number | null; exact?: boolean }>>,
   tradeTs: ReadonlyMap<number, number | null>,
-  /** Exact-cent retry of an ambiguous group (internal): every member must then pair. */
-  exactRetry = true,
 ): { pairs: Map<number, string>; tradeState: Map<number, "paired" | "ambiguous" | "unmatched">; conversionState: Map<string, "paired" | "ambiguous"> } {
   const parent = new Map<string, string>();
   const find = (node: string): string => {
@@ -1263,22 +1263,33 @@ function assignOneToOne(
       for (const ref of component.conversions) if (!conversionState.has(ref)) conversionState.set(ref, "ambiguous");
       continue;
     }
-    // A cent of tolerance can join neighbouring amounts (115.05 / 115.06): the group resolves when its
-    // exact-cent edges alone pair every trade and every conversion of it, else it stays ambiguous.
-    if (exactRetry) {
-      const members = new Set(component.conversions);
-      const exactOnly = new Map(component.trades.map(index => [index, candidates.get(index)!.filter(candidate => candidate.exact === true && members.has(candidate.ref))]));
-      const retry = assignOneToOne(exactOnly, tradeTs, false);
-      const complete = component.trades.every(index => retry.tradeState.get(index) === "paired")
-        && component.conversions.every(ref => retry.conversionState.get(ref) === "paired");
-      if (complete) {
-        for (const [index, ref] of retry.pairs) {
-          pairs.set(index, ref);
-          tradeState.set(index, "paired");
-          conversionState.set(ref, "paired");
-        }
-        continue;
+    // A cent of tolerance can join neighbouring amounts (115.05 / 115.06). The group still resolves when
+    // its same-second edges alone are a perfect matching of every member and each is exact to the cent:
+    // every trade and every conversion has exactly one same-second edge (so the matching is the only one
+    // on those edges). Otherwise it stays ambiguous: a component is never split, so a 70 s pair cannot
+    // borrow the one-trade-one-conversion distance exemption (Codex review of Q4, #3).
+    const sameSecond: Array<{ index: number; ref: string; exact: boolean }> = [];
+    for (const index of component.trades) {
+      const ts = tradeTs.get(index) ?? null;
+      for (const candidate of candidates.get(index)!) {
+        if (ts !== null && conversionTs.get(candidate.ref) === ts) sameSecond.push({ index, ref: candidate.ref, exact: candidate.exact === true });
       }
+    }
+    const tradeHits = new Map<number, number>();
+    const conversionHits = new Map<string, number>();
+    for (const edge of sameSecond) {
+      tradeHits.set(edge.index, (tradeHits.get(edge.index) ?? 0) + 1);
+      conversionHits.set(edge.ref, (conversionHits.get(edge.ref) ?? 0) + 1);
+    }
+    if (sameSecond.every(edge => edge.exact)
+      && component.trades.every(index => tradeHits.get(index) === 1)
+      && component.conversions.every(ref => conversionHits.get(ref) === 1)) {
+      for (const edge of sameSecond) {
+        pairs.set(edge.index, edge.ref);
+        tradeState.set(edge.index, "paired");
+        conversionState.set(edge.ref, "paired");
+      }
+      continue;
     }
     for (const index of component.trades) tradeState.set(index, "ambiguous");
     for (const ref of component.conversions) conversionState.set(ref, "ambiguous");

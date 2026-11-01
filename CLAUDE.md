@@ -653,8 +653,9 @@ Trade↔conversion pairing is computed over the whole statement before anything 
 conversion, or unique ±60 s edges covering the smaller side); otherwise every member is
 `invalid_conversion_pair` / `pairing_ambiguous`. A second holding both a pool inflow and an outflow
 refuses that and every later pool command (`usd_pool_ambiguous_order`). `validateUsdPool`, the trades
-valuation and the revaluation run these pure checks. A group that is ambiguous only through the one-cent
-pairing tolerance is retried with exact-cent edges and pairs when they pair every member.
+valuation and the revaluation run these pure checks. A group still ambiguous after the ±60 s rule pairs only
+when its same-second edges give every trade and conversion exactly one and each is exact to the cent (the only
+matching on same-second edges); a group is never split, so no member gets the 1+1 distance exemption.
 
 Read-only rebuild (`src/lightyear/rebuild.ts`, script `npm run lightyear:rebuild-compare`): `simulateLightyearYear`
 runs the production planners `extractLightyearDistributions` / `planLightyearDistributions` / `planLightyearTrades`
