@@ -4,6 +4,7 @@ import {
   batchDuplicateIdentityParts,
   buildBatchDuplicateKey,
   buildCamtDescriptionWithMetadata,
+  camtContainmentIdentity,
   camtMovementIdentity,
   buildDuplicateLookup,
   extractCamtDescriptionMetadata,
@@ -145,5 +146,18 @@ describe("CAMT leg identity (batch key and movement_identity)", () => {
     expect(camtMovementIdentity({ ...entry, leg_index: 0 })).not.toBe(camtMovementIdentity(entry));
     expect(camtMovementIdentity({ ...entry, direction: "CRDT" })).not.toBe(camtMovementIdentity(entry));
     expect(camtMovementIdentity({ ...entry })).toBe(camtMovementIdentity(entry));
+  });
+});
+
+describe("camtContainmentIdentity (#2 review)", () => {
+  const entry = (instruction_id?: string) => ({
+    date: "2026-09-20", amount: 50, currency: "EUR", direction: "DBIT" as const, description: "Rent",
+    ...(instruction_id !== undefined ? { instruction_id } : {}), duplicate: false, duplicate_transaction_ids: [],
+  });
+
+  it("keeps the InstrId apart while the duplicate identity is unchanged", () => {
+    expect(camtMovementIdentity(entry("111"))).toBe(camtMovementIdentity(entry("222")));
+    expect(camtContainmentIdentity(entry("111"))).not.toBe(camtContainmentIdentity(entry("222")));
+    expect(camtContainmentIdentity(entry("111"))).toBe(camtContainmentIdentity(entry("111")));
   });
 });

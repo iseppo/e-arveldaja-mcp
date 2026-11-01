@@ -31,7 +31,7 @@ import {
 } from "./estonian-tax.js";
 import { canonicalPlanJson, stripUndefinedDeep } from "./camt-plan.js";
 import type { ExecutionPlanInput, PlanRecord } from "../plan-store.js";
-import { camtDuplicateStructuredCorroborators, camtMovementIdentity, storedBankReferenceLookupKey } from "../camt/duplicate-identity.js";
+import { camtContainmentIdentity, camtDuplicateStructuredCorroborators, storedBankReferenceLookupKey } from "../camt/duplicate-identity.js";
 import { createAccountingOperations } from "../accounting-operations.js";
 import { ownerExpenseQuestionEffect, type ReviewGuidance } from "../estonian-accounting-guidance.js";
 import {
@@ -454,7 +454,7 @@ export async function analyzeInboxCamtFiles(
           accountKey = `${identity}:${currency}`;
           period = { from, to };
           statement = { from, to, currency };
-          identities = entries.map(camtMovementIdentity);
+          identities = entries.map(camtContainmentIdentity);
         }
       }
     } catch {

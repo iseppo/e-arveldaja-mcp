@@ -4337,6 +4337,29 @@ describe("accounting_inbox CAMT duplicates and overlaps", () => {
       expect(desandboxText(importA!.reason)).toContain(`contains every movement of the statement(s) at camt_files index ${b}`);
     });
 
+    it("two reference-less €50 payments with different bank InstrId are different movements: not superseded", async () => {
+      const refLess = (instructionId: string) => `
+      <Ntry>
+        <Amt Ccy="EUR">50.00</Amt>
+        <CdtDbtInd>DBIT</CdtDbtInd>
+        <BookgDt><Dt>2026-09-20</Dt></BookgDt>
+        <NtryDtls><TxDtls><Refs><InstrId>${instructionId}</InstrId></Refs><RmtInf><Ustrd>Rent</Ustrd></RmtInf></TxDtls></NtryDtls>
+      </Ntry>`;
+      const withRows = (period: { from: string; to: string }, rows: string) =>
+        fixtureCamtStatementXml({ period }).replace("</Stmt>", `${rows}\n    </Stmt>`);
+      const larger = withRows({ from: "2026-09-01", to: "2026-10-31" }, refLess("111"));
+      const smaller = withRows({ from: "2026-09-01", to: "2026-09-30" }, refLess("222"));
+      const workspace = await workspaceWith([
+        { name: "large.xml", xml: larger, mtime: OLDER },
+        { name: "small.xml", xml: smaller, mtime: NEWER },
+      ]);
+      const payload = await setup().scan(workspace);
+      const files = payload.detected_inputs.camt_files as CamtFilePayload[];
+      expect(files).toHaveLength(2);
+      expect(files.some(file => file.coverage !== undefined)).toBe(false);
+      expect(payload.camt_overlap).not.toHaveProperty("superseded_count");
+    });
+
     it("counts a repeated same-amount row: one fewer occurrence in the larger file keeps the smaller one", async () => {
       const smaller = fixtureCamtStatementXml({ period: { from: "2026-09-01", to: "2026-09-30" }, entries: [rowsA[1]!, rowsA[2]!, rowsA[1]!] });
       const workspace = await workspaceWith([
