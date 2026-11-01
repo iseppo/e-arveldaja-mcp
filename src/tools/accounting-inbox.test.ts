@@ -4915,7 +4915,7 @@ describe("accounting_inbox: Lightyear CSV exports", () => {
   async function lightyearWorkspace(): Promise<string> {
     const workspace = await createAccountingWorkflowWorkspace({ includeReceipts: false });
     workspacesToClean.push(workspace);
-    await writeFile(join(workspace, "AccountStatement-LY-FIXTURE.csv"), `﻿${LIGHTYEAR_STATEMENT_CSV}`);
+    await writeFile(join(workspace, "AccountStatement-LY-FIXTURE-A.csv"), `﻿${LIGHTYEAR_STATEMENT_CSV}`);
     await writeFile(join(workspace, "LightyearCapitalGainsStatement-LY-FIXTURE.csv"), LIGHTYEAR_GAINS_CSV);
     // Header-based, not name-based: a Lightyear-looking name with another header is ignored.
     await writeFile(join(workspace, "AccountStatement-LY-OTHER.csv"), "Date,Amount,Description\n2026-09-01,1.00,x\n");
@@ -4945,7 +4945,7 @@ describe("accounting_inbox: Lightyear CSV exports", () => {
     const { prepared } = await scan(workspace, { profile });
     const files = prepared.detected_inputs.lightyear_files as any[];
     expect(files.map(file => [desandboxText(file.display_name), file.kind]).sort()).toEqual([
-      ["AccountStatement-LY-FIXTURE.csv", "account_statement"],
+      ["AccountStatement-LY-FIXTURE-A.csv", "account_statement"],
       ["LightyearCapitalGainsStatement-LY-FIXTURE.csv", "capital_gains"],
     ]);
     expect(files.every(file => typeof file.file_ref === "string")).toBe(true);
@@ -4981,10 +4981,10 @@ describe("accounting_inbox: Lightyear CSV exports", () => {
     const workspace = await lightyearWorkspace();
     await writeFile(join(workspace, "LightyearCapitalGainsStatement-LY-FIXTURE (1).csv"), LIGHTYEAR_GAINS_CSV);
     // A statement copy too: each kind keeps its own file.
-    await writeFile(join(workspace, "AccountStatement-LY-FIXTURE (1).csv"), `﻿${LIGHTYEAR_STATEMENT_CSV}`);
+    await writeFile(join(workspace, "AccountStatement-LY-FIXTURE-A (1).csv"), `﻿${LIGHTYEAR_STATEMENT_CSV}`);
     // The newest file is kept: make the "(1)" copies older.
     const older = new Date("2026-01-01T00:00:00Z");
-    for (const name of ["LightyearCapitalGainsStatement-LY-FIXTURE (1).csv", "AccountStatement-LY-FIXTURE (1).csv"]) await utimes(join(workspace, name), older, older);
+    for (const name of ["LightyearCapitalGainsStatement-LY-FIXTURE (1).csv", "AccountStatement-LY-FIXTURE-A (1).csv"]) await utimes(join(workspace, name), older, older);
     const { prepared } = await scan(workspace);
     const files = prepared.detected_inputs.lightyear_files as InboxLightyearFilePayload[];
     const byName = new Map(files.map((file, index) => [desandboxText(file.display_name), { file, index }]));
@@ -5004,10 +5004,10 @@ describe("accounting_inbox: Lightyear CSV exports", () => {
   it("#3 a kept statement changed after the scan cannot hide its copy's rows: its file_ref is refused", async () => {
     const workspace = await lightyearWorkspace();
     const secondRow = "15/09/2026 10:00:00,OR-FIXTURE2,FIXT,IE0000000001,Sell,1,EUR,11.00,11.00,,0.00,11.00,\n";
-    await writeFile(join(workspace, "AccountStatement-LY-FIXTURE.csv"), `${LIGHTYEAR_STATEMENT_CSV}${secondRow}`);
-    await writeFile(join(workspace, "AccountStatement-LY-FIXTURE (1).csv"), `${LIGHTYEAR_STATEMENT_CSV}${secondRow}`);
+    await writeFile(join(workspace, "AccountStatement-LY-FIXTURE-A.csv"), `${LIGHTYEAR_STATEMENT_CSV}${secondRow}`);
+    await writeFile(join(workspace, "AccountStatement-LY-FIXTURE-A (1).csv"), `${LIGHTYEAR_STATEMENT_CSV}${secondRow}`);
     const older = new Date("2026-01-01T00:00:00Z");
-    await utimes(join(workspace, "AccountStatement-LY-FIXTURE (1).csv"), older, older);
+    await utimes(join(workspace, "AccountStatement-LY-FIXTURE-A (1).csv"), older, older);
     const server = createMockToolServer();
     const context = createTestRuntimeSafetyContext();
     const api = createAccountingWorkflowApi({ bankAccounts: [fixtureBankAccount()], accountDimensions: [fixtureAccountDimension()] });
@@ -5018,13 +5018,13 @@ describe("accounting_inbox: Lightyear CSV exports", () => {
     const payload = parseMcpResponse((await runWithToolProfile("standard", () =>
       inbox({ mode: "scan", workspace_path: workspace }))).content[0]!.text) as { detected_inputs: { lightyear_files: InboxLightyearFilePayload[] } };
     const files = payload.detected_inputs.lightyear_files;
-    const kept = files.find(file => desandboxText(file.display_name) === "AccountStatement-LY-FIXTURE.csv")!;
-    expect(files.find(file => desandboxText(file.display_name) === "AccountStatement-LY-FIXTURE (1).csv")).toMatchObject({ coverage: "duplicate" });
+    const kept = files.find(file => desandboxText(file.display_name) === "AccountStatement-LY-FIXTURE-A.csv")!;
+    expect(files.find(file => desandboxText(file.display_name) === "AccountStatement-LY-FIXTURE-A (1).csv")).toMatchObject({ coverage: "duplicate" });
     const before = await parse({ file_ref: kept.file_ref });
     expect(parseMcpResponse(before.content[0]!.text)).toMatchObject({ total_rows: 2 });
 
     // A valid, shorter statement that omits the second trade.
-    await writeFile(join(workspace, "AccountStatement-LY-FIXTURE.csv"), `${LIGHTYEAR_STATEMENT_CSV}`);
+    await writeFile(join(workspace, "AccountStatement-LY-FIXTURE-A.csv"), `${LIGHTYEAR_STATEMENT_CSV}`);
     const outcome = await parse({ file_ref: kept.file_ref })
       .then(result => parseMcpResponse(result.content[0]!.text) as unknown, (error: Error) => ({ thrown: error.message }));
     expect(JSON.stringify(outcome)).toContain("no longer matches the reviewed source bytes");
@@ -5041,12 +5041,12 @@ describe("accounting_inbox: Lightyear CSV exports", () => {
     const files = prepared.detected_inputs.lightyear_files as InboxLightyearFilePayload[];
     const byName = new Map(files.map((file, index) => [desandboxText(file.display_name), { file, index }]));
     const full = byName.get("AccountStatement-LY-FIXTURE-FULL.csv")!;
-    for (const name of ["AccountStatement-LY-FIXTURE.csv", "AccountStatement-LY-FIXTURE-QUOTED.csv"]) {
+    for (const name of ["AccountStatement-LY-FIXTURE-A.csv", "AccountStatement-LY-FIXTURE-QUOTED.csv"]) {
       const covered = byName.get(name)!;
       expect(covered.file).toMatchObject({ coverage: "superseded", superseded_by: full.index });
       expect(covered.file.file_ref).toBeUndefined();
     }
-    expect(full.file.covers).toEqual([byName.get("AccountStatement-LY-FIXTURE.csv")!.index, byName.get("AccountStatement-LY-FIXTURE-QUOTED.csv")!.index].sort((left, right) => left - right));
+    expect(full.file.covers).toEqual([byName.get("AccountStatement-LY-FIXTURE-A.csv")!.index, byName.get("AccountStatement-LY-FIXTURE-QUOTED.csv")!.index].sort((left, right) => left - right));
     expect(typeof full.file.file_ref).toBe("string");
     // Capital-gains files are byte-deduplicated only.
     expect(byName.get("LightyearCapitalGainsStatement-LY-FIXTURE.csv")!.file.coverage).toBeUndefined();
@@ -5062,6 +5062,29 @@ describe("accounting_inbox: Lightyear CSV exports", () => {
     expect(statements).toHaveLength(2);
     expect(statements.filter(file => file.coverage === "superseded")).toHaveLength(1);
     expect(statements.filter(file => typeof file.file_ref === "string")).toHaveLength(1);
+  });
+
+  it("statements of different Lightyear accounts, or of an unproven account, never supersede or copy each other", async () => {
+    const workspace = await createAccountingWorkflowWorkspace({ includeReceipts: false });
+    workspacesToClean.push(workspace);
+    const header = "Date,Reference,Ticker,ISIN,Type,Quantity,CCY,Price/share,Gross Amount,FX Rate,Fee,Net Amt.,Tax Amt.\n";
+    const interest = "01/09/2026 10:00:00,IN-FIXTURE1,,,Interest,,USD,,10.00,,0.00,10.00,\n";
+    const deposit = "02/09/2026 10:00:00,DE-FIXTURE1,,,Deposit,,EUR,,100.00,,0.00,100.00,\n";
+    // AAAA's only row also appears in BBBB, which has a deposit too.
+    await writeFile(join(workspace, "AccountStatement-LY-AAAA-2026-09-01_2026-09-30_et.csv"), `${header}${interest}`);
+    await writeFile(join(workspace, "AccountStatement-LY-BBBB-2026-09-01_2026-09-30_et.csv"), `${header}${interest}${deposit}`);
+    // Byte-identical to AAAA's file, but of another account / of no proven account.
+    await writeFile(join(workspace, "AccountStatement-LY-CCCC-2026-09-01_2026-09-30_et.csv"), `${header}${interest}`);
+    await writeFile(join(workspace, "statement-copy.csv"), `${header}${interest}`);
+    const { prepared } = await scan(workspace);
+    const statements = (prepared.detected_inputs.lightyear_files as InboxLightyearFilePayload[]).filter(file => file.kind === "account_statement");
+    expect(statements).toHaveLength(4);
+    for (const file of statements) {
+      expect(file.coverage).toBeUndefined();
+      expect(file.covers).toBeUndefined();
+      expect(file.stands_in_for).toBeUndefined();
+      expect(typeof file.file_ref).toBe("string");
+    }
   });
 
   it("does not change the steps of an existing CAMT/Wise workspace", async () => {

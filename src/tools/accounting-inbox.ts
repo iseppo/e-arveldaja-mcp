@@ -12,6 +12,7 @@ import { currentToolProfile, isGuidedProfile, isProfileUnavailableBlocker, isToo
 import { parseCSV } from "../csv.js";
 import { receiptInboxReviewItem } from "../receipts/presenter.js";
 import { EXPECTED_STATEMENT_HEADERS, LIGHTYEAR_MAX_CSV_SIZE, REQUIRED_GAINS_HEADERS } from "./lightyear-investments.js";
+import { lightyearAccountFromFileName } from "../lightyear/usd-pool.js";
 import { uniqueActivePostingDimensions } from "../wise/preflight.js";
 import { arrayAt, isRecord, numberAt, recordAt, stringArrayAt, stringAt } from "../record-utils.js";
 import { batch, mutate, readOnly } from "../annotations.js";
@@ -638,6 +639,7 @@ async function analyzeInboxLightyearFiles(
   const sha256ByIndex = new Map<number, string>();
   // Account-statement rows as canonical JSON of the statement columns (a multiset).
   const rowIdentities = new Map<number, string[]>();
+  const accountByIndex = new Map<number, string>();
   let bytesRead = 0;
   for (const [index, file] of lightyearFiles.entries()) {
     if (bytesRead + file.size_bytes > budget.maxBytes) return { files: lightyearFiles, budgetExceeded: true };
@@ -656,10 +658,15 @@ async function analyzeInboxLightyearFiles(
     }
     bytesRead += snapshot.identity.size_bytes;
     if (bytesRead > budget.maxBytes) return { files: lightyearFiles, budgetExceeded: true };
-    // Copies are only ever of the same kind.
-    digested.push({ index, path: file.path, modifiedAt: file.modified_at, digest: `${file.kind}:${snapshot.identity.digest_sha256}` });
     sha256ByIndex.set(index, snapshot.identity.digest_sha256);
+    // A statement belongs to one Lightyear account (its own USD pool): copies and
+    // supersession only within the account its file name proves; unknown keeps the file.
+    const account = file.kind === "account_statement" ? lightyearAccountFromFileName(file.path) : "";
+    if (account === null) continue;
+    // Copies are only ever of the same kind (and statement account).
+    digested.push({ index, path: file.path, modifiedAt: file.modified_at, digest: `${file.kind}:${account}:${snapshot.identity.digest_sha256}` });
     if (file.kind === "account_statement") {
+      accountByIndex.set(index, account);
       const rows = parseCSV(snapshot.text().replace(/^\uFEFF/, "")).slice(1)
         .map(row => row.slice(0, EXPECTED_STATEMENT_HEADERS.length).map(cell => cell.trim()))
         .filter(row => row.some(cell => cell !== ""));
@@ -667,12 +674,12 @@ async function analyzeInboxLightyearFiles(
     }
   }
   const grouped = new Map(groupByDigest(digested).map(info => [info.index, info]));
-  // An account statement whose every row is in another kept statement is
-  // superseded by it (no account id is read from file names; byte copies excluded).
+  // An account statement whose every row is in another kept statement of the
+  // same proven Lightyear account is superseded by it (byte copies excluded).
   const superseded = findSupersededFiles(digested.flatMap(file => {
     const identities = rowIdentities.get(file.index);
     if (identities === undefined || grouped.get(file.index)?.duplicate_of !== undefined) return [];
-    return [{ ...file, scopeKey: "account_statement", identities }];
+    return [{ ...file, scopeKey: `account_statement:${accountByIndex.get(file.index)!}`, identities }];
   }));
   return {
     files: lightyearFiles.map((file, index) => {
