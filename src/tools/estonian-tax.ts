@@ -270,7 +270,7 @@ export async function computeOwnerExpenseJournalProjection(
     return { ok: false, error: toolError({ error: `net_amount must be greater than 0 (got ${net_amount}). A reimbursement books a positive business expense.` }) };
   }
   if (vat_rate < 0) {
-    return { ok: false, error: toolError({ error: `vat_rate must not be negative (got ${vat_rate}). Use 0 for no/non-deductible VAT.` }) };
+    return { ok: false, error: toolError({ error: `vat_rate must not be negative (got ${vat_rate}). Use 0 only when the document has no VAT; for non-deductible VAT keep the document rate and set vat_deduction_mode='none'.` }) };
   }
   if (vat_amount !== undefined && vat_amount < 0) {
     return { ok: false, error: toolError({ error: `vat_amount must not be negative (got ${vat_amount}).` }) };
@@ -1374,7 +1374,7 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
       effective_date: isoDateSchema("Expense date (YYYY-MM-DD)"),
       description: z.string().describe("Expense description"),
       net_amount: z.number().finite().describe("Net amount (without VAT)"),
-      vat_rate: z.number().finite().describe("VAT rate as decimal (e.g. 0.24 for 24%; 0 = no VAT/non-deductible). Must be a fraction, NOT a percentage — use 0.24, not 24."),
+      vat_rate: z.number().finite().describe("VAT rate as decimal (e.g. 0.24 for 24%; 0 only when the document has no VAT). Must be a fraction, NOT a percentage — use 0.24, not 24. For non-deductible VAT keep the document's rate (or pass vat_amount) and set vat_deduction_mode=\"none\": the VAT is then added to the expense and the owner payable."),
       vat_amount: z.number().finite().optional().describe("Exact VAT amount (overrides vat_rate if provided)"),
       vat_deduction_mode: z.enum(["none", "full", "partial"]).optional().describe("VAT deduction mode. Use partial with deductible_vat_amount."),
       deductible_vat_amount: z.number().finite().optional().describe("Deductible part of VAT when vat_deduction_mode=partial, or an explicit deductible VAT amount to override the default or configured ratio."),

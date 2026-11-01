@@ -2,9 +2,9 @@
   "profile": "setup",
   "measurement": {
     "toolCount": 130,
-    "toolsListBytes": 148895,
+    "toolsListBytes": 149071,
     "descriptionsBytes": 21289,
-    "inputSchemasBytes": 96278,
+    "inputSchemasBytes": 96454,
     "largestTool": {
       "name": "import_wise_transactions",
       "bytes": 5627
@@ -4515,7 +4515,7 @@
             "type": "string"
           },
           "vat_rate": {
-            "description": "VAT rate as decimal (e.g. 0.24 for 24%; 0 = no VAT/non-deductible). Must be a fraction, NOT a percentage — use 0.24, not 24.",
+            "description": "VAT rate as decimal (e.g. 0.24 for 24%; 0 only when the document has no VAT). Must be a fraction, NOT a percentage — use 0.24, not 24. For non-deductible VAT keep the document's rate (or pass vat_amount) and set vat_deduction_mode=\"none\": the VAT is then added to the expense and the owner payable.",
             "type": "number"
           }
         },

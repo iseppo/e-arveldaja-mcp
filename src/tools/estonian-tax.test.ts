@@ -2441,6 +2441,37 @@ describe("create_owner_expense_reimbursement", () => {
     expect(createCall.postings).toContainEqual({ accounts_id: 2110, type: "C", amount: 124 });
   });
 
+  it("non-deductible VAT: the document rate with vat_deduction_mode='none' books the VAT into the expense and payable", async () => {
+    setup(true);
+    const cb = tools.get("create_owner_expense_reimbursement")!;
+
+    const result = await cb({
+      owner_client_id: 1,
+      effective_date: "2026-06-01",
+      description: "Client dinner",
+      net_amount: 100,
+      vat_rate: 0.24,
+      vat_deduction_mode: "none",
+      expense_account: 5000,
+    });
+
+    expect(isError(result)).toBe(false);
+    const createCall = vi.mocked(api.journals.create).mock.calls[0][0] as {
+      postings: Array<{ accounts_id: number; type: string; amount: number }>;
+    };
+    expect(createCall.postings).toHaveLength(2);
+    expect(createCall.postings).toContainEqual({ accounts_id: 5000, type: "D", amount: 124 });
+    expect(createCall.postings).toContainEqual({ accounts_id: 2110, type: "C", amount: 124 });
+  });
+
+  it("describes vat_rate 0 as no VAT only, never as the non-deductible form", () => {
+    const { server, configs } = makeMockServer();
+    registerEstonianTaxTools(server, makeApi([], makeStandardAccounts()));
+    const metadata = toolMetadataText(configs.get("create_owner_expense_reimbursement")!);
+    expect(metadata).not.toContain("0 = no VAT/non-deductible");
+    expect(metadata).toContain("vat_deduction_mode=\\\"none\\\"");
+  });
+
   it("returns standards-aware follow-up guidance for ambiguous vehicle VAT costs", async () => {
     setup(true);
     const cb = tools.get("create_owner_expense_reimbursement")!;
