@@ -43,6 +43,7 @@
     "dev": "tsx src/index.ts",
     "sync:workflow-prompts": "tsx scripts/sync-workflow-prompts.ts",
     "audit:legacy-accounts": "tsx scripts/audit-legacy-accounts.ts",
+    "lightyear:rebuild-compare": "tsx scripts/lightyear-rebuild-compare.ts",
     "measure:surface": "tsx scripts/measure-mcp-surface.ts",
     "measure:responses": "tsx scripts/measure-response-fixtures.ts",
     "audit:negative-assertions": "tsx scripts/find-negative-assertions.ts",

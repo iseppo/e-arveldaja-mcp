@@ -141,6 +141,20 @@ describe("USD pool roles: order-independent 1:1 pairing and complete classificat
     expect(dry.payload.results.some(row => row.eur_amount === 80)).toBe(false);
   });
 
+  it("a cent of tolerance joining 115.05 / 115.06 groups is resolved by the exact-cent edges when they pair every member", () => {
+    const rows = [
+      buy("09/06/2026 16:21:12", "OR-TESTCNT01", "115.06"), ...convIn("09/06/2026 16:21:12", "CN-TESTCNT01", "115.06", "99.00"),
+      buy("09/06/2026 16:21:55", "OR-TESTCNT02", "115.05"), ...convIn("09/06/2026 16:21:55", "CN-TESTCNT02", "115.05", "98.99"),
+      buy("09/06/2026 16:29:09", "OR-TESTCNT03", "115.05"), ...convIn("09/06/2026 16:29:09", "CN-TESTCNT03", "115.05", "98.98"),
+    ];
+    expect(assignments(rows)).toEqual({ "OR-TESTCNT01": "CN-TESTCNT01", "OR-TESTCNT02": "CN-TESTCNT02", "OR-TESTCNT03": "CN-TESTCNT03" });
+    expect(new Set(roles(rows).values())).toEqual(new Set(["pass_through"]));
+    // Exact edges that leave a member unpaired keep the whole group ambiguous (no pool fall-through).
+    const short = [buy("09/06/2026 16:21:12", "OR-TESTCNT04", "115.06"), ...convIn("09/06/2026 16:21:40", "CN-TESTCNT04", "115.05", "98.99"),
+      buy("09/06/2026 16:21:55", "OR-TESTCNT05", "115.05")];
+    expect(new Set(roles(short).values())).toEqual(new Set(["pairing_ambiguous"]));
+  });
+
   it("2 buys + 1 conversion of the same amount, conversion ≥ 60 s from both → ambiguous, no pool fall-through", () => {
     const rows = [
       buy("19/10/2026 10:00:00", "OR-TESTTWO01", "50.00"),

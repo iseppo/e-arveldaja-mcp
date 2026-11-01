@@ -651,7 +651,15 @@ Trade↔conversion pairing is computed over the whole statement before anything 
 conversion, or unique ±60 s edges covering the smaller side); otherwise every member is
 `invalid_conversion_pair` / `pairing_ambiguous`. A second holding both a pool inflow and an outflow
 refuses that and every later pool command (`usd_pool_ambiguous_order`). `validateUsdPool`, the trades
-valuation and the revaluation run these pure checks.
+valuation and the revaluation run these pure checks. A group that is ambiguous only through the one-cent
+pairing tolerance is retried with exact-cent edges and pairs when they pair every member.
+
+Read-only rebuild (`src/lightyear/rebuild.ts`, script `npm run lightyear:rebuild-compare`): `simulateLightyearYear`
+runs the production planners `extractLightyearDistributions` / `planLightyearDistributions` / `planLightyearTrades`
+(the code `book_lightyear_distributions` and `book_lightyear_trades` run after reading their files) over an
+in-memory ledger and pool store from an asserted opening, so it stops with production's review codes;
+`compareWithBooks` (pure) diffs the proposal with live journals per account/month, `LY:` reference and broker
+TRANSACTION transfers. The script's `GetOnlyHttpClient` throws on any non-GET before sending; nothing is written.
 
 ## Security Notes
 

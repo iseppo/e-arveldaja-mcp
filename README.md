@@ -227,6 +227,16 @@ Download your Lightyear account statement CSV and capital gains report, then:
 
 The assistant will parse the trades, pair foreign currency conversions, calculate capital gains from the FIFO report, and create journal entries with the correct securities accounts. A sell debits the broker account with the cash the statement shows, credits the investment at Lightyear's FIFO cost basis, and books the gain or loss as the difference. Dividends, fund distributions, and cash interest are also imported from the account statement CSV, each to its own income account (8330, 8320 and 8400 by default).
 
+To check a year of existing Lightyear bookings against what the tools would book now, run the read-only comparison script from the project directory:
+
+```bash
+npm run lightyear:rebuild-compare -- --statement AccountStatement-LY-<ACCOUNT>-2026-01-01_2026-10-30_en.csv \
+  --gains CapitalGainsStatement-2026.csv --from 2026-01-01 --to 2026-10-30 \
+  --opening-as-of 2025-12-31 --start-usd-holding 0.37 --broker-dimension <id> --out lightyear-2026.md
+```
+
+It never writes: its API client refuses anything but GET, and it touches no pool store, plan or audit log (`--no-books` skips the API entirely). The report lists the proposed journals, the USD pool per month end, realised FX per month and the differences to your books per account, month and `LY:` reference. Replacing journals is a separate decision.
+
 ### Import bank statements (CAMT.053)
 
 Download your bank statement as a CAMT.053 XML file (supported by LHV, Swedbank, SEB, Coop, Luminor), then:

@@ -126,12 +126,12 @@ const DEFAULT_FUND_DISTRIBUTION_ACCOUNT = 8320;
 // gains report does not cover these, so we book buy/sell only for EUR-denominated
 // sweeps where proceeds equal cost basis 1:1. Non-EUR sweeps (e.g. ICSUSSDP in USD)
 // would need a proper cost-basis source to avoid FX drift on the investment account.
-const KNOWN_CASH_EQUIVALENT_TICKERS = new Set(["BRICEKSP", "ICSUSSDP"]);
+export const KNOWN_CASH_EQUIVALENT_TICKERS = new Set(["BRICEKSP", "ICSUSSDP"]);
 
 export const EXPECTED_STATEMENT_HEADERS = ["Date", "Reference", "Ticker", "ISIN", "Type", "Quantity", "CCY", "Price/share", "Gross Amount", "FX Rate", "Fee", "Net Amt.", "Tax Amt."];
 export const REQUIRED_GAINS_HEADERS = ["Date", "Ticker", "Name", "ISIN", "Country", "Fees (EUR)", "Quantity", "Cost Basis (EUR)", "Proceeds (EUR)", "Capital Gains (EUR)"] as const;
 
-interface AccountStatementRow {
+export interface AccountStatementRow {
   row_index: number;
   date: string;           // DD/MM/YYYY HH:MM:SS
   reference: string;      // OR-xxx, CN-xxx, DT-xxx, WL-xxx, IN-xxx, RW-xxx
@@ -148,7 +148,7 @@ interface AccountStatementRow {
   tax_amount: number;
 }
 
-interface CapitalGainsRow {
+export interface CapitalGainsRow {
   date: string;
   ticker: string;
   name: string;
@@ -452,7 +452,7 @@ function fileInputSource(filePath: string | undefined, fileRef: string | undefin
   };
 }
 
-function parseAccountStatement(csv: string): AccountStatementRow[] {
+export function parseAccountStatement(csv: string): AccountStatementRow[] {
   // Full-file RFC-4180 CSV parse (handles quoted newlines inside fields).
   // The old split-on-"\n" approach would corrupt any row whose name/reference
   // field contained an embedded newline, silently skipping or merging rows.
@@ -1009,7 +1009,7 @@ function reconcileHandledStatementCash(
   };
 }
 
-function parseCapitalGains(csv: string): CapitalGainsRow[] {
+export function parseCapitalGains(csv: string): CapitalGainsRow[] {
   // Full-file RFC-4180 CSV parse — same rationale as parseAccountStatement:
   // capital-gains rows embed security names, which can contain commas and
   // quoted newlines; split-on-"\n" silently drops or merges those rows.
@@ -1190,8 +1190,10 @@ function fxReviewWarning(
  * is ambiguous: its trades are invalid_conversion_pair, its conversions block.
  */
 function assignOneToOne(
-  candidates: ReadonlyMap<number, ReadonlyArray<{ ref: string; ts: number | null }>>,
+  candidates: ReadonlyMap<number, ReadonlyArray<{ ref: string; ts: number | null; exact?: boolean }>>,
   tradeTs: ReadonlyMap<number, number | null>,
+  /** Exact-cent retry of an ambiguous group (internal): every member must then pair. */
+  exactRetry = true,
 ): { pairs: Map<number, string>; tradeState: Map<number, "paired" | "ambiguous" | "unmatched">; conversionState: Map<string, "paired" | "ambiguous"> } {
   const parent = new Map<string, string>();
   const find = (node: string): string => {
@@ -1260,6 +1262,23 @@ function assignOneToOne(
       for (const index of component.trades) if (!pairs.has(index)) tradeState.set(index, "unmatched");
       for (const ref of component.conversions) if (!conversionState.has(ref)) conversionState.set(ref, "ambiguous");
       continue;
+    }
+    // A cent of tolerance can join neighbouring amounts (115.05 / 115.06): the group resolves when its
+    // exact-cent edges alone pair every trade and every conversion of it, else it stays ambiguous.
+    if (exactRetry) {
+      const members = new Set(component.conversions);
+      const exactOnly = new Map(component.trades.map(index => [index, candidates.get(index)!.filter(candidate => candidate.exact === true && members.has(candidate.ref))]));
+      const retry = assignOneToOne(exactOnly, tradeTs, false);
+      const complete = component.trades.every(index => retry.tradeState.get(index) === "paired")
+        && component.conversions.every(ref => retry.conversionState.get(ref) === "paired");
+      if (complete) {
+        for (const [index, ref] of retry.pairs) {
+          pairs.set(index, ref);
+          tradeState.set(index, "paired");
+          conversionState.set(ref, "paired");
+        }
+        continue;
+      }
     }
     for (const index of component.trades) tradeState.set(index, "ambiguous");
     for (const ref of component.conversions) conversionState.set(ref, "ambiguous");
@@ -1334,7 +1353,7 @@ function extractTrades(rows: AccountStatementRow[], options: TradeExtractionOpti
     if (fundingTickers.has(row.ticker)) { candidates.set(index, []); continue; }
     const tradeCurrency = normalizedCurrency(row.ccy);
     const orderDatePrefix = row.date.split(/[\sT]/)[0];
-    const list: Array<{ ref: string; ts: number | null }> = [];
+    const list: Array<{ ref: string; ts: number | null; exact: boolean }> = [];
     for (const [ref, conversionRows] of conversionsByRef) {
       const matching = conversionRows.find(conversionRow =>
         normalizedCurrency(conversionRow.ccy) === tradeCurrency &&
@@ -1342,7 +1361,10 @@ function extractTrades(rows: AccountStatementRow[], options: TradeExtractionOpti
         conversionMatchesTradeDirection(row, conversionRow) &&
         agreesToCent(Math.abs(conversionRow.gross_amount), tradeConversionAmountCcy(row))
       );
-      if (matching) list.push({ ref, ts: lightyearTimestampSeconds(matching.date) });
+      if (matching) {
+        const exact = moneyToSafeCents(Math.abs(matching.gross_amount)) === moneyToSafeCents(tradeConversionAmountCcy(row));
+        list.push({ ref, ts: lightyearTimestampSeconds(matching.date), exact });
+      }
     }
     candidates.set(index, list);
   }
@@ -5004,6 +5026,147 @@ function evaluationFingerprintView(evaluation: FxRevaluationEvaluation): unknown
   };
 }
 
+/**
+ * The statement's distributions; with fx_source=ecb pass 1 collects the rate keys, pass 2 values the rows
+ * (execute passes the plan's frozen outcomes and never fetches).
+ */
+export async function extractLightyearDistributions(
+  rows: AccountStatementRow[], fxSource: LightyearFxSource, ecb: EcbRateDeps | undefined, frozen?: FrozenFxOutcomes,
+): Promise<{ distributions: LightyearDistribution[]; warnings: string[]; fxOutcomes: FrozenFxOutcomes }> {
+  const reserved = tradeReservedConversionRefsWithFunding(rows, KNOWN_CASH_EQUIVALENT_TICKERS);
+  let fxOutcomes: FrozenFxOutcomes = {};
+  if (fxSource === "ecb") {
+    fxOutcomes = frozen ?? await resolveFrozenFxOutcomes(extractDistributions(rows, reserved, { fxSource }).ecbKeys, ecb);
+  }
+  const extraction = extractDistributions(rows, reserved, fxSource === "ecb" ? { fxSource, fxOutcomes } : {});
+  return { distributions: extraction.distributions, warnings: extraction.warnings, fxOutcomes };
+}
+
+/** Inputs of one distributions run after the statement is read (shared by book_lightyear_distributions and the Q5 rebuild). */
+export interface LightyearDistributionsPlanInput {
+  api: ApiContext;
+  store: UsdPoolStore;
+  poolKey: PoolKey | null;
+  rows: AccountStatementRow[];
+  distributions: LightyearDistribution[];
+  warnings: string[];
+  inLock: boolean;
+  /** The chart, for the legacy-booking check. */
+  chart: Account[];
+  accounts: {
+    broker_account: number; broker_dimension_id?: number; income_account: number; interest_account: number;
+    fund_distribution_account: number; reward_account: number; tax_account?: number; fee_account: number;
+  };
+}
+
+/** The distributions projection of one run: existing-journal checks, USD-pool routing, legacy candidates, journals. */
+export async function planLightyearDistributions(input: LightyearDistributionsPlanInput): Promise<{ projection: DistributionsProjection; guard: BookingGuard }> {
+  const { api, rows, accounts } = input;
+  const guard = await BookingGuard.load(api);
+  const existing = resolveExistingRefs(guard.journals, input.distributions.map(d => ({ reference: d.reference, date: d.date })));
+  // Already-booked references are duplicates: they never route into the pool.
+  const unbooked = input.distributions.filter(d => !existing.refs.has(d.reference));
+  const pool = await routeDistributionPool({ api, store: input.store, key: input.poolKey, rows, distributions: unbooked, inLock: input.inLock });
+  const routedByIndex = new Map(pool.distributions.map(d => [d.row_index, d]));
+  const distributions = input.distributions.map(d => routedByIndex.get(d.row_index) ?? d);
+  const conflictedRefs = findConflictedDistributionReferences(distributions);
+  const dayIndex = indexJournalsByDay(guard.journals);
+  const ownRefCandidates = findDistributionOwnRefMismatches(dayIndex, distributions, existing, conflictedRefs);
+  const legacy = await findLegacyDistributionCandidates(
+    api, dayIndex, distributions, existing, conflictedRefs, ownRefCandidates, input.chart, accounts.broker_account, accounts.broker_dimension_id,
+  );
+  const projection = computeDistributionsProjection({
+    distributions, existing, conflictedRefs,
+    legacyCandidates: legacy.candidates, ownRefCandidates, legacyCheckIncomplete: legacy.incomplete, seedWarnings: input.warnings,
+    ...accounts, poolEvents: pool.poolEvents,
+  });
+  return { projection, guard };
+}
+
+/** Inputs of one trades run after its files are read (shared by book_lightyear_trades and the Q5 rebuild). */
+export interface LightyearTradesPlanInput {
+  api: ApiContext;
+  store: UsdPoolStore;
+  rows: AccountStatementRow[];
+  /** Parsed capital-gains rows; null without a gains file. */
+  gainsRows: CapitalGainsRow[] | null;
+  skipSet: ReadonlySet<string>;
+  fundingTickers: ReadonlySet<string>;
+  poolKey: PoolKey | null;
+  period: { from: string; to: string } | null;
+  /** Execute: the plan's frozen ECB outcomes (never refetched). */
+  frozen?: FrozenFxOutcomes;
+  ecb?: EcbRateDeps;
+  inLock: boolean;
+  accounts: {
+    investment_account: number; investment_dimension_id?: number; broker_account: number; broker_dimension_id?: number;
+    gainAccount: number; lossAccount: number; feeAccount: number; fxAccount: number;
+  };
+}
+
+/** The trades projection of one run: existing-journal checks, FIFO match, USD-pool valuation, journals. */
+export async function planLightyearTrades(input: LightyearTradesPlanInput): Promise<{ projection: TradesProjection; fxOutcomes: FrozenFxOutcomes }> {
+  const { api, rows, skipSet, fundingTickers, gainsRows, frozen } = input;
+  const extraction = extractTrades(rows, { fundingTickers });
+  const trades = extraction.trades.filter(t => !skipSet.has(t.ticker));
+  const gainsWarnings: string[] = [];
+  const gainsMap = gainsRows === null ? new Map<string, CapitalGainsRow>() : matchSellsToCapitalGains(trades.filter(t => t.type === "Sell"), gainsRows, gainsWarnings);
+  const guard = await BookingGuard.load(api);
+  // USD→EUR conversions no trade or distribution claims relieve the pool (plan Q4).
+  const statementConversions = extractPoolConversions(rows, extraction, fundingTickers);
+  const existing = resolveExistingRefs(guard.journals, [
+    ...trades.map(t => ({ reference: t.reference, date: t.date })),
+    ...statementConversions.map(c => ({ reference: c.reference, date: c.date })),
+  ]);
+  const existingRefs = existing.refs;
+  const journalsByDay = indexJournalsByDay(guard.journals);
+  const ownRefCandidates = findOwnRefDateMismatches(
+    journalsByDay, trades, t => t.reference, t => !existingRefs.has(t.reference), existing.journalIds,
+  );
+  const conversions = statementConversions.filter(c => !existingRefs.has(c.reference));
+  const conversionDateMismatches = findOwnRefDateMismatches(
+    journalsByDay, conversions, c => c.reference, () => true, existing.journalIds,
+  );
+  for (const [reference, ids] of conversionDateMismatches) ownRefCandidates.set(reference, ids);
+  const heldConversions = new Map<string, FxReviewCode>([...conversionDateMismatches.keys()].map(reference => [reference, "reference_journal_date_mismatch"]));
+  // FX warnings matter only for rows this run can still book: drop the
+  // ones for skipped tickers and already-booked references, and count them.
+  const suppressedWarnings = { already_booked: 0, skipped_ticker: 0 };
+  // Value the USD-pool trades still to book (ECB rates frozen at the dry run, pool projection).
+  const readiness = poolCommandReadiness(trades, existingRefs, ownRefCandidates, gainsMap);
+  const poolTrades = readiness.pool;
+  const fxOutcomes = frozen ?? (poolTrades.length > 0
+    ? await resolveFrozenFxOutcomes(new Set(poolTrades.map(t => fxOutcomeKey("USD", t.date))), input.ecb)
+    : {});
+  await valuePoolTrades({
+    api, store: input.store, key: input.poolKey, rows, extraction, pool: poolTrades, fundingTickers, fxOutcomes, inLock: input.inLock, held: readiness.held,
+    period: input.period, conversions, heldConversions,
+  });
+  const poolRefs = new Set(poolTrades.map(t => t.reference));
+  const relevantFxWarnings = extraction.warnings.filter(warning => {
+    if (skipSet.has(warning.ticker)) { suppressedWarnings.skipped_ticker += 1; return false; }
+    if (existingRefs.has(warning.reference)) { suppressedWarnings.already_booked += 1; return false; }
+    return !poolRefs.has(warning.reference);
+  });
+  for (const trade of poolTrades) {
+    // A held conflict / date-mismatch row gets its warning from the projection itself.
+    const heldCode = readiness.held.get(trade.reference);
+    if (trade.fx_review_reason !== null && heldCode !== "reference_conflict" && heldCode !== "reference_journal_date_mismatch") relevantFxWarnings.push({ reference: trade.reference, ticker: trade.ticker, text: fxReviewWarning(trade.reference, trade.fx_review_reason, trade.conversion_ref ?? undefined) });
+  }
+  const projection = computeTradesProjection({
+    trades, gainsMap, existingRefs, ownRefCandidates,
+    // FIFO matching runs over every sell (disambiguation needs them all),
+    // but its warnings are only actionable for sells not yet booked.
+    seedWarnings: [...relevantFxWarnings.map(warning => warning.text), ...gainsWarnings.filter(warning => {
+      return !trades.some(t => t.type === "Sell" && existingRefs.has(t.reference) && warning.includes(`for sell ${t.reference} (`));
+    })],
+    hasCapitalGainsFile: gainsRows !== null,
+    ...input.accounts, poolKey: input.poolKey, conversions,
+  });
+  projection.suppressedWarnings = suppressedWarnings;
+  return { projection, fxOutcomes };
+}
+
 export function registerLightyearTools(
   server: McpServer,
   api: ApiContext,
@@ -5404,78 +5567,23 @@ export function registerLightyearTools(
         const statementSnapshot = await readCsvSnapshot(statementSource, FILE_REFERENCE_OPERATIONS.lightyearStatement, runtimeSafetyContext, bindings[0]);
         const sourcePaths: PlanData[] = [planBoundFileReference(statementSource, statementSnapshot, FILE_REFERENCE_OPERATIONS.lightyearStatement)];
         const rows = parseAccountStatement(statementSnapshot.text());
-        const extraction = extractTrades(rows, { fundingTickers });
-        const trades = extraction.trades.filter(t => !skipSet.has(t.ticker));
-        const gainsWarnings: string[] = [];
-        let gainsMap = new Map<string, CapitalGainsRow>();
         const sourceSnapshots: FileInputSnapshot[] = [statementSnapshot];
+        let gainsRows: CapitalGainsRow[] | null = null;
         if (gainsSource) {
           const gainsSnapshot = await readCsvSnapshot(gainsSource, FILE_REFERENCE_OPERATIONS.lightyearGains, runtimeSafetyContext, bindings[1]);
           sourcePaths.push(planBoundFileReference(gainsSource, gainsSnapshot, FILE_REFERENCE_OPERATIONS.lightyearGains));
-          const gainsRows = parseCapitalGains(gainsSnapshot.text());
-          const sells = trades.filter(t => t.type === "Sell");
-          gainsMap = matchSellsToCapitalGains(sells, gainsRows, gainsWarnings);
+          gainsRows = parseCapitalGains(gainsSnapshot.text());
           sourceSnapshots.push(gainsSnapshot);
         }
-        const guard = await BookingGuard.load(api);
-        // USD→EUR conversions no trade or distribution claims relieve the pool (plan Q4).
-        const statementConversions = extractPoolConversions(rows, extraction, fundingTickers);
-        const existing = resolveExistingRefs(guard.journals, [
-          ...trades.map(t => ({ reference: t.reference, date: t.date })),
-          ...statementConversions.map(c => ({ reference: c.reference, date: c.date })),
-        ]);
-        const existingRefs = existing.refs;
-        const journalsByDay = indexJournalsByDay(guard.journals);
-        const ownRefCandidates = findOwnRefDateMismatches(
-          journalsByDay, trades, t => t.reference, t => !existingRefs.has(t.reference), existing.journalIds,
-        );
-        const conversions = statementConversions.filter(c => !existingRefs.has(c.reference));
-        const conversionDateMismatches = findOwnRefDateMismatches(
-          journalsByDay, conversions, c => c.reference, () => true, existing.journalIds,
-        );
-        for (const [reference, ids] of conversionDateMismatches) ownRefCandidates.set(reference, ids);
-        const heldConversions = new Map<string, FxReviewCode>([...conversionDateMismatches.keys()].map(reference => [reference, "reference_journal_date_mismatch"]));
-        // FX warnings matter only for rows this run can still book: drop the
-        // ones for skipped tickers and already-booked references, and count them.
-        const suppressedWarnings = { already_booked: 0, skipped_ticker: 0 };
-        // Value the USD-pool trades still to book (ECB rates frozen at the dry run, pool projection).
-        const readiness = poolCommandReadiness(trades, existingRefs, ownRefCandidates, gainsMap);
-        const poolTrades = readiness.pool;
         const keyResolution = resolveLightyearPoolKey(api, statementSnapshot, file_path, lightyear_account, broker_account, broker_dimension_id);
         if (!keyResolution.ok) {
           return { error: toolError({ error: keyResolution.error, category: "invalid_arguments", retry: "never", mutation_occurred: false }) };
         }
-        const fxOutcomes = frozen ?? (poolTrades.length > 0
-          ? await resolveFrozenFxOutcomes(new Set(poolTrades.map(t => fxOutcomeKey("USD", t.date))), deps.ecb)
-          : {});
-        await valuePoolTrades({
-          api, store: usdPoolStore, key: keyResolution.key, rows, extraction, pool: poolTrades, fundingTickers, fxOutcomes, inLock, held: readiness.held,
-          period: statementPeriodFromFileName(statementSnapshot.canonicalPath() ?? file_path),
-          conversions, heldConversions,
+        const { projection, fxOutcomes } = await planLightyearTrades({
+          api, store: usdPoolStore, rows, gainsRows, skipSet, fundingTickers, poolKey: keyResolution.key,
+          period: statementPeriodFromFileName(statementSnapshot.canonicalPath() ?? file_path), frozen, ecb: deps.ecb, inLock,
+          accounts: { investment_account, investment_dimension_id, broker_account, broker_dimension_id, gainAccount, lossAccount, feeAccount, fxAccount },
         });
-        const poolRefs = new Set(poolTrades.map(t => t.reference));
-        const relevantFxWarnings = extraction.warnings.filter(warning => {
-          if (skipSet.has(warning.ticker)) { suppressedWarnings.skipped_ticker += 1; return false; }
-          if (existingRefs.has(warning.reference)) { suppressedWarnings.already_booked += 1; return false; }
-          return !poolRefs.has(warning.reference);
-        });
-        for (const trade of poolTrades) {
-          // A held conflict / date-mismatch row gets its warning from the projection itself.
-          const heldCode = readiness.held.get(trade.reference);
-          if (trade.fx_review_reason !== null && heldCode !== "reference_conflict" && heldCode !== "reference_journal_date_mismatch") relevantFxWarnings.push({ reference: trade.reference, ticker: trade.ticker, text: fxReviewWarning(trade.reference, trade.fx_review_reason, trade.conversion_ref ?? undefined) });
-        }
-        const projection = computeTradesProjection({
-          trades, gainsMap, existingRefs, ownRefCandidates,
-          // FIFO matching runs over every sell (disambiguation needs them all),
-          // but its warnings are only actionable for sells not yet booked.
-          seedWarnings: [...relevantFxWarnings.map(warning => warning.text), ...gainsWarnings.filter(warning => {
-            return !trades.some(t => t.type === "Sell" && existingRefs.has(t.reference) && warning.includes(`for sell ${t.reference} (`));
-          })],
-          hasCapitalGainsFile: hasGainsFile,
-          investment_account, investment_dimension_id, broker_account, broker_dimension_id,
-          gainAccount, lossAccount, feeAccount, fxAccount, poolKey: keyResolution.key, conversions,
-        });
-        projection.suppressedWarnings = suppressedWarnings;
         return { projection, sourceIdentities: sourceSnapshots.map(sourceIdentityRecord), sourceSnapshots, sourcePaths, fxOutcomes, poolKey: keyResolution.key };
       };
 
@@ -5644,13 +5752,7 @@ export function registerLightyearTools(
       }> => {
         const snapshot = await readCsvSnapshot(statementSource, FILE_REFERENCE_OPERATIONS.lightyearStatement, runtimeSafetyContext, binding);
         const rows = parseAccountStatement(snapshot.text());
-        const reserved = tradeReservedConversionRefsWithFunding(rows, KNOWN_CASH_EQUIVALENT_TICKERS);
-        let fxOutcomes: FrozenFxOutcomes = {};
-        if (fxSource === "ecb") {
-          fxOutcomes = frozen ?? await resolveFrozenFxOutcomes(extractDistributions(rows, reserved, { fxSource }).ecbKeys, deps.ecb);
-        }
-        const extraction = extractDistributions(rows, reserved, fxSource === "ecb" ? { fxSource, fxOutcomes } : {});
-        return { snapshot, rows, distributions: extraction.distributions, warnings: extraction.warnings, fxOutcomes };
+        return { snapshot, rows, ...await extractLightyearDistributions(rows, fxSource, deps.ecb, frozen) };
       };
 
       // For zero-bookable statements there is nothing to create on either path,
@@ -5740,24 +5842,9 @@ export function registerLightyearTools(
             hint: "Provide tax_account so tax_amount can be booked separately for Lightyear distributions.",
           }) } as const;
         }
-        const guard = await BookingGuard.load(api);
-        const existing = resolveExistingRefs(guard.journals, read.distributions.map(d => ({ reference: d.reference, date: d.date })));
-        // Already-booked references are duplicates: they never route into the pool.
-        const unbooked = read.distributions.filter(d => !existing.refs.has(d.reference));
-        const pool = await routeDistributionPool({ api, store: usdPoolStore, key: keyResolution.key, rows, distributions: unbooked, inLock });
-        const routedByIndex = new Map(pool.distributions.map(d => [d.row_index, d]));
-        const distributions = read.distributions.map(d => routedByIndex.get(d.row_index) ?? d);
-        const conflictedRefs = findConflictedDistributionReferences(distributions);
-        const dayIndex = indexJournalsByDay(guard.journals);
-        const ownRefCandidates = findDistributionOwnRefMismatches(dayIndex, distributions, existing, conflictedRefs);
-        const legacy = await findLegacyDistributionCandidates(
-          api, dayIndex, distributions, existing, conflictedRefs, ownRefCandidates, accounts, broker_account, broker_dimension_id,
-        );
-        const projection = computeDistributionsProjection({
-          distributions, existing, conflictedRefs,
-          legacyCandidates: legacy.candidates, ownRefCandidates, legacyCheckIncomplete: legacy.incomplete, seedWarnings: warnings,
-          broker_account, broker_dimension_id, income_account, interest_account, fund_distribution_account, reward_account, tax_account, fee_account,
-          poolEvents: pool.poolEvents,
+        const { projection, guard } = await planLightyearDistributions({
+          api, store: usdPoolStore, poolKey: keyResolution.key, rows, distributions: read.distributions, warnings, inLock, chart: accounts,
+          accounts: { broker_account, broker_dimension_id, income_account, interest_account, fund_distribution_account, reward_account, tax_account, fee_account },
         });
         const postingErrors = await validateProjectedPostings(api, accounts, projection.commands);
         if (postingErrors.length > 0) return { error: toolError({ error: "Account validation failed", details: postingErrors }) } as const;
