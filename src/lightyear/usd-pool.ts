@@ -418,9 +418,11 @@ export async function recoverUsdPoolIntents(api: ApiContext, store: UsdPoolStore
       upserts.push({ ...intent, state: "committed", journal_id: journalId });
     }
   }
+  // Commits and checkpoints first: if removing an intent then fails, the next
+  // recovery finds both and only drops the intent again (never neither).
   try {
-    if (removals.length > 0) store.remove(removals);
     if (upserts.length > 0) store.upsert(upserts);
+    if (removals.length > 0) store.remove(removals);
   } catch {
     return { ok: false, code: "usd_pool_uncertain_outcome" };
   }

@@ -315,6 +315,38 @@ describe("recoverUsdPoolIntents", () => {
   });
 });
 
+describe("recoverUsdPoolIntents — checkpoint write failure (review wpc 2)", () => {
+  it("a failed checkpoint write keeps the intent; the next recovery completes and a 50 USD buy relieves €47.50", async () => {
+    // Opening 100 USD / €90; the +€5 revaluation journal is already booked, its intent not yet committed.
+    const checkpoint: UsdPoolCheckpoint = {
+      record: "checkpoint", pool_key: KEY, kind: "revaluation", as_of: "2026-10-15", ts: endOfDaySeconds("2026-10-15"),
+      usd_cents: 10000, eur_cents: 9500, fx_cents: 500, journal_id: null, document_number: "LY-FX:CHZELUU:USD:2026-10-15",
+      rate: "1.0526", rate_date: "2026-10-15", recorded_at: "t",
+    };
+    const intent: UsdPoolEvent = {
+      record: "event", pool_key: KEY, ref: "LY-FX:CHZELUU:USD:2026-10-15", ts: checkpoint.ts, kind: "revaluation", usd_cents: 0, eur_cents: 500,
+      document_number: "LY-FX:CHZELUU:USD:2026-10-15", journal_id: null, journal_broker_net_cents: 500, state: "intent", checkpoint, recorded_at: "t",
+    };
+    const store = memoryUsdPoolStore([opening(10000, 9000, "2026-09-30", "1.1111111111"), intent]);
+    const upsert = store.upsert.bind(store);
+    let failNext = true;
+    store.upsert = records => {
+      if (failNext) { failNext = false; throw new Error("disk full"); }
+      upsert(records);
+    };
+    const api = poolApi([journal(5, "LY-FX:CHZELUU:USD:2026-10-15", 500)]);
+    expect(await recoverUsdPoolIntents(api, store, KEY)).toEqual({ ok: false, code: "usd_pool_uncertain_outcome" });
+    expect(store.records.filter(r => r.record === "event")).toMatchObject([{ state: "intent", kind: "revaluation" }]);
+    expect((await recoverUsdPoolIntents(api, store, KEY)).ok).toBe(true);
+    expect(store.records.filter(r => r.record === "event")).toHaveLength(0);
+    const until = eventOrder("OR-LATER", ts("2026-10-20"));
+    const validated = await validateUsdPool({ api, store, key: KEY, until, newRecords: [until], statementEvents: [], requireRegistered: false });
+    expect(validated.ok).toBe(true);
+    if (!validated.ok) return;
+    expect(projectPool(validated.value, [{ ref: "OR-LATER", ts: until.ts, spend_usd_cents: 5000 }])[0]).toMatchObject({ ok: true, relief_eur_cents: 4750 });
+  });
+});
+
 describe("withUsdPoolLock", () => {
   it("serializes critical sections on one pool", async () => {
     process.env.EARVELDAJA_LOCK_DIR = mkdtempSync(join(tmpdir(), "usd-pool-lock-"));
