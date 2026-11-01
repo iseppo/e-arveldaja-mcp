@@ -377,7 +377,8 @@ export function compareWithBooks(
     if (matches.length === 0) { byRef.proposed_only.push(journal.document_number); continue; }
     for (const match of matches) claimed.add(match);
     const live = canonicalPoolPostings(matches[0]!.postings ?? []);
-    const same = matches.length === 1 && JSON.stringify(live) === JSON.stringify(journal.postings);
+    // Equal means the same journal: one match, the same effective date and the same posting multiset.
+    const same = matches.length === 1 && matches[0]!.effective_date === journal.date && JSON.stringify(live) === JSON.stringify(journal.postings);
     (same ? byRef.matched_equal : byRef.matched_different).push(journal.document_number);
   }
   for (const journals of booksByNumber.values()) {

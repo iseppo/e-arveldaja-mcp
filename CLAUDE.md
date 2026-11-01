@@ -662,8 +662,8 @@ Read-only rebuild (`src/lightyear/rebuild.ts`, script `npm run lightyear:rebuild
 runs the production planners `extractLightyearDistributions` / `planLightyearDistributions` / `planLightyearTrades`
 (the code `book_lightyear_distributions` and `book_lightyear_trades` run after reading their files) over an
 in-memory ledger and pool store from an asserted opening, so it stops with production's review codes;
-`compareWithBooks` (pure) diffs the proposal with live journals per account/month, `LY:` reference and broker
-TRANSACTION transfers. The script's `GetOnlyHttpClient` throws on any non-GET before sending; nothing is written.
+`compareWithBooks` (pure) diffs the proposal with live journals per account/month, `LY:` reference (equal = one
+journal, same effective date, same posting multiset) and broker TRANSACTION transfers. The script's `GetOnlyHttpClient` throws on any non-GET before sending; nothing is written.
 
 ## Security Notes
 

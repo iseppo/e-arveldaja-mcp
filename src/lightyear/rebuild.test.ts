@@ -246,6 +246,16 @@ describe("compareWithBooks (plan Q5)", () => {
     expect(cell(1120, "2026-04", 8)).toBeUndefined();
     expect(cell(8335, "2026-04")).toMatchObject({ books_cents: 400, proposed_cents: 0, diff_cents: -400 });
   });
+
+  it("Codex #5: identical D1100 €100 / C1020 €100 proposed on April 1 but booked on April 2 is matched_different", () => {
+    const dated = { year: "2026", accounts: [1020, 1100], broker_account: 1020, investment_account: 1100 };
+    const lines = [posting(1100, "D", 100), posting(1020, "C", 100)];
+    const result = compareWithBooks([proposed("LY:OR-TESTCDT", "2026-04-01", lines)], [live(1, "LY:OR-TESTCDT", "2026-04-02", lines)], dated);
+    expect(result.byRef).toMatchObject({ matched_equal: [], matched_different: ["LY:OR-TESTCDT"] });
+    // Same month: the account/month view stays at zero difference; the reference view carries the date.
+    expect(result.byAccountMonth.every(entry => entry.diff_cents === 0)).toBe(true);
+    expect(compareWithBooks([proposed("LY:OR-TESTCDT", "2026-04-02", lines)], [live(1, "LY:OR-TESTCDT", "2026-04-02", lines)], dated).byRef.matched_equal).toEqual(["LY:OR-TESTCDT"]);
+  });
 });
 
 describe("lightyear:rebuild-compare arguments and report", () => {
