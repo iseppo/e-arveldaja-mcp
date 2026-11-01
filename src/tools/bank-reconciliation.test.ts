@@ -1946,6 +1946,17 @@ describe("reconcile_inter_account_transfers", () => {
       ], expect.objectContaining({ autoFixClientsId: false, expectedTransaction: expect.objectContaining({contract: "bank_transaction_material_v1"}), expectedLinkedInvoices: expect.any(Object) }));
       expect(api.transactions.delete).toHaveBeenCalledWith(132);
     });
+
+    it("keep_side incoming on a same-type pair whose incoming leg has no verified CRDT marker → direction_unresolved, nothing confirmed", async () => {
+      const out = { ...lhvOut("WISE:T131 Transfer to SEB [source_direction=OUT]"), date: "2026-03-31" };
+      const { handler, api } = setupInterAccountTool({ transactions: [out, { ...sebIn, date: "2026-04-01" }], bankAccounts });
+      const dry = parseToolPayload<ReconInterAccountPayload>((await handler({ execute: false, keep_side: "incoming" })).content[0]!.text);
+      expect(dry.matched_pairs).toBe(0);
+      expect(dry.pairs).toEqual([]);
+      expect(dry.ambiguous_pairs).toEqual([expect.objectContaining({ outgoing_transaction_id: 131, candidate_incoming_transaction_ids: [132], code: "direction_unresolved" })]);
+      expect(api.transactions.confirm).not.toHaveBeenCalled();
+      expect(api.transactions.delete).not.toHaveBeenCalled();
+    });
   });
 
   it("MEDIUM-2 distributes a same-currency foreign pair in base EUR, like one-sided confirms", async () => {

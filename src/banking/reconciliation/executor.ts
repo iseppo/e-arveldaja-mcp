@@ -1504,6 +1504,57 @@ export async function runInterAccountMatching(
       continue;
     }
 
+    // #11 keep_side "incoming", as in Phase 1: only a checksum-verified CRDT
+    // marker on the incoming leg lets it be confirmed; else review.
+    if (keepIncoming && verifiedCamtDirection(counterpart) !== "incoming") {
+      consumedTxIds.delete(sourceId);
+      consumedTxIds.delete(counterpartId);
+      ambiguousPairs.push({
+        outgoing_transaction_id: sourceId,
+        amount: source.amount,
+        date_out: source.date,
+        from_dimension_id: source.accounts_dimensions_id,
+        candidate_incoming_transaction_ids: [counterpartId],
+        candidate_incoming_dimension_ids: [counterpart.accounts_dimensions_id],
+        confidence: bestCandidate.confidence,
+        code: "direction_unresolved",
+        reason: `keep_side "incoming" needs a checksum-verified incoming CAMT marker on transaction ${counterpartId}; without it the incoming leg cannot be confirmed safely. Re-run with keep_side "outgoing" or confirm the pair inline.`,
+      });
+      blockedOneSidedTxIds.add(sourceId);
+      blockedOneSidedTxIds.add(counterpartId);
+      continue;
+    }
+    if (keepIncoming) {
+      matchedPairs.push({
+        outgoing_transaction_id: sourceId, incoming_transaction_id: counterpartId,
+        amount: source.amount, date_out: source.date, date_in: counterpart.date,
+        from_account: fromTitle, to_account: toTitle,
+        from_dimension_id: source.accounts_dimensions_id, to_dimension_id: counterpart.accounts_dimensions_id,
+        description_out: source.description ?? undefined, description_in: counterpart.description ?? undefined,
+        confidence: bestCandidate.confidence, match_reasons: bestCandidate.reasons,
+        status: "would_confirm", incoming_action: "would_confirm", outgoing_action: "would_delete_duplicate", kept_side: "incoming",
+      });
+      confirmActions.push({
+        confirmedTxId: counterpartId,
+        confirmedClientsId: counterpart.clients_id ?? null,
+        confirmedNominalAmount: counterpart.amount,
+        confirmedCurrency: transactionCurrency(counterpart),
+        targetDimensionId: source.accounts_dimensions_id,
+        distributionAmount,
+        deleteTxId: sourceId,
+        auditSummary: `Confirmed reciprocal same-type inter-account incoming ${distributionAmount} EUR (${fromTitle} -> ${toTitle})`,
+        auditDetails: { amount: counterpart.amount, date: counterpart.date, paired_outgoing_id: sourceId, kept_side: "incoming" },
+        deleteAuditSummary: `Deleted reciprocal same-type outgoing row ${sourceId} after confirming incoming ${counterpartId} (${fromTitle} -> ${toTitle})`,
+        deleteAuditDetails: { amount: source.amount, date: source.date, paired_incoming_id: counterpartId },
+      });
+      recordInterAccountJournal(
+        source.accounts_dimensions_id, counterpart.accounts_dimensions_id, distributionAmount, source.date,
+        undefined, transferReferenceOf(source, guard.journals),
+      );
+      if (counterpart.clients_id == null) await resolveCompanyClientsId();
+      continue;
+    }
+
     matchedPairs.push({
       outgoing_transaction_id: sourceId,
       incoming_transaction_id: counterpartId,
