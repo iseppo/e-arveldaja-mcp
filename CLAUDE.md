@@ -621,7 +621,8 @@ identity — exact statement date+time, ticker, quantity — else `pool_sell_gai
 commands; gain/loss = ECB consideration − Lightyear FIFO cost basis), `buy_relief` events (`book_lightyear_trades`: a USD
 buy with no 1:1 conversion is paid N:1 — at most one remaining EUR→USD conversion in [buy − 60 s, buy] with a smaller
 gross, pool part = buy gross − conversion USD — or 100 % from the pool; a conversion missing a leg holds every
-unpaired USD trade of its statement day as `invalid_conversion_pair`, never pool funding; relief at average carrying value, realised FX
+unpaired USD trade of its statement day as `invalid_conversion_pair`, never pool funding; only a `usd_pool_funded` trade
+is valued — an intrinsic pairing/conversion error is a projection barrier that stops later pool commands; relief at average carrying value, realised FX
 = relief − ECB value of the pool part, on 8500), `conversion_out` events (`book_lightyear_trades`: a USD→EUR
 conversion with no trade relieves the pool; fee in EUR = the fee on the EUR leg, or USD fee × EUR net / USD net;
 FX = relief − (EUR net + fee) on 8500; broker net = EUR net − relief; fee 0 and FX 0 books no journal — the event

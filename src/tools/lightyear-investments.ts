@@ -4892,7 +4892,10 @@ async function valuePoolTrades(params: {
       valueConflict = feeCents === null || grossCents === null || Math.abs(ecbCents + feeCents - grossCents) > 1;
     }
     prepared.set(trade.reference, { trade, ecb: outcome.ok ? outcome.rate : null, ecbCents, feeCents });
-    const blocked = preBlocked.get(trade.reference) ?? params.held.get(trade.reference)
+    // Only a usd_pool_funded trade may be valued: an intrinsic pairing/conversion error
+    // (invalid_conversion_pair, conversion_*_conflict, …) is a barrier, never a zero consideration.
+    const intrinsic = trade.fx_review_reason !== null && trade.fx_review_reason.code !== "usd_pool_funded" ? trade.fx_review_reason.code : undefined;
+    const blocked = preBlocked.get(trade.reference) ?? params.held.get(trade.reference) ?? intrinsic
       ?? (!outcome.ok ? outcome.code : valueConflict ? "trade_amount_conflict" : undefined);
     const base = { ref: trade.reference, ts: tradePool.ts, ...(blocked !== undefined ? { blocked } : {}) };
     return tradePool.kind === "sell_in"

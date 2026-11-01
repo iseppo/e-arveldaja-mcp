@@ -99,4 +99,36 @@ describe("book_lightyear_trades — Codex review of Q1–Q5 (2026-11-01)", () =>
       expect(poolEvents(env)).toEqual([]);
     });
   });
+
+  describe("#2 an intrinsic conversion error is a projection barrier; only usd_pool_funded is valued", () => {
+    const BUY = buy("15/04/2026 10:00:10", "OR-TESTNERR1", "100.00");
+    const LATER = buy("20/04/2026 10:00:00", "OR-TESTNERR2", "10.00");
+
+    it("opening 100 USD / €90, incoming 80 USD conversion missing its EUR leg, then a 100 USD buy, ECB 1.25: held, no D1100 €16 / D8500 €2 / C1020 €18", async () => {
+      statementRows = [usdLegIn("15/04/2026 10:00:00", "CN-TESTNERR1", "80.00", "64.00"), BUY, LATER];
+      const env = tradesTool({ pool: [poolOpening(10000, 9000, "1.1111111111")], fetch: rateFetch("1.25") });
+      const { dry, exec } = await env.book();
+      expect(resultFor(dry.payload, "OR-TESTNERR1")).toMatchObject({ status: "skipped" });
+      expect(reviewCode(dry.payload, "OR-TESTNERR1")).toBe("invalid_conversion_pair");
+      expect(resultFor(dry.payload, "OR-TESTNERR2")).toMatchObject({ status: "skipped" });
+      expect(exec.payload.created ?? 0).toBe(0);
+      expect(env.create).not.toHaveBeenCalled();
+      expect(poolEvents(env)).toEqual([]);
+    });
+
+    it("same numbers with both legs but fees on both (an N:1 conversion that cannot be valued): held, the later pool buy stops", async () => {
+      statementRows = [
+        ["15/04/2026 10:00:00", "CN-TESTNERR1", "", "", "Conversion", "0", "EUR", "0", "-64.00", "1.25", "0.50", "-64.50", "0"],
+        ["15/04/2026 10:00:00", "CN-TESTNERR1", "", "", "Conversion", "0", "USD", "0", "80.00", "0.8", "0.10", "79.90", "0"],
+        BUY, LATER,
+      ];
+      const env = tradesTool({ pool: [poolOpening(10000, 9000, "1.1111111111")], fetch: rateFetch("1.25") });
+      const { dry, exec } = await env.book();
+      expect(resultFor(dry.payload, "OR-TESTNERR1")).toMatchObject({ status: "skipped" });
+      expect(reviewCode(dry.payload, "OR-TESTNERR1")).toMatch(/^(conversion_(fee|amount)_conflict|invalid_conversion_pair)$/);
+      expect(reviewCode(dry.payload, "OR-TESTNERR2")).toBe("usd_pool_prerequisite_failed");
+      expect(exec.payload.created ?? 0).toBe(0);
+      expect(poolEvents(env)).toEqual([]);
+    });
+  });
 });
