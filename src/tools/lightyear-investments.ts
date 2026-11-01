@@ -59,7 +59,6 @@ import { findDuplicatePostingsInJournals } from "../bank-posting-duplicate-guard
 import type { Account, AccountDimension, Journal } from "../types/api.js";
 import {
   ecbProvenanceFingerprint,
-  ecbRateNumber,
   fxOutcomeKey,
   readFrozenFxOutcomes,
   replayFrozenFx,
@@ -2263,8 +2262,12 @@ function valueAtEcbRate(
     distribution.fx_review_reason = fxReason(outcome.code);
     return;
   }
-  const rate = ecbRateNumber(outcome.rate);
-  const toEur = (amount: number) => roundMoney(convertForeignToEur(amount, rate, "foreign_per_eur"));
+  // Exact decimal arithmetic on the published rate string (half-up cents), never a float division.
+  const toEur = (amount: number) => {
+    const cents = moneyToSafeCents(amount);
+    const eurCents = cents === null ? null : usdCentsToEurCents(cents, outcome.rate.rate);
+    return eurCents === null ? Number.NaN : eurCents / 100;
+  };
   const netEur = toEur(distribution.net_amount);
   const taxEur = toEur(distribution.tax_amount);
   const feeEur = toEur(distribution.fee);
@@ -5286,6 +5289,10 @@ export function registerLightyearTools(
       // EXECUTE
       if (typeof plan_handle !== "string" || plan_handle.length === 0) {
         // Nothing to book (zero bookable) requires no handle; otherwise a handle is mandatory.
+        // With fx_source=ecb bookability depends on ECB reads, and execute never reads the ECB: refuse first.
+        if (fxSource === "ecb") {
+          return planErrorResult("plan_handle_required", "A reviewed execution-plan handle from the Lightyear distributions dry run is required to create journal entries.");
+        }
         let peek;
         try {
           peek = await readDistributions();

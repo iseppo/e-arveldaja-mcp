@@ -262,11 +262,6 @@ export function readFrozenFxOutcomes(privatePayload: unknown): FrozenFxOutcomes 
   return out;
 }
 
-/** The rate as a number (foreign per EUR); the published string stays the source of truth. */
-export function ecbRateNumber(record: EcbRateRecord): number {
-  return Number(record.rate);
-}
-
 /** Canonical provenance for fingerprints: the exact published string and its dates. */
 export function ecbProvenanceFingerprint(record: EcbRateRecord): { source: "ecb"; rate: string; rate_date: string; requested_date: string; series: string } {
   return { source: "ecb", rate: record.rate, rate_date: record.rate_date, requested_date: record.requested_date, series: record.series };

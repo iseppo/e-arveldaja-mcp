@@ -314,6 +314,25 @@ describe("book_lightyear_distributions fx_source=ecb", () => {
     expect(store.records).toHaveLength(1);
   });
 
+  it("review wpc 7: 3.13 USD at 1.0016 is €3.13 (exact 3.125 rounds half-up), not the float €3.12", async () => {
+    loadStatement([["02/10/2026 10:00:00", "DD-TESTHALF01", "NVDA", "US67066G1040", "Dividend", "0", "USD", "0", "3.13", "0", "0", "3.13", "0"]]);
+    const env = setup({ fetch: rateFetch([["2026-10-02", "1.0016"], ["2026-10-05", "1.0016"]]) });
+    const dry = await env.run({ fx_source: "ecb", dry_run: true });
+    expect(dry.payload.results[0]).toMatchObject({ gross_eur: 3.13, net_eur: 3.13 });
+    await env.run({ fx_source: "ecb", dry_run: false, plan_handle: dry.payload.plan_handle });
+    expect(env.created[0]!.postings).toContainEqual({ accounts_id: 1120, type: "D", amount: 3.13 });
+  });
+
+  it("review wpc 8: handle-free execute with fx_source=ecb is refused before any ECB read", async () => {
+    loadStatement([NVDA_DIVIDEND]);
+    const env = setup();
+    const exec = await env.run({ fx_source: "ecb", dry_run: false });
+    expect(exec.result.isError).toBe(true);
+    expect(exec.result.content[0]!.text).toContain("plan_handle_required");
+    expect(env.fetch).not.toHaveBeenCalled();
+    expect(env.create).not.toHaveBeenCalled();
+  });
+
   it("a lightyear_account that contradicts the file name is refused", async () => {
     loadStatement([NVDA_DIVIDEND]);
     const env = setup();
