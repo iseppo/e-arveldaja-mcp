@@ -1,10 +1,10 @@
 {
   "profile": "standard",
   "measurement": {
-    "toolCount": 126,
-    "toolsListBytes": 142836,
-    "descriptionsBytes": 19657,
-    "inputSchemasBytes": 92852,
+    "toolCount": 127,
+    "toolsListBytes": 145317,
+    "descriptionsBytes": 20243,
+    "inputSchemasBytes": 94489,
     "largestTool": {
       "name": "import_wise_transactions",
       "bytes": 5627
@@ -5177,6 +5177,80 @@
       },
       "name": "book_lightyear_distributions",
       "title": "Book Lightyear Distributions"
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true,
+        "readOnlyHint": false
+      },
+      "description": "Lightyear USD cash-fund pool at the ECB rate. mode \"opening\" (once per pool) replays the statement to as_of (USD cash + ICSUSSDP units at 1.00, from an empty start) and stores the ECB-valued opening checkpoint after approval. mode \"revalue\" (default) revalues the pool's USD at the ECB rate of as_of: the replayed USD must equal expected_usd_holding, and the difference to the carrying value is booked on fx_account (default 8500) as journal LY-FX:<account>:USD:<as_of>; zero difference records a journal-free checkpoint. DRY RUN by default; anything unproven is a review, never a plug.",
+      "execution": {
+        "taskSupport": "forbidden"
+      },
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "properties": {
+          "as_of": {
+            "description": "Opening date or reporting date (YYYY-MM-DD, end of day).",
+            "type": "string"
+          },
+          "broker_account": {
+            "description": "Broker cash account holding the pool (e.g. 1020 / 1120 Lightyear konto)",
+            "type": "number"
+          },
+          "broker_dimension_id": {
+            "description": "Dimension ID for broker account (accounts_dimensions_id)",
+            "type": "number"
+          },
+          "dry_run": {
+            "description": "Preview without writing (default true)",
+            "type": "boolean"
+          },
+          "expected_usd_holding": {
+            "description": "revalue only (required): USD cash + ICSUSSDP value Lightyear shows for as_of.",
+            "type": "number"
+          },
+          "file_path": {
+            "description": "AccountStatement path/base64 input covering the interval since the last checkpoint (from the account's start for mode=opening). Provide exactly one of file_path or file_ref.",
+            "type": "string"
+          },
+          "file_ref": {
+            "description": "Opaque Lightyear AccountStatement file reference.",
+            "type": "string"
+          },
+          "fx_account": {
+            "description": "FX gain/loss account (default: auto-detect 'Kasum/kahjum valuutakursi muutustest', standard 8500).",
+            "type": "number"
+          },
+          "lightyear_account": {
+            "description": "Lightyear account id (e.g. CHZELUU) when the statement's file name does not carry it.",
+            "pattern": "^[A-Z0-9]{3,32}$",
+            "type": "string"
+          },
+          "mode": {
+            "description": "\"opening\" sets the pool's opening checkpoint once; \"revalue\" (default) revalues at the reporting date.",
+            "enum": [
+              "opening",
+              "revalue"
+            ],
+            "type": "string"
+          },
+          "plan_handle": {
+            "description": "Execution-plan handle from the reviewed dry run. Required for dry_run=false.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "as_of",
+          "broker_account"
+        ],
+        "type": "object"
+      },
+      "name": "book_lightyear_fx_revaluation",
+      "title": "Revalue Lightyear USD Pool"
     },
     {
       "annotations": {

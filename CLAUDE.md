@@ -1,7 +1,7 @@
 # e-arveldaja MCP Server
 
 TypeScript MCP server for the Estonian e-arveldaja (RIK e-Financials) REST API.
-126 tools by default on the `standard` profile; opt-in `guided` / `guided-sales` expose 19 / 20 tools, and `full` exposes all 146. The prompt registry holds 16 workflow prompts (guided profiles register fewer — a prompt whose required tools are all absent is not registered) and there are 15 resources across 12 modules. Supports multiple companies/accounts.
+127 tools by default on the `standard` profile; opt-in `guided` / `guided-sales` expose 19 / 20 tools, and `full` exposes all 147. The prompt registry holds 16 workflow prompts (guided profiles register fewer — a prompt whose required tools are all absent is not registered) and there are 15 resources across 12 modules. Supports multiple companies/accounts.
 
 ## Quick Start
 
@@ -153,7 +153,7 @@ Opening balances are maintained in e-arveldaja. Statement-closing snapshots
 surface is a fixed per-session token cost. Eight env flags control optional
 parts of the surface (see `getToolExposureConfig()` in `src/config.ts`):
 
-`EARVELDAJA_PROFILE` provides one-choice surfaces: `guided` (19 merged daily-bookkeeping tools), `guided-sales` (those 19 plus the `manage_sale_invoice` sales façade — read plus the full prepare/execute mutation lifecycle: create/update/delete/confirm/invalidate/send/recurring and inline resolve-or-create customer, 20 total), `standard` (the absent-variable compatibility default, 126), or `full` (all 146, including granular/setup tools and the workflow-state paging tool `get_workflow_page`). Guided profiles are opt-in for this release. Any explicitly present legacy exposure flag forces the normalized profile to `custom` and preserves the flag combination below. Profile and catalog fingerprint are part of plan/file-reference scope: restart and obtain a fresh preview after changing them.
+`EARVELDAJA_PROFILE` provides one-choice surfaces: `guided` (19 merged daily-bookkeeping tools), `guided-sales` (those 19 plus the `manage_sale_invoice` sales façade — read plus the full prepare/execute mutation lifecycle: create/update/delete/confirm/invalidate/send/recurring and inline resolve-or-create customer, 20 total), `standard` (the absent-variable compatibility default, 127), or `full` (all 147, including granular/setup tools and the workflow-state paging tool `get_workflow_page`). Guided profiles are opt-in for this release. Any explicitly present legacy exposure flag forces the normalized profile to `custom` and preserves the flag combination below. Profile and catalog fingerprint are part of plan/file-reference scope: restart and obtain a fresh preview after changing them.
 
 The guided surface is sized for routing clarity, not token cost (per-tool measurement shows no cost cliff at 20). The **≤ 20** figure is a target, not a hard wall: 21–24 is a deliberate-exception band (allowed only with a recorded `CHANGELOG` rationale when no existing tool can absorb the capability), and 24 is the hard backstop above which the surface must be redesigned by merging tools rather than adding. Before adding any guided tool, apply the add/don't-add criteria in [`docs/guided-tool-policy.md`](docs/guided-tool-policy.md) — prefer a new `mode` on an existing façade, a `continue_accounting_workflow` continuation, or `standard`/`full` placement (as with `get_server_status`) over growing the daily surface.
 
@@ -237,9 +237,9 @@ without changing the default:
   `DISABLE_SALES` deployment usually sets this too — but the flags are
   independent. Saves ≈1.3k tokens (7 tools).
 
-The standard surface is 126 tools; `DISABLE_LIGHTYEAR` in a custom profile drops it to 121.
+The standard surface is 127 tools; `DISABLE_LIGHTYEAR` in a custom profile drops it to 121.
 `EXPOSE_GRANULAR_TOOLS` adds the 10 granular tools, `EXPOSE_SETUP_TOOLS` the 3
-credential tools; enabling both (with `full`'s `get_workflow_page`) raises it to the full 146. The five opt-out
+credential tools; enabling both (with `full`'s `get_workflow_page`) raises it to the full 147. The five opt-out
 group flags trim the default further — `DISABLE_TAX_TOOLS` (−4),
 `DISABLE_REFERENCE_ADMIN` (−9), `DISABLE_ANNUAL_REPORT` (−3), `DISABLE_SALES`
 (−13), `DISABLE_PRODUCTS` (−7) — so a lean purchase-side-only deployment with
@@ -578,7 +578,7 @@ All mutating API methods (`create`, `update`, `delete`, `confirm`, `deactivate`,
 - **FX pairing**: Foreign currency trades (e.g., USD) are paired with CN-xxx Conversion entries by date + amount match. Consumed conversions are tracked to prevent double-matching.
 - **Sells require capital gains file**: Cost basis comes from the FIFO capital gains CSV. Sells without cost basis data are skipped with a warning.
 - **Duplicate detection**: Journal `document_number` field stores `LY:{reference}` (e.g., `LY:OR-EVN9C76R7A`). A distribution row with no reference match but a non-`LY:` journal debiting the broker account/dimension with its net EUR amount within ±1 day goes to review (`possible_existing_journal`, `candidate_journal_ids`) — legacy hand bookings used generic numbers such as `reward`
-- **Dry run default**: Both `book_lightyear_trades` and `book_lightyear_distributions` default to `dry_run=true`
+- **Dry run default**: `book_lightyear_trades`, `book_lightyear_distributions` and `book_lightyear_fx_revaluation` default to `dry_run=true`
 
 ### ECB reference rates (Lightyear FX)
 
@@ -596,6 +596,28 @@ published); otherwise the next resolve refetches. The cache is public data and s
 plan's private `fx_outcomes`; execute replays them with `replayFrozenFx` and never fetches
 (a key the plan never resolved is `fx_rate_unbound` → `plan_drift`). A failure is always a
 review row, never a guessed rate.
+
+### Lightyear USD cash-fund pool
+
+`src/lightyear/usd-pool.ts` keeps the USD Lightyear holds as cash or ICSUSSDP units at its EUR
+carrying value inside the broker account/dimension, in the connection-scoped bundle file
+`lightyear-usd-pool.json` (needs bundle storage; single-file `EARVELDAJA_RULES_FILE` mode →
+`usd_pool_unavailable` reviews). Pool key = connection + Lightyear account (from
+`AccountStatement-LY-<ACCOUNT>-…` or `lightyear_account`) + broker account/dimension; another
+broker target for the same Lightyear account is `usd_pool_target_mismatch`. Records: one
+owner-approved opening checkpoint (`book_lightyear_fx_revaluation` `mode: "opening"`, replayed
+from the statement and valued at the ECB rate; set once — redoing it means deleting the pool's
+entries from the store), `distribution_in` events (retained USD distributions,
+`book_lightyear_distributions` `fx_source: "ecb"`), `buy_relief` events (buys funded from the
+fund, `book_lightyear_trades`, relief at average carrying value, realised FX on 8500) and
+revaluation checkpoints (`book_lightyear_fx_revaluation` `mode: "revalue"`, journal
+`LY-FX:<account>:USD:<date>`, quantity proof against the Lightyear holding). Every write runs
+under `withUsdPoolLock` as intent → create → readback → commit; `recoverUsdPoolIntents` resolves
+leftovers from the ledger and never recreates a journal. `validateUsdPool` replays the whole
+chain from the opening against fresh journals; records ordered before the latest committed relief
+or checkpoint are refused (`usd_pool_backdated_event`). Order: opening once → distributions →
+trades → confirm drafts → period-end revaluation. FX amounts come only from the pool log and the
+ECB rate, never from the 1020 balance.
 
 ## Security Notes
 
@@ -745,5 +767,5 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 const transport = new StdioClientTransport({ command: "node", args: ["dist/index.js"] });
 const client = new Client({ name: "test", version: "1.0.0" });
 await client.connect(transport);
-const { tools } = await client.listTools(); // 126 tools (standard profile)
+const { tools } = await client.listTools(); // 127 tools (standard profile)
 ```

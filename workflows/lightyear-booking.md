@@ -83,6 +83,13 @@ The booked journals are DRAFTS. Balances and reports count registered journals o
 
 Earlier drafts for rows this run skipped as duplicates are NOT in that list: they come back separately in `pending_duplicate_journals` (with `pending_duplicate_journal_ids`), each with its date, document number, title and postings. This run neither created nor reviewed them, so never add them to the confirm call on your own. Show each one next to its statement row (date, reference, amounts) and compare its date, accounts, dimensions and amounts with what the row should book; where `postings_unavailable` is set, read the journal with `get_journal` first. Each entry's date, document number, title and postings come from one current read of that journal; an entry with `snapshot_mismatch` (registered or deleted since the list was read, or no longer claiming the statement reference) is held: never ask approval for it as a matching draft — report it and re-run the import after checking it. Ask approval for each matching draft separately, then confirm the approved ones with `batch_confirm_journals`; a draft that does not match the statement is reported as needing correction, not confirmed.
 
+### Step 7 (optional): USD cash-fund pool opening and period-end revaluation
+
+Only when the company keeps USD at Lightyear (cash or ICSUSSDP) and the user asks for it, or a review says `usd_pool_checkpoint_missing`.
+- Opening, once per Lightyear account: `book_lightyear_fx_revaluation` with `mode: "opening"`, `as_of` (the opening date) and a statement from the account's start. Present `usd_amount`, `ecb`, `target_eur` and `replay`, and state that the replay assumes the statement starts from an empty USD position and that the value is the ECB valuation at `as_of`, not the books' historical carrying value. Executing it (with the `plan_handle`) is the owner's approval of the opening.
+- Period end, after the period's distributions and trades are booked AND confirmed in e-arveldaja: `book_lightyear_fx_revaluation` (`mode: "revalue"`, default) with `as_of` (the reporting date) and `expected_usd_holding` — the USD cash plus ICSUSSDP value Lightyear shows for that date; ask the user for it, never derive it from the books. Present the proposed journal (`LY-FX:<account>:USD:<as_of>`, D/C broker ↔ 8500) or the journal-free checkpoint, and any review (`usd_pool_quantity_mismatch`, `usd_pool_event_unregistered` → confirm the drafts first, `usd_pool_statement_gap` → use a statement covering the interval). Nothing is booked from a review.
+- Order: opening once → distributions → trades → confirm drafts → period-end revaluation.
+
 Report:
 - Trades booked
 - Distributions booked

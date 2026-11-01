@@ -325,6 +325,8 @@ function actionLabelForTool(tool: string, args: Record<string, unknown>): string
       return dryRun === false ? "Book Lightyear trades" : "Preview Lightyear trade bookings";
     case "book_lightyear_distributions":
       return dryRun === false ? "Book Lightyear distributions" : "Preview Lightyear distribution bookings";
+    case "book_lightyear_fx_revaluation":
+      return dryRun === false ? "Revalue Lightyear USD pool" : "Preview Lightyear USD revaluation";
     case "get_setup_instructions":
       return "Inspect credential setup";
     case "import_apikey_credentials":

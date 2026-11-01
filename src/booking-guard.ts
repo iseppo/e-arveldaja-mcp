@@ -45,7 +45,7 @@ import { toUtcDay } from "./date-utils.js";
  * verifies ambiguous create/confirm outcomes without retrying a POST.
  */
 
-export type DocNamespace = "FX" | "LY" | "DIV" | "YEC";
+export type DocNamespace = "FX" | "LY" | "LY-FX" | "DIV" | "YEC";
 
 export interface DocKey {
   ns: DocNamespace;
@@ -58,7 +58,7 @@ export function formatDocNumber(key: DocKey): string {
   return key.ns === "DIV" ? `DIV-${key.id}` : `${key.ns}:${key.id}`;
 }
 
-const KNOWN_NAMESPACES: readonly DocNamespace[] = ["FX", "LY"];
+const KNOWN_NAMESPACES: readonly DocNamespace[] = ["FX", "LY", "LY-FX"];
 
 /**
  * Parse a raw `document_number` into a DocKey, or `undefined` when it does not

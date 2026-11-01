@@ -14,9 +14,11 @@ export { canonicalPlanJson, stripUndefinedDeep };
 // (plan_domain_mismatch), so the two booking paths can never be crossed.
 export const LIGHTYEAR_TRADES_PLAN_DOMAIN = "lightyear_trades";
 export const LIGHTYEAR_DISTRIBUTIONS_PLAN_DOMAIN = "lightyear_distributions";
+export const LIGHTYEAR_FX_REVALUATION_PLAN_DOMAIN = "lightyear_fx_revaluation";
 
 export const LIGHTYEAR_TRADE_CREATE_CATEGORY = "lightyear_create_trade_journal";
 export const LIGHTYEAR_DISTRIBUTION_CREATE_CATEGORY = "lightyear_create_distribution_journal";
+export const LIGHTYEAR_FX_REVALUATION_CREATE_CATEGORY = "lightyear_create_fx_revaluation_journal";
 
 /**
  * Stable, position-derived command ids. Deterministic across dry run and
@@ -29,6 +31,9 @@ export function lightyearTradeCommandId(index: number): string {
 }
 export function lightyearDistributionCommandId(index: number): string {
   return `ly-dist-${index}`;
+}
+export function lightyearFxRevaluationCommandId(index: number): string {
+  return `ly-fx-${index}`;
 }
 
 export type LightyearPlanReviewCommand = PlanReviewCommand;

@@ -371,7 +371,7 @@ const WORKFLOWS: WorkflowGuide[] = [
     summary: "Book Lightyear trades and distributions from CSV exports after dry-run review.",
     when_to_use: ["Lightyear account statement", "investment trades", "dividends", "capital gains", "broker CSV"],
     required_inputs: ["Lightyear AccountStatement CSV", "investment account", "broker cash account", "optional capital gains CSV", "booking accounts"],
-    primary_tools: ["parse_lightyear_statement", "parse_lightyear_capital_gains", "lightyear_portfolio_summary", "book_lightyear_trades", "book_lightyear_distributions"],
+    primary_tools: ["parse_lightyear_statement", "parse_lightyear_capital_gains", "lightyear_portfolio_summary", "book_lightyear_trades", "book_lightyear_distributions", "book_lightyear_fx_revaluation"],
     risk_policy: {
       default_mode: "dry_run",
       interrupt_when: ["missing gain/loss account", "missing income account", "withheld tax without tax account", "FX pairing warning"],

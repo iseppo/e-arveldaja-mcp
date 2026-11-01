@@ -25,9 +25,12 @@ import {
   executeLightyearCommands,
   LIGHTYEAR_DISTRIBUTION_CREATE_CATEGORY,
   LIGHTYEAR_DISTRIBUTIONS_PLAN_DOMAIN,
+  LIGHTYEAR_FX_REVALUATION_CREATE_CATEGORY,
+  LIGHTYEAR_FX_REVALUATION_PLAN_DOMAIN,
   LIGHTYEAR_TRADE_CREATE_CATEGORY,
   LIGHTYEAR_TRADES_PLAN_DOMAIN,
   lightyearDistributionCommandId,
+  lightyearFxRevaluationCommandId,
   lightyearTradeCommandId,
   stripUndefinedDeep,
   type LightyearExecutionCommand,
@@ -84,7 +87,13 @@ import {
   validateUsdPool,
   projectPool,
   usdCentsToEurCents,
+  poolStateAtEnd,
+  replayUsdOpening,
+  statementPeriodFromFileName,
   USD_POOL_REVIEW_MESSAGES,
+  type OpeningReplayRow,
+  type OpeningReplaySummary,
+  type UsdPoolCheckpoint,
   type PoolKey,
   type PoolSpendCommand,
   type StatementPoolEvent,
@@ -163,6 +172,7 @@ export type FxReviewCode =
   | "legacy_check_incomplete"
   | "portfolio_arithmetic_overflow"
   | "usd_pool_funded"
+  | "fx_revaluation_conflict"
   | FxFailureCode
   | "fx_rate_unbound"
   | UsdPoolReviewCode;
@@ -197,6 +207,7 @@ export const FX_REVIEW_MESSAGES: Record<FxReviewCode, string> = {
   legacy_check_incomplete: "The legacy-booking check for this row was cut short by its request budget, so an existing booking under another document number cannot be ruled out. Not booked automatically — check the broker account for this date and amount, or rerun with a shorter statement.",
   portfolio_arithmetic_overflow: "The portfolio arithmetic exceeds the supported exact bounds.",
   usd_pool_funded: "This buy is paid partly or fully from the USD cash fund (ICSUSSDP sells next to it); book_lightyear_trades values it from the ECB rate and the USD pool.",
+  fx_revaluation_conflict: "A journal with this revaluation's document number already exists but does not match the USD pool's checkpoint for the date; nothing is booked. Check the journal by hand.",
   ecb_rate_unavailable: "No ECB reference rate could be read for this day (no publication within 7 days, or the ECB data API did not answer); nothing is guessed. Retry the dry run later.",
   ecb_rate_not_final: "The ECB reference rate for this day is not final yet (today or later); retry the dry run on a later day.",
   ecb_response_invalid: "The ECB data API answered with data that failed validation; nothing is guessed.",
@@ -2929,8 +2940,9 @@ async function commitPoolEvent<C>(api: ApiContext, pool: LightyearPoolExecution<
       return;
     }
     if (event.kind === "revaluation" && event.checkpoint) {
-      pool.store.remove([usdPoolRecordKey({ ...event, state: "intent", journal_id: null, recorded_at: "" })]);
+      // Checkpoint first: if removing the intent then fails, recovery finds both and only drops the intent.
       pool.store.upsert([{ ...event.checkpoint, journal_id: journalId, recorded_at: new Date().toISOString() }]);
+      pool.store.remove([usdPoolRecordKey({ ...event, state: "intent", journal_id: null, recorded_at: "" })]);
     } else {
       pool.store.upsert([{ ...event, state: "committed", journal_id: journalId, recorded_at: new Date().toISOString() }]);
     }
@@ -4338,6 +4350,93 @@ async function valueFundedTrades(params: {
   }
 }
 
+
+// ---- USD pool FX revaluation (C5) --------------------------------------------------
+
+/** Cash delta of a statement row in its own currency (Lightyear Net = Gross − Fee). */
+function openingReplayRows(rows: readonly AccountStatementRow[]): OpeningReplayRow[] {
+  return rows.map(row => {
+    let cash: number | null;
+    switch (row.type) {
+      case "Buy": cash = -Math.abs(row.gross_amount); break;
+      case "Sell": cash = Math.abs(row.net_amount); break;
+      case "Conversion": cash = row.net_amount; break;
+      case "Withdrawal": cash = -Math.abs(row.net_amount); break;
+      default: cash = Math.abs(row.net_amount);
+    }
+    return {
+      ts: lightyearTimestampSeconds(row.date), row_index: row.row_index, type: row.type, ticker: row.ticker,
+      ccy: row.ccy, quantity: row.quantity, price_per_share: row.price_per_share, cash_delta: cash,
+    };
+  });
+}
+
+function revaluationDocKey(lightyearAccount: string, asOf: string): DocKey {
+  return { ns: "LY-FX", id: `${lightyearAccount}:USD:${asOf}` };
+}
+
+function nextDay(day: string): string {
+  const date = new Date(`${day}T00:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + 1);
+  return date.toISOString().slice(0, 10);
+}
+
+interface FxRevaluationCommand {
+  reference: string;
+  date: string;
+  title: string;
+  postings: LyPosting[];
+  auditSummary: string;
+}
+
+type FxRevaluationEvaluation =
+  | { kind: "review"; code: FxReviewCode; detail?: string }
+  | { kind: "already_booked"; checkpoint: UsdPoolCheckpoint }
+  | { kind: "opening"; checkpoint: UsdPoolCheckpoint; replay: OpeningReplaySummary }
+  | { kind: "checkpoint_only"; checkpoint: UsdPoolCheckpoint; carrying_eur_cents: number; snapshot_digest: string }
+  | { kind: "journal"; checkpoint: UsdPoolCheckpoint; carrying_eur_cents: number; snapshot_digest: string; command: FxRevaluationCommand; event: PendingPoolEvent };
+
+export type LightyearFxRevaluationStatus =
+  | "would_store_opening" | "opening_stored"
+  | "would_create" | "created" | "not_created"
+  | "would_record_checkpoint" | "checkpoint_recorded"
+  | "already_booked" | "review";
+
+export type LightyearFxRevaluationPayload = Partial<LightyearDraftConfirmationFields> & {
+  mode: "DRY_RUN" | "EXECUTED";
+  operation: "opening" | "revalue";
+  status: LightyearFxRevaluationStatus;
+  as_of: string;
+  pool: { lightyear_account: string; broker_account: number; broker_dimension_id: number | null } | null;
+  usd_amount?: number;
+  carrying_eur?: number;
+  target_eur?: number;
+  fx_amount?: number;
+  ecb?: { rate: string; rate_date: string; requested_date: string; fx_rate_text: string };
+  document_number?: string;
+  journal_id?: number;
+  postings?: LyPosting[];
+  replay?: OpeningReplaySummary;
+  review_reason?: { code: FxReviewCode; message: string; detail?: string };
+  usd_pool_notes?: string[];
+  plan_handle?: string;
+  execution_report?: PlanExecutionReport;
+  note?: string;
+};
+
+/** Fingerprint view of an evaluation: everything but write times. */
+function evaluationFingerprintView(evaluation: FxRevaluationEvaluation): unknown {
+  const checkpoint = "checkpoint" in evaluation ? { ...evaluation.checkpoint, recorded_at: "" } : null;
+  return {
+    kind: evaluation.kind,
+    checkpoint,
+    ...(evaluation.kind === "review" ? { code: evaluation.code, detail: evaluation.detail ?? null } : {}),
+    ...(evaluation.kind === "journal" ? { postings: evaluation.command.postings, title: evaluation.command.title } : {}),
+    ...(evaluation.kind === "opening" ? { replay: evaluation.replay } : {}),
+    ...("snapshot_digest" in evaluation ? { snapshot_digest: evaluation.snapshot_digest } : {}),
+  };
+}
+
 export function registerLightyearTools(
   server: McpServer,
   api: ApiContext,
@@ -5199,6 +5298,288 @@ export function registerLightyearTools(
         };
       };
       return storedPoolKey !== null ? withUsdPoolLock(storedPoolKey, () => executeLocked(true)) : executeLocked(false);
+    }
+  );
+
+  registerTool(server, "book_lightyear_fx_revaluation",
+    "Lightyear USD cash-fund pool at the ECB rate. mode \"opening\" (once per pool) replays the statement to as_of (USD cash + ICSUSSDP units at 1.00, from an empty start) and stores the ECB-valued opening checkpoint after approval. mode \"revalue\" (default) revalues the pool's USD at the ECB rate of as_of: the replayed USD must equal expected_usd_holding, and the difference to the carrying value is booked on fx_account (default 8500) as journal LY-FX:<account>:USD:<as_of>; zero difference records a journal-free checkpoint. DRY RUN by default; anything unproven is a review, never a plug.",
+    {
+      mode: z.enum(["opening", "revalue"]).optional().describe("\"opening\" sets the pool's opening checkpoint once; \"revalue\" (default) revalues at the reporting date."),
+      file_path: z.string().optional().describe("AccountStatement path/base64 input covering the interval since the last checkpoint (from the account's start for mode=opening). Provide exactly one of file_path or file_ref."),
+      file_ref: z.string().optional().describe("Opaque Lightyear AccountStatement file reference."),
+      as_of: z.string().describe("Opening date or reporting date (YYYY-MM-DD, end of day)."),
+      expected_usd_holding: z.number().optional().describe("revalue only (required): USD cash + ICSUSSDP value Lightyear shows for as_of."),
+      broker_account: z.number().describe("Broker cash account holding the pool (e.g. 1020 / 1120 Lightyear konto)"),
+      broker_dimension_id: z.number().optional().describe("Dimension ID for broker account (accounts_dimensions_id)"),
+      fx_account: z.number().optional().describe("FX gain/loss account (default: auto-detect 'Kasum/kahjum valuutakursi muutustest', standard 8500)."),
+      lightyear_account: z.string().regex(LIGHTYEAR_ACCOUNT_RE).optional().describe("Lightyear account id (e.g. CHZELUU) when the statement's file name does not carry it."),
+      dry_run: z.boolean().optional().describe("Preview without writing (default true)"),
+      plan_handle: z.string().optional().describe("Execution-plan handle from the reviewed dry run. Required for dry_run=false."),
+    },
+    { ...batch, openWorldHint: true, title: "Revalue Lightyear USD Pool" },
+    async ({ mode, file_path, file_ref, as_of, expected_usd_holding, broker_account, broker_dimension_id, fx_account, lightyear_account, dry_run, plan_handle }) => {
+      const isDryRun = dry_run !== false;
+      const operation = mode ?? "revalue";
+      const invalid = (error: string) => toolError({ error, category: "invalid_arguments", retry: "never", mutation_occurred: false });
+      if (!isStrictDate(as_of)) return invalid("as_of must be a calendar date YYYY-MM-DD.");
+      const expectedCents = expected_usd_holding === undefined ? null : moneyToSafeCents(expected_usd_holding);
+      if (operation === "revalue" && (expectedCents === null || expectedCents < 0)) {
+        return invalid("expected_usd_holding (USD cash + ICSUSSDP value Lightyear shows for as_of) is required for mode \"revalue\".");
+      }
+      const statementSource = fileInputSource(file_path, file_ref);
+      const normalizedArgs = stripUndefinedDeep({
+        mode: operation, as_of,
+        expected_usd_holding_cents: operation === "revalue" ? expectedCents : undefined,
+        broker_account, broker_dimension_id, fx_account,
+        lightyear_account: lightyear_account?.toUpperCase(),
+      }) as PlanRecord;
+
+      const accounts = await api.readonly.getAccounts();
+      const fxAccount = resolveFxAccount(accounts, fx_account);
+      const accountErrors = validateAccounts(accounts, [
+        { id: broker_account, label: "Broker account" },
+        ...(operation === "revalue" ? [{ id: fxAccount, label: "FX account" }] : []),
+      ]);
+      if (accountErrors.length > 0) return toolError({ error: "Account validation failed", details: accountErrors });
+
+      const evaluate = async (binding: unknown, frozen: FrozenFxOutcomes | undefined, inLock: boolean) => {
+        const snapshot = await readCsvSnapshot(statementSource, FILE_REFERENCE_OPERATIONS.lightyearStatement, runtimeSafetyContext, binding);
+        const rows = parseAccountStatement(snapshot.text());
+        const keyResolution = resolveLightyearPoolKey(api, snapshot, file_path, lightyear_account, broker_account, broker_dimension_id);
+        if (!keyResolution.ok) return { error: invalid(keyResolution.error) } as const;
+        if (keyResolution.key === null) return { error: invalid(USD_POOL_REVIEW_MESSAGES.usd_pool_account_unknown) } as const;
+        const key = keyResolution.key;
+        const fxOutcomes = frozen ?? await resolveFrozenFxOutcomes([fxOutcomeKey("USD", as_of)], deps.ecb);
+        const outcome = replayFrozenFx(fxOutcomes, "USD", as_of);
+        const done = (evaluation: FxRevaluationEvaluation) => ({ snapshot, key, fxOutcomes, evaluation }) as const;
+        const review = (code: FxReviewCode, detail?: string) => done({ kind: "review", code, ...(detail !== undefined ? { detail } : {}) });
+        const loaded = await loadPoolRecords(api, usdPoolStore, key, inLock);
+        if (!loaded.ok) return review(loaded.code);
+        const view = poolRecordsFor(loaded.records, key);
+        const period = statementPeriodFromFileName(snapshot.canonicalPath() ?? file_path);
+        const asOfTs = endOfDaySeconds(as_of);
+
+        if (operation === "opening") {
+          if (view.checkpoints.length > 0) return review("usd_pool_opening_exists");
+          if (period !== null && period.to < as_of) return review("usd_pool_statement_gap");
+          const replay = replayUsdOpening(openingReplayRows(rows), asOfTs, KNOWN_CASH_EQUIVALENT_TICKERS);
+          if (!replay.ok) return review(replay.code, replay.detail);
+          if (!outcome.ok) return review(outcome.code);
+          const eur = usdCentsToEurCents(replay.value.usd_cents, outcome.rate.rate);
+          if (eur === null) return review("ecb_response_invalid");
+          return done({
+            kind: "opening", replay: replay.value,
+            checkpoint: {
+              record: "checkpoint", pool_key: key, kind: "opening", as_of, ts: asOfTs,
+              usd_cents: replay.value.usd_cents, eur_cents: eur, fx_cents: 0, journal_id: null, document_number: null,
+              rate: outcome.rate.rate, rate_date: outcome.rate.rate_date, approved: true, recorded_at: "",
+            },
+          });
+        }
+
+        // 1. Same-date idempotency first.
+        const docKey = revaluationDocKey(key.lightyear_account, as_of);
+        const documentNumber = formatDocNumber(docKey);
+        let journals: Journal[];
+        try {
+          api.journals.invalidateListCache();
+          journals = await api.journals.listAll();
+        } catch {
+          return review("usd_pool_validation_unavailable");
+        }
+        const sameNumber = journals.filter(j => j.document_number === documentNumber && j.is_deleted !== true);
+        const sameDate = view.checkpoints.find(c => c.kind === "revaluation" && c.as_of === as_of);
+        if (sameDate) {
+          const matches = sameDate.journal_id === null ? sameNumber.length === 0 : sameNumber.some(j => j.id === sameDate.journal_id);
+          return matches ? done({ kind: "already_booked", checkpoint: sameDate }) : review("fx_revaluation_conflict", documentNumber);
+        }
+        if (sameNumber.length > 0) return review("fx_revaluation_conflict", documentNumber);
+        // 2. Never back-dated.
+        if (view.checkpoints.some(c => c.as_of >= as_of)) return review("usd_pool_checkpoint_after_date");
+        // 3. Whole chain, registered journals, completeness.
+        const fundingTickers = KNOWN_CASH_EQUIVALENT_TICKERS;
+        const tradeExtraction = extractTrades(rows, { fundingTickers });
+        const distributionExtraction = extractDistributions(rows, tradeReservedConversionRefsWithFunding(rows, fundingTickers));
+        const order = checkpointOrder("revaluation", as_of);
+        const validated = await validateUsdPool({
+          api, store: usdPoolStore, key, until: order, newRecords: [order],
+          statementEvents: statementPoolEvents(rows, tradeExtraction, distributionExtraction, fundingTickers),
+          requireRegistered: true,
+        });
+        if (!validated.ok) return review(validated.code, validated.detail);
+        const snapshotState = validated.value;
+        const base = snapshotState.base;
+        const covered = period !== null
+          ? period.from <= nextDay(base.as_of) && period.to >= as_of
+          : rows.some(row => { const ts = lightyearTimestampSeconds(row.date); return ts !== null && ts <= base.ts; });
+        if (!covered) return review("usd_pool_statement_gap");
+        // 4. Quantity proof against the Lightyear holding.
+        const state = poolStateAtEnd(snapshotState);
+        if (state.usd_cents !== expectedCents) return review("usd_pool_quantity_mismatch", `replayed ${(state.usd_cents / 100).toFixed(2)} USD`);
+        // 5. ECB target.
+        if (!outcome.ok) return review(outcome.code);
+        const target = usdCentsToEurCents(state.usd_cents, outcome.rate.rate);
+        if (target === null) return review("ecb_response_invalid");
+        const fx = target - state.eur_cents;
+        const checkpoint: UsdPoolCheckpoint = {
+          record: "checkpoint", pool_key: key, kind: "revaluation", as_of, ts: asOfTs,
+          usd_cents: state.usd_cents, eur_cents: target, fx_cents: fx, journal_id: null,
+          document_number: fx === 0 ? null : documentNumber,
+          rate: outcome.rate.rate, rate_date: outcome.rate.rate_date, recorded_at: "",
+        };
+        if (fx === 0) return done({ kind: "checkpoint_only", checkpoint, carrying_eur_cents: state.eur_cents, snapshot_digest: snapshotState.snapshot_digest });
+        const brokerDim = broker_dimension_id ? { accounts_dimensions_id: broker_dimension_id } : {};
+        const amount = Math.abs(fx) / 100;
+        const postings: LyPosting[] = fx > 0
+          ? [{ accounts_id: broker_account, ...brokerDim, type: "D", amount }, { accounts_id: fxAccount, type: "C", amount }]
+          : [{ accounts_id: fxAccount, type: "D", amount }, { accounts_id: broker_account, ...brokerDim, type: "C", amount }];
+        const usdText = (state.usd_cents / 100).toFixed(2);
+        return done({
+          kind: "journal", checkpoint, carrying_eur_cents: state.eur_cents, snapshot_digest: snapshotState.snapshot_digest,
+          command: {
+            reference: docKey.id, date: as_of, postings,
+            title: `Lightyear USD ümberhindlus ${as_of} (${usdText} USD @ ${outcome.rate.rate} ECB)`,
+            auditSummary: `Lightyear USD revaluation ${as_of}: ${usdText} USD, FX ${fx > 0 ? "+" : "-"}${amount.toFixed(2)} EUR`,
+          },
+          event: {
+            record: "event", pool_key: key, ref: docKey.id, ts: asOfTs, kind: "revaluation",
+            usd_cents: 0, eur_cents: fx, document_number: documentNumber, journal_broker_net_cents: fx, checkpoint,
+          },
+        });
+      };
+
+      const fingerprintOf = (evaluation: FxRevaluationEvaluation, key: PoolKey) =>
+        canonicalPlanJson({ normalized_args: normalizedArgs, pool: poolKeyId(key), evaluation: evaluationFingerprintView(evaluation) } as unknown as PlanData);
+
+      /** The ECB outcomes this run uses (resolved at the dry run, frozen at execute). */
+      let storedOrResolved: FrozenFxOutcomes = {};
+      const render = (
+        result: { key: PoolKey; evaluation: FxRevaluationEvaluation },
+        status: LightyearFxRevaluationStatus,
+        extra: Partial<LightyearFxRevaluationPayload> = {},
+      ): LightyearFxRevaluationPayload => {
+        const { evaluation, key: poolKey } = result;
+        const checkpoint = "checkpoint" in evaluation ? evaluation.checkpoint : null;
+        const ecbRecord = replayFrozenFx(storedOrResolved, "USD", as_of);
+        return {
+          mode: isDryRun ? "DRY_RUN" : "EXECUTED",
+          operation, status, as_of,
+          pool: { lightyear_account: poolKey.lightyear_account, broker_account: poolKey.broker_account, broker_dimension_id: poolKey.broker_dimension_id },
+          ...(checkpoint ? { usd_amount: checkpoint.usd_cents / 100 } : {}),
+          ...("carrying_eur_cents" in evaluation ? { carrying_eur: evaluation.carrying_eur_cents / 100, target_eur: evaluation.checkpoint.eur_cents / 100, fx_amount: evaluation.checkpoint.fx_cents / 100 } : {}),
+          ...(evaluation.kind === "opening" ? { target_eur: evaluation.checkpoint.eur_cents / 100, replay: evaluation.replay } : {}),
+          ...(ecbRecord.ok ? { ecb: { rate: ecbRecord.rate.rate, rate_date: ecbRecord.rate.rate_date, requested_date: ecbRecord.rate.requested_date, fx_rate_text: `${ecbRecord.rate.rate} USD/EUR ECB ${ecbRecord.rate.rate_date}` } } : {}),
+          ...(checkpoint?.document_number ? { document_number: checkpoint.document_number } : {}),
+          ...(checkpoint?.journal_id ? { journal_id: checkpoint.journal_id } : {}),
+          ...(evaluation.kind === "journal" ? { postings: evaluation.command.postings } : {}),
+          ...(evaluation.kind === "review" ? { review_reason: { code: evaluation.code, message: FX_REVIEW_MESSAGES[evaluation.code], ...(evaluation.detail !== undefined ? { detail: evaluation.detail } : {}) } } : {}),
+          ...extra,
+        };
+      };
+      if (isDryRun) {
+        const result = await evaluate(undefined, undefined, false);
+        if ("error" in result) return result.error;
+        storedOrResolved = result.fxOutcomes;
+        const { evaluation } = result;
+        if (evaluation.kind === "review" || evaluation.kind === "already_booked") {
+          return { content: [{ type: "text", text: toMcpJson(render(result, evaluation.kind === "review" ? "review" : "already_booked", {
+            note: evaluation.kind === "review" ? "Nothing is booked; resolve the review and re-run the dry run." : "This date is already revalued for this pool; nothing to do.",
+          })) }] };
+        }
+        const status: LightyearFxRevaluationStatus = evaluation.kind === "opening" ? "would_store_opening" : evaluation.kind === "journal" ? "would_create" : "would_record_checkpoint";
+        const planHandleIssued = runtimeSafetyContext.planStore.issue(
+          LIGHTYEAR_FX_REVALUATION_PLAN_DOMAIN,
+          buildLightyearExecutionPlanInput({
+            normalizedArgs,
+            sourceIdentities: [sourceIdentityRecord(result.snapshot)],
+            privateExtras: {
+              source_paths: [planBoundFileReference(statementSource, result.snapshot, FILE_REFERENCE_OPERATIONS.lightyearStatement)],
+              fx_outcomes: result.fxOutcomes as unknown as PlanData,
+              usd_pool: { pool_key: result.key as unknown as PlanData },
+            },
+            liveSnapshot: { fx_account: fxAccount, broker_account },
+            reviewCommands: evaluation.kind === "journal"
+              ? [{ id: lightyearFxRevaluationCommandId(0), category: LIGHTYEAR_FX_REVALUATION_CREATE_CATEGORY, reviewProjection: stripUndefinedDeep({ document_number: evaluation.event.document_number, date: as_of, title: evaluation.command.title, postings: evaluation.command.postings }) as PlanData }]
+              : [],
+            fingerprint: fingerprintOf(evaluation, result.key),
+            counts: { new_entries: evaluation.kind === "journal" ? 1 : 0 },
+            totals: { command_count: evaluation.kind === "journal" ? 1 : 0 },
+            exclusions: [],
+            reviews: [],
+          }),
+        );
+        return { content: [{ type: "text", text: toMcpJson(render(result, status, {
+          plan_handle: planHandleIssued,
+          note: evaluation.kind === "opening"
+            ? "This is the ECB valuation of the replayed USD at as_of (the replay assumes the statement starts from an empty USD position), not the books' historical carrying value. Approving stores it as the pool's opening checkpoint; set dry_run=false with the plan_handle only after the owner approves."
+            : "Set dry_run=false and pass the plan_handle from this reviewed dry run. The plan handle is not approval — review the plan first.",
+        })) }] };
+      }
+
+      if (typeof plan_handle !== "string" || plan_handle.length === 0) {
+        return planErrorResult("plan_handle_required", "A reviewed execution-plan handle from the Lightyear FX revaluation dry run is required.");
+      }
+      let storedPlan;
+      try {
+        storedPlan = runtimeSafetyContext.planStore.consume(plan_handle, LIGHTYEAR_FX_REVALUATION_PLAN_DOMAIN);
+      } catch (error) {
+        if (error instanceof PlanStoreError) return planErrorResult(error.code, error.message);
+        throw error;
+      }
+      if (canonicalPlanJson(storedPlan.normalizedArgs) !== canonicalPlanJson(normalizedArgs)) {
+        return planErrorResult("plan_drift", "The arguments changed since the plan was reviewed.");
+      }
+      const storedKey = readStoredPoolKey(storedPlan.privatePayload);
+      if (storedKey === null) return planErrorResult("plan_drift", "The reviewed plan carries no USD pool.");
+      storedOrResolved = readFrozenFxOutcomes(storedPlan.privatePayload);
+
+      return withUsdPoolLock(storedKey, async () => {
+        let result;
+        try {
+          result = await evaluate(storedSourceBindings(storedPlan.privatePayload)[0], storedOrResolved, true);
+        } catch (error) {
+          if (error instanceof FileInputSnapshotError) return sourceReReadDrift(error, "The reviewed Lightyear statement");
+          throw error;
+        }
+        if ("error" in result) return result.error;
+        const drift = lightyearSourceDrift(result.snapshot, storedPlan.sourceIdentities[0], "The Lightyear statement");
+        if (drift) return drift;
+        const storedFingerprint = readStoredFingerprint(storedPlan.privatePayload);
+        if (poolKeyId(result.key) !== poolKeyId(storedKey) || storedFingerprint !== fingerprintOf(result.evaluation, result.key)) {
+          return planErrorResult("plan_drift", "The USD pool or the statement changed since the revaluation was reviewed.");
+        }
+        const { evaluation } = result;
+        if (evaluation.kind === "opening" || evaluation.kind === "checkpoint_only") {
+          try {
+            usdPoolStore.upsert([{ ...evaluation.checkpoint, recorded_at: new Date().toISOString() }]);
+          } catch {
+            return toolError({ error: "The USD pool store could not be written; nothing was recorded.", category: "internal", retry: "safe", mutation_occurred: false });
+          }
+          return { content: [{ type: "text", text: toMcpJson(render(result, evaluation.kind === "opening" ? "opening_stored" : "checkpoint_recorded")) }] };
+        }
+        if (evaluation.kind !== "journal") return planErrorResult("plan_drift", "The reviewed revaluation no longer applies.");
+        const guard = await BookingGuard.load(api);
+        const notes: string[] = [];
+        const docKey = revaluationDocKey(result.key.lightyear_account, as_of);
+        const { executionReport, createdByIndex } = await executeLightyearJournalCommands<FxRevaluationCommand>({
+          api, guard, commands: [evaluation.command],
+          commandId: lightyearFxRevaluationCommandId,
+          category: LIGHTYEAR_FX_REVALUATION_CREATE_CATEGORY,
+          tool: "book_lightyear_fx_revaluation",
+          auditDetails: command => ({ effective_date: command.date, document_number: evaluation.event.document_number, postings: command.postings.map(p => ({ ...p })) }),
+          pool: { key: storedKey, store: usdPoolStore, eventOf: () => evaluation.event, notes },
+          docKey: () => docKey,
+        });
+        const created = createdByIndex.get(0);
+        const status: LightyearFxRevaluationStatus = created?.status === "created" ? "created" : "not_created";
+        const resultRows = [{ status, ...(created?.journal_id !== undefined ? { journal_id: created.journal_id } : {}) }];
+        return { content: [{ type: "text", text: toMcpJson(render(result, status, {
+          ...(created?.journal_id !== undefined ? { journal_id: created.journal_id } : {}),
+          execution_report: executionReport,
+          ...(notes.length > 0 ? { usd_pool_notes: notes } : {}),
+          ...draftConfirmationFields(resultRows, { reason: "Confirm the Lightyear USD revaluation journal booked by book_lightyear_fx_revaluation." }),
+        })) }] };
+      });
     }
   );
 

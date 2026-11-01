@@ -2,7 +2,7 @@
 
 [![npm](https://img.shields.io/npm/v/e-arveldaja-mcp)](https://www.npmjs.com/package/e-arveldaja-mcp)
 
-MCP server for the Estonian e-arveldaja (RIK e-Financials) REST API. 126 tools on the standard profile, 16 workflow prompts, 15 resources. Works with any MCP client — Claude Code, Codex CLI, Gemini CLI, Cursor, Windsurf, Cline, and others.
+MCP server for the Estonian e-arveldaja (RIK e-Financials) REST API. 127 tools on the standard profile, 16 workflow prompts, 15 resources. Works with any MCP client — Claude Code, Codex CLI, Gemini CLI, Cursor, Windsurf, Cline, and others.
 
 > **Safer bank confirmations and stricter owner expenses (0.38.0, behaviour change).** A payment whose text names exactly one invoice or order number can now be confirmed through the guided approval flow, and payments that match several invoices are reported instead of silently skipped. The guided Wise import picks an account automatically only when it is recognisably the Wise account, otherwise it asks. An owner-paid expense is refused before anything is written when its expense or owner-debt account has dimensions and none is given (pass `expense_account_dimension_id` / `payable_account_dimension_id`). Duplicate transfer rows are deleted only through a fresh reconciliation plan, and earlier Lightyear drafts are no longer offered for confirmation unseen. See the [changelog](CHANGELOG.md) for full details.
 
@@ -125,7 +125,7 @@ The former `import_opening_balances` tool and local opening-register support hav
 
 ### Trimming the tool surface
 
-Choose one explicit surface with `EARVELDAJA_PROFILE`: `guided` is the opt-in 19-tool daily-bookkeeping surface; `guided-sales` adds the `manage_sale_invoice` sales façade (20 tools) — reads invoices and runs the full sale-invoice lifecycle (create/update/delete/confirm/invalidate/send/recurring, plus inline resolve-or-create customer) behind the two-call prepare/execute approval gate; `standard` is the absent-variable compatibility default (126 tools); and `full` exposes all 146 tools, including granular and configured-mode credential administration. Every non-guided surface also carries `get_server_status`, a compact read-only report of the running version, active profile, and any active point-of-use release notices.
+Choose one explicit surface with `EARVELDAJA_PROFILE`: `guided` is the opt-in 19-tool daily-bookkeeping surface; `guided-sales` adds the `manage_sale_invoice` sales façade (20 tools) — reads invoices and runs the full sale-invoice lifecycle (create/update/delete/confirm/invalidate/send/recurring, plus inline resolve-or-create customer) behind the two-call prepare/execute approval gate; `standard` is the absent-variable compatibility default (127 tools); and `full` exposes all 147 tools, including granular and configured-mode credential administration. Every non-guided surface also carries `get_server_status`, a compact read-only report of the running version, active profile, and any active point-of-use release notices.
 
 The setup choices map exactly: **Daily bookkeeping** → `guided`; **Daily bookkeeping plus sales invoices** → `guided-sales`; **Bookkeeping plus investments** → `standard` with Lightyear enabled; **Full advanced toolset** → `full`. Guided profiles are opt-in in this release, not the recommended/default daily surface. After changing profiles, restart and run fresh previews; an old proposal or plan handle is never approval under the new profile.
 
@@ -140,7 +140,7 @@ The tool list is sent into the model's context on every session, so it is a fixe
 - `EARVELDAJA_DISABLE_SALES=1` — drops the sales-invoicing side: the 11 sale-invoice tools, `create_recurring_sale_invoices`, and receivables aging (`compute_receivables_aging`). Payables aging and all purchase-invoice tools stay. Use it for purchase-side-only bookkeeping.
 - `EARVELDAJA_DISABLE_PRODUCTS=1` — drops the product-catalog tools (`list/get/create/update/deactivate/reactivate/delete_product`). Products are chiefly the sale-invoice line-item catalog (purchase items key on `cl_purchase_articles_id`, though they can also carry an optional `products_id`), so a `DISABLE_SALES` deployment usually sets this too. It only removes catalog management — creating either invoice type still works — so the flags stay independent.
 
-A lean purchase-side-only custom deployment with every disable flag set (incl. Lightyear) has 85 tools instead of the standard 126. Conversely, `EARVELDAJA_PROFILE=full` exposes the complete 146-tool catalog.
+A lean purchase-side-only custom deployment with every disable flag set (incl. Lightyear) has 85 tools instead of the standard 127. Conversely, `EARVELDAJA_PROFILE=full` exposes the complete 147-tool catalog.
 
 `EARVELDAJA_DOCUMENT_READING=1` (opt-in, off by default) lets your assistant read a single invoice itself: `process_accounting_document` gains `mode='read'` and `mode='verify'`, every value is checked against the printed text, and only the questions the server cannot settle are put to you before the draft is created. It adds no tool, so the tool counts above do not change.
 
