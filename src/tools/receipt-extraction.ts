@@ -1044,13 +1044,6 @@ const ESTONIAN_NONPROFIT_FORM_RE =
 const NONPROFIT_EXCLUDED_ROLE_LABEL_RE =
   /^(?:maksja|ostja|arve\s+saaja|saaja|klient|buyer|bill\s+to|invoice\s+to|recipient|client|haldaja|haldur|haldus|valitseja|administrator|manager|property\s+manager)\b/iu;
 
-// Role labels that name a party other than the supplier in a header block:
-// buyer, payer, manager, bank or payment agent.
-const HEADER_ROLE_LABEL_RE = new RegExp(
-  `${NONPROFIT_EXCLUDED_ROLE_LABEL_RE.source}|^(?:pank|bank|maksevahendaja|maksete\\s+vahendaja|makseagent|payment\\s+(?:agent|provider|institution))\\b`,
-  "iu",
-);
-
 function cleanSupplierCandidate(raw: string): string | undefined {
   let candidate = raw
     .replace(SUPPLIER_LABEL_RE, "")
@@ -2981,8 +2974,8 @@ function extractSupplierNameFromText(
   const clean = (raw: string) => cleanSupplierCandidateExcludingOwn(raw, ownCompanyName);
   const rows = text
     .split(/\r?\n/)
-    .map(original => ({ original, raw: blankOwnCompanySegments(original, ownCompanyName) }))
-    .map(({ original, raw }) => ({ original, raw, line: clampTextLine(raw) }))
+    .map(raw => blankOwnCompanySegments(raw, ownCompanyName))
+    .map(raw => ({ raw, line: clampTextLine(raw) }))
     .filter(row => row.line);
   const lines = rows.map(row => row.line);
 
@@ -3029,18 +3022,12 @@ function extractSupplierNameFromText(
     // A supplier label in a RIGHT column with no value ("Buyer OÜ    Makse
     // saaja:"): the supplier is the same column of the next line.
     const columns = rows[index]!.raw.split(/\s{2,}/).map(clampTextLine);
-    // Leading indentation is not a left column: the original line (before the
-    // own company is blanked) must hold text before the label.
-    // An indented label ("    Müüja:   OÜ Näidis") whose value follows it on
-    // the same row is not a right-column label; an indented bare label
-    // beside another label ("    Müüja:      Ostja:") still is.
-    const original = rows[index]!.original;
-    const isBareLabel = (segment: string) => /:\s*$/.test(segment) || PURE_BUYER_LABEL_RE.test(segment) ||
-      (isSupplierLabel(segment) && clean(segment) === undefined);
+    // A label whose value follows it in the next column of the same row
+    // ("    Müüja:   OÜ Näidis Trade") is not a bare right-column label.
     const labelColumn = columns.findIndex((segment, column) =>
       column > 0 && isSupplierLabel(segment) && clean(segment) === undefined &&
-      (original.slice(0, Math.max(0, original.indexOf(segment))).trim() !== "" ||
-        columns.slice(column + 1).every(next => next === "" || isBareLabel(next))));
+      !(columns[column + 1] !== undefined && columns[column + 1] !== "" && !columns[column + 1]!.includes(":") &&
+        !PURE_BUYER_LABEL_RE.test(columns[column + 1]!) && !NONPROFIT_EXCLUDED_ROLE_LABEL_RE.test(columns[column + 1]!)));
     if (labelColumn > 0) {
       const nextColumns = rows[index + 1]?.raw.split(/\s{2,}/).map(clampTextLine) ?? [];
       const columnCandidate = clean(nextColumns[labelColumn] ?? "");
@@ -3128,66 +3115,11 @@ function extractSupplierNameFromText(
     }
   }
 
-  // A header row (above the first money amount) rejected for an identifier in
-  // another column ("Rg-kood 14417608      Näidis OÜ": the buyer's code beside
-  // the supplier's name) may offer its legal-form column — only as a last
-  // header resort, and only when the selected supplier registry code is
-  // printed in that same column below it, with no role label in between and
-  // not on the row itself.
-  const moneyToken = new RegExp(MONEY_TOKEN_RE.source, "u");
-  const amountRow = rows.findIndex(row => moneyToken.test(row.line));
-  const headerEnd = amountRow >= 0 ? amountRow : 0;
-  const columnSpans = (raw: string) =>
-    [...raw.matchAll(/\S+(?:\s\S+)*/g)].map(match => ({ text: match[0], start: match.index!, end: match.index! + match[0].length }));
-  const hasSupplierCode = (line: string) => supplierRegCode !== undefined &&
-    [...line.matchAll(REG_CODE_LABEL_RE)].some(match => match[1] === supplierRegCode);
-  const ownedHeaderColumn = (index: number): string | undefined => {
-    if (!supplierRegCode || hasSupplierCode(rows[index]!.line) || inExcludedRole(index)) return undefined;
-    const spans = columnSpans(rows[index]!.original)
-      .map(span => ({ ...span, name: clean(span.text) }))
-      .filter(span => span.name !== undefined && span.name.length <= 80 && isCompanyLine(span.name, index));
-    if (spans.length !== 1) return undefined;
-    const column = spans[0]!;
-    let codeRow = -1;
-    for (let below = index + 1; below < headerEnd && below <= index + 8; below++) {
-      const codeSpan = columnSpans(rows[below]!.original).find(span => hasSupplierCode(span.text));
-      if (!codeSpan) continue;
-      if (codeSpan.start < column.end && column.start < codeSpan.end) codeRow = below;
-      break;
+  for (const [index, row] of rows.entries()) {
+    const candidate = clean(row.line);
+    if (candidate && isCompanyLine(candidate, index)) {
+      return trimToLegalFormColumn(row.raw, candidate);
     }
-    if (codeRow < 0) return undefined;
-    // Ownership: from the top of the page to the supplier code, the only role
-    // label allowed is one buyer label directly above the own company's
-    // (blanked) row. Any other buyer, manager, bank or payment-agent label,
-    // in any column, means the column may be that party's.
-    let ownBuyerLabels = 0;
-    for (let at = 0; at <= codeRow; at++) {
-      for (const span of columnSpans(rows[at]!.original)) {
-        if (!HEADER_ROLE_LABEL_RE.test(span.text) && !PURE_BUYER_LABEL_RE.test(span.text)) continue;
-        const next = rows[at + 1];
-        const ownBlock = PURE_BUYER_LABEL_RE.test(span.text) && next !== undefined && next.line !== next.original;
-        if (!ownBlock || ++ownBuyerLabels > 1) return undefined;
-      }
-    }
-    return column.name;
-  };
-
-  const isWholeCompanyRow = (index: number) => {
-    const candidate = clean(rows[index]!.line);
-    return candidate !== undefined && isCompanyLine(candidate, index) ? trimToLegalFormColumn(rows[index]!.raw, candidate) : undefined;
-  };
-  for (let index = 0; index < headerEnd; index++) {
-    const name = isWholeCompanyRow(index);
-    if (name) return name;
-  }
-  for (let index = 0; index < headerEnd; index++) {
-    if (clean(rows[index]!.line) !== undefined) continue;
-    const name = ownedHeaderColumn(index);
-    if (name) return name;
-  }
-  for (let index = headerEnd; index < rows.length; index++) {
-    const name = isWholeCompanyRow(index);
-    if (name) return name;
   }
 
   const fileToken = normalizeFilenameToken(fallbackFileName).replace(/-/g, " ");
