@@ -3564,13 +3564,43 @@ describe("receipt fields — invoice number, supplier and document type misreads
       const text = [
         "Arve saaja",
         "Proovi OÜ                 Sularahaarve 1633",
+        "Pargi 1                   Kuupäev 02.08.2026",
+        "10111 Tallinn             Viitenumber 16337",
         "Rg-kood 12000005                         Näidis Stuudio OÜ",
         "                                         Rg-kood 10000018",
         "Majutus                    105,30",
         "Arve kokku (EUR) 105,30",
         "Näidis Pank AS IBAN EE471000001020145685",
       ].join("\n");
-      expect(extractReceiptFieldsFromText(text, "x.pdf", { ownCompanyName: "Proovi OÜ" }).supplier_name).toBe("Näidis Stuudio OÜ");
+      expect(extractReceiptFieldsFromText(text, "x.pdf", { ownCompanyName: "Proovi OÜ", ownCompanyRegistryCode: "12000005" }).supplier_name).toBe("Näidis Stuudio OÜ");
+    });
+
+    it.each([
+      ["a bank beside the code", "Arve saaja\nProovi OÜ\nPargi 1, Tallinn\nReg 12000005      Swedbank AS\nTegelik Tarnija OÜ\nKokku 10,00 EUR", { ownCompanyName: "Proovi OÜ" }],
+      ["a manager block", "Arve saaja\nProovi OÜ\nHaldaja:\nPargi 1, Tallinn\nReg 12000011      Haldusfirma OÜ\nTegelik Tarnija OÜ\nKokku 10,00 EUR", { ownCompanyName: "Proovi OÜ" }],
+      ["the buyer beside its code", "Arve saaja\nPargi 1, Tallinn\nRg-kood 12000005      Ostja OÜ\nTegelik Tarnija OÜ\nArve nr INV-42\nKokku 10,00 EUR", {}],
+    ] as const)("the header column fallback never overrides a header supplier line (%s)", (_label, text, options) => {
+      expect(extractReceiptFieldsFromText(text, "x.pdf", options).supplier_name).toBe("Tegelik Tarnija OÜ");
+    });
+
+    it("a header column is taken only when the supplier's own code sits in that column below it", () => {
+      const header = (codeRow: string) => [
+        "Arve saaja",
+        "Proovi OÜ                 Sularahaarve 1633",
+        "Pargi 1                   Kuupäev 02.08.2026",
+        "10111 Tallinn             Viitenumber 16337",
+        "Rg-kood 12000005                         Näidis Stuudio OÜ",
+        codeRow,
+        "Majutus                    105,30",
+        "Arve kokku (EUR) 105,30",
+        "Näidis Pank AS IBAN EE471000001020145685",
+      ].join("\n");
+      // The supplier code under the buyer's column (left) does not make the right column the supplier's.
+      expect(extractReceiptFieldsFromText(header("Rg-kood 10000018"), "x.pdf", { ownCompanyName: "Proovi OÜ", ownCompanyRegistryCode: "12000005" }).supplier_name).not.toBe("Näidis Stuudio OÜ");
+      expect(extractReceiptFieldsFromText(header("                                         Rg-kood 10000018"), "x.pdf", { ownCompanyName: "Proovi OÜ", ownCompanyRegistryCode: "12000005" }).supplier_name).toBe("Näidis Stuudio OÜ");
+      // Under a manager label the column is the manager's, even with the code below it.
+      const managed = header("                                         Rg-kood 10000018").replace("Pargi 1                   Kuupäev 02.08.2026", "Haldaja:");
+      expect(extractReceiptFieldsFromText(managed, "x.pdf", { ownCompanyName: "Proovi OÜ", ownCompanyRegistryCode: "12000005" }).supplier_name).not.toBe("Näidis Stuudio OÜ");
     });
 
     it("a rejected line below the first amount (footer, payment block) is not split into columns", () => {

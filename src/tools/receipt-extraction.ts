@@ -3115,24 +3115,51 @@ function extractSupplierNameFromText(
     }
   }
 
-  // The header ends at the first line carrying a money amount ("105,30"):
-  // footer and payment blocks below it are left to the identity-block rules.
+  // A header row (above the first money amount) rejected for an identifier in
+  // another column ("Rg-kood 14417608      Näidis OÜ": the buyer's code beside
+  // the supplier's name) may offer its legal-form column — only as a last
+  // header resort, and only when the selected supplier registry code is
+  // printed in that same column below it, with no role label in between and
+  // not on the row itself.
   const moneyToken = new RegExp(MONEY_TOKEN_RE.source, "u");
-  const firstAmountRow = rows.findIndex(row => moneyToken.test(row.line));
-  for (const [index, row] of rows.entries()) {
-    const candidate = clean(row.line);
-    if (candidate && isCompanyLine(candidate, index)) {
-      return trimToLegalFormColumn(row.raw, candidate);
+  const amountRow = rows.findIndex(row => moneyToken.test(row.line));
+  const headerEnd = amountRow >= 0 ? amountRow : 0;
+  const columnSpans = (raw: string) =>
+    [...raw.matchAll(/\S+(?:\s\S+)*/g)].map(match => ({ text: match[0], start: match.index!, end: match.index! + match[0].length }));
+  const hasSupplierCode = (line: string) => supplierRegCode !== undefined &&
+    [...line.matchAll(REG_CODE_LABEL_RE)].some(match => match[1] === supplierRegCode);
+  const ownedHeaderColumn = (index: number): string | undefined => {
+    if (!supplierRegCode || hasSupplierCode(rows[index]!.line) || inExcludedRole(index)) return undefined;
+    const spans = columnSpans(rows[index]!.original)
+      .map(span => ({ ...span, name: clean(span.text) }))
+      .filter(span => span.name !== undefined && span.name.length <= 80 && isCompanyLine(span.name, index));
+    if (spans.length !== 1) return undefined;
+    const column = spans[0]!;
+    for (let below = index + 1; below < headerEnd && below <= index + 8; below++) {
+      const line = rows[below]!.line;
+      if (NONPROFIT_EXCLUDED_ROLE_LABEL_RE.test(line) || BUYER_OR_RECIPIENT_SECTION_RE.test(line)) return undefined;
+      const codeSpan = columnSpans(rows[below]!.original).find(span => hasSupplierCode(span.text));
+      if (codeSpan) return codeSpan.start < column.end && column.start < codeSpan.end ? column.name : undefined;
     }
-    // A header line rejected for an identifier in another column ("Rg-kood
-    // 14417608      Näidis OÜ": the buyer's code beside the supplier's name)
-    // still offers the column holding the legal form, when exactly one does.
-    if (!candidate && index < firstAmountRow) {
-      const companyColumns = row.raw.split(/\s{2,}/).map(clampTextLine).filter(Boolean)
-        .map(segment => clean(segment))
-        .filter((segment): segment is string => segment !== undefined && segment.length <= 80 && isCompanyLine(segment, index));
-      if (companyColumns.length === 1) return companyColumns[0];
-    }
+    return undefined;
+  };
+
+  const isWholeCompanyRow = (index: number) => {
+    const candidate = clean(rows[index]!.line);
+    return candidate !== undefined && isCompanyLine(candidate, index) ? trimToLegalFormColumn(rows[index]!.raw, candidate) : undefined;
+  };
+  for (let index = 0; index < headerEnd; index++) {
+    const name = isWholeCompanyRow(index);
+    if (name) return name;
+  }
+  for (let index = 0; index < headerEnd; index++) {
+    if (clean(rows[index]!.line) !== undefined) continue;
+    const name = ownedHeaderColumn(index);
+    if (name) return name;
+  }
+  for (let index = headerEnd; index < rows.length; index++) {
+    const name = isWholeCompanyRow(index);
+    if (name) return name;
   }
 
   const fileToken = normalizeFilenameToken(fallbackFileName).replace(/-/g, " ");
