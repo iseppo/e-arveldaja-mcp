@@ -1068,6 +1068,8 @@ function cleanSupplierCandidate(raw: string): string | undefined {
     return undefined;
   }
   if (/^(?:bill to|invoice to|arve saaja|saaja|vastuvõtja|receiver|klient|client)\b/i.test(candidate)) return undefined;
+  // A bare buyer label ("Ostja:" beside "Müüja:") is never the supplier.
+  if (PURE_BUYER_LABEL_RE.test(candidate)) return undefined;
   if (/^(?:invoice|arve|receipt|müügiarve|order details|search|thank you)\b/i.test(candidate)) return undefined;
   // Document-type and field labels (+ an optional number) are never a supplier:
   // "Sularahaarve 1633", "Dokumendi number".
@@ -2942,6 +2944,8 @@ function extractSupplierNameFromLayout(
   for (const marker of supplierMarkers) {
     for (const item of textItems) {
       if (!isLayoutItemInSupplierRegion(item, marker, markers)) continue;
+      // A field label ("Väljastamise kuupäev:") is never a supplier name.
+      if (/:\s*$/.test(item.text)) continue;
       const candidate = cleanSupplierCandidateExcludingOwn(item.text, ownCompanyName);
       if (!candidate) continue;
       candidates.push({
@@ -2970,8 +2974,8 @@ function extractSupplierNameFromText(
   const clean = (raw: string) => cleanSupplierCandidateExcludingOwn(raw, ownCompanyName);
   const rows = text
     .split(/\r?\n/)
-    .map(raw => blankOwnCompanySegments(raw, ownCompanyName))
-    .map(raw => ({ raw, line: clampTextLine(raw) }))
+    .map(original => ({ original, raw: blankOwnCompanySegments(original, ownCompanyName) }))
+    .map(({ original, raw }) => ({ original, raw, line: clampTextLine(raw) }))
     .filter(row => row.line);
   const lines = rows.map(row => row.line);
 
@@ -3018,8 +3022,12 @@ function extractSupplierNameFromText(
     // A supplier label in a RIGHT column with no value ("Buyer OÜ    Makse
     // saaja:"): the supplier is the same column of the next line.
     const columns = rows[index]!.raw.split(/\s{2,}/).map(clampTextLine);
+    // Leading indentation is not a left column: the original line (before the
+    // own company is blanked) must hold text before the label.
+    const original = rows[index]!.original;
     const labelColumn = columns.findIndex((segment, column) =>
-      column > 0 && isSupplierLabel(segment) && clean(segment) === undefined);
+      column > 0 && isSupplierLabel(segment) && clean(segment) === undefined &&
+      original.slice(0, Math.max(0, original.indexOf(segment))).trim() !== "");
     if (labelColumn > 0) {
       const nextColumns = rows[index + 1]?.raw.split(/\s{2,}/).map(clampTextLine) ?? [];
       const columnCandidate = clean(nextColumns[labelColumn] ?? "");
@@ -3107,10 +3115,23 @@ function extractSupplierNameFromText(
     }
   }
 
+  // The header ends at the first line carrying a money amount ("105,30"):
+  // footer and payment blocks below it are left to the identity-block rules.
+  const moneyToken = new RegExp(MONEY_TOKEN_RE.source, "u");
+  const firstAmountRow = rows.findIndex(row => moneyToken.test(row.line));
   for (const [index, row] of rows.entries()) {
     const candidate = clean(row.line);
     if (candidate && isCompanyLine(candidate, index)) {
       return trimToLegalFormColumn(row.raw, candidate);
+    }
+    // A header line rejected for an identifier in another column ("Rg-kood
+    // 14417608      Näidis OÜ": the buyer's code beside the supplier's name)
+    // still offers the column holding the legal form, when exactly one does.
+    if (!candidate && index < firstAmountRow) {
+      const companyColumns = row.raw.split(/\s{2,}/).map(clampTextLine).filter(Boolean)
+        .map(segment => clean(segment))
+        .filter((segment): segment is string => segment !== undefined && segment.length <= 80 && isCompanyLine(segment, index));
+      if (companyColumns.length === 1) return companyColumns[0];
     }
   }
 
