@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.39.0] - 2026-11-03
+
 ### Added
 
 - **Lightyear's USD cash can now be revalued at the ECB rate for your reporting date.** Before, the exchange-rate difference on the USD held at Lightyear (cash and the ICSUSSDP cash fund) had to be calculated and booked by hand. Now the new tool `book_lightyear_fx_revaluation` does it. Details: `mode: "opening"` computes the pool's opening USD from the statement (USD cash plus ICSUSSDP units at 1.00, from an empty start), values it at the ECB rate of `as_of` and stores it once after your approval; `mode: "revalue"` (default) checks that the pool's logged USD equals `expected_usd_holding` (the holding Lightyear shows), that every pool journal is live and confirmed and that the statement covers the interval, then books the difference between the ECB value and the carrying value on 8500 (`fx_account`) as journal `LY-FX:<account>:USD:<date>` — or records a journal-free checkpoint when there is no difference; a same-date retry is `already_booked`; anything unproven is a review, never a plug; the ECB rate is frozen into the plan. New tool on the `standard` (127) and `full` (147) profiles; hidden with `EARVELDAJA_DISABLE_LIGHTYEAR`.
