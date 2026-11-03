@@ -12,7 +12,8 @@
 import { HttpClient } from "../http-client.js";
 import type { Config } from "../config.js";
 import type { ApiContext } from "../tools/crud-tools.js";
-import type { Journal } from "../types/api.js";
+import type { Account, AccountDimension, Journal, Posting } from "../types/api.js";
+import { validatePostingDimensions } from "../account-validation.js";
 import { fxOutcomeKey, replayFrozenFx, resolveFrozenFxOutcomes, type EcbRateDeps } from "../fx/ecb-rates.js";
 import {
   canonicalPoolPostings,
@@ -62,7 +63,10 @@ export interface RebuildAccounts {
   fund_distribution_account: number;
   reward_account: number;
   tax_account?: number;
-  fee_account: number;
+  /** Buy/sell and conversion fees (book_lightyear_trades `fee_account`, default 8335). */
+  trade_fee_account: number;
+  /** Distribution fees (book_lightyear_distributions `fee_account`, default 8610). */
+  distribution_fee_account: number;
   gain_account: number;
   loss_account: number;
   fx_account: number;
@@ -121,6 +125,12 @@ export interface SimulateParams {
   opening: RebuildOpening;
   accounts: RebuildAccounts;
   ecb: EcbRateDeps;
+  /**
+   * The live chart, when known. The booking tools auto-fill an account's only
+   * dimension before creating a journal; with the chart the simulation does the
+   * same, so the comparison sees the dimensions the tools would book.
+   */
+  chart?: { accounts: Account[]; dimensions: AccountDimension[] };
 }
 
 const CONNECTION = "lightyear-rebuild";
@@ -197,6 +207,11 @@ export async function simulateLightyearYear(params: SimulateParams): Promise<Sim
   const period = { from: params.from, to: params.to };
 
   const apply = (source: ProposedJournal["source"], command: { reference: string; date: string; postings: Array<{ accounts_id: number; accounts_dimensions_id?: number; type: "D" | "C"; amount: number }>; poolEvent?: PendingPoolEvent }) => {
+    if (params.chart) {
+      for (const message of validatePostingDimensions(command.postings as Posting[], params.chart.accounts, params.chart.dimensions)) {
+        warnings.push(`${command.reference}: ${message}`);
+      }
+    }
     const postings = canonicalPoolPostings(command.postings);
     const event = command.poolEvent;
     if (event?.source_evidence) {
@@ -221,7 +236,7 @@ export async function simulateLightyearYear(params: SimulateParams): Promise<Sim
     accounts: {
       broker_account: accounts.broker_account, broker_dimension_id: accounts.broker_dimension_id, income_account: accounts.income_account,
       interest_account: accounts.interest_account, fund_distribution_account: accounts.fund_distribution_account,
-      reward_account: accounts.reward_account, tax_account: accounts.tax_account, fee_account: accounts.fee_account,
+      reward_account: accounts.reward_account, tax_account: accounts.tax_account, fee_account: accounts.distribution_fee_account,
     },
   });
   for (const command of distributions.commands) apply("distribution", command);
@@ -237,7 +252,7 @@ export async function simulateLightyearYear(params: SimulateParams): Promise<Sim
     accounts: {
       investment_account: accounts.investment_account, investment_dimension_id: accounts.investment_dimension_id,
       broker_account: accounts.broker_account, broker_dimension_id: accounts.broker_dimension_id,
-      gainAccount: accounts.gain_account, lossAccount: accounts.loss_account, feeAccount: accounts.fee_account, fxAccount: accounts.fx_account,
+      gainAccount: accounts.gain_account, lossAccount: accounts.loss_account, feeAccount: accounts.trade_fee_account, fxAccount: accounts.fx_account,
     },
   });
   for (const command of trades.commands) apply("trade", command);

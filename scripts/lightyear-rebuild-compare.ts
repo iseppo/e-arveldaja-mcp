@@ -19,6 +19,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { basename } from "node:path";
 import { loadAllConfigs, loadDotenvFiles } from "../src/config.js";
 import { JournalsApi } from "../src/api/journals.api.js";
+import { ReferenceDataApi } from "../src/api/readonly.api.js";
 import { resolveEcbRate } from "../src/fx/ecb-rates.js";
 import { usdCentsToEurCents, lightyearAccountFromFileName } from "../src/lightyear/usd-pool.js";
 import {
@@ -34,7 +35,7 @@ import {
 /** The owner's chart (CLAUDE.md "Lightyear defaults"). */
 const ACCOUNTS: Omit<RebuildAccounts, "broker_dimension_id" | "investment_dimension_id"> = {
   broker_account: 1020, investment_account: 1100, income_account: 8330, interest_account: 8400, fund_distribution_account: 8320,
-  reward_account: 8600, tax_account: 8610, fee_account: 8335, gain_account: 8330, loss_account: 8335, fx_account: 8500,
+  reward_account: 8600, tax_account: 8610, trade_fee_account: 8335, distribution_fee_account: 8610, gain_account: 8330, loss_account: 8335, fx_account: 8500,
 };
 const COMPARED_ACCOUNTS = [1020, 1040, 1100, 8320, 8330, 8335, 8400, 8500, 8600, 8610];
 
@@ -66,20 +67,29 @@ async function main(): Promise<void> {
     ...(args.brokerDimension !== undefined ? { broker_dimension_id: args.brokerDimension } : {}),
     ...(args.investmentDimension !== undefined ? { investment_dimension_id: args.investmentDimension } : {}),
   };
-  const sim = await simulateLightyearYear({
-    statementCsv: readFileSync(args.statement, "utf8"), gainsCsv: args.gains === null ? null : readFileSync(args.gains, "utf8"),
-    from: args.from, to: args.to, lightyearAccount, opening, accounts, ecb,
-  });
-
-  let compare = null;
+  // Books mode: read the live chart first, so the simulation auto-fills an
+  // account's only dimension the way the booking tools do (GET only).
+  let selected = null;
+  let chart: { accounts: Awaited<ReturnType<ReferenceDataApi["getAccounts"]>>; dimensions: Awaited<ReturnType<ReferenceDataApi["getAccountDimensions"]>> } | undefined;
   if (!args.noBooks) {
     loadDotenvFiles();
     const configs = loadAllConfigs();
-    const selected = configs[args.connection ?? 0];
+    selected = configs[args.connection ?? 0] ?? null;
     if (!selected) {
       console.error(`No connection at index ${args.connection ?? 0} (${configs.length} configured).`);
       process.exit(1);
     }
+    const readonly = new ReferenceDataApi(new GetOnlyHttpClient(selected.config));
+    chart = { accounts: await readonly.getAccounts(), dimensions: await readonly.getAccountDimensions() };
+  }
+  const sim = await simulateLightyearYear({
+    statementCsv: readFileSync(args.statement, "utf8"), gainsCsv: args.gains === null ? null : readFileSync(args.gains, "utf8"),
+    from: args.from, to: args.to, lightyearAccount, opening, accounts, ecb,
+    ...(chart ? { chart } : {}),
+  });
+
+  let compare = null;
+  if (selected) {
     const journals = await new JournalsApi(new GetOnlyHttpClient(selected.config)).listAllWithPostings();
     compare = compareWithBooks(sim.journals, journals, {
       from: args.from, to: args.to, accounts: COMPARED_ACCOUNTS,

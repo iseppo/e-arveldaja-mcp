@@ -7,7 +7,7 @@ import { resolveFileInput } from "../file-validation.js";
 import { readFileCapped } from "../bounded-read.js";
 import { lightyearStatementCsv } from "../__fixtures__/lightyear-rows.js";
 import { poolDistribution, poolJournal, sourceDigestOf, poolOpening, rateFetch, setupPoolTool, type FetchMock } from "../__fixtures__/lightyear-pool-harness.js";
-import type { Journal } from "../types/api.js";
+import type { Account, AccountDimension, Journal } from "../types/api.js";
 import type { LightyearTradesPayload } from "../tools/lightyear-investments.js";
 import { canonicalPoolPostings, defaultUsdPoolStore, type UsdPoolRecord } from "./usd-pool.js";
 import { GetOnlyHttpClient, compareWithBooks, parseRebuildArgs, renderRebuildReport, safeDocumentNumber, simulateLightyearYear, type ProposedJournal, type RebuildAccounts, type RebuildOpening } from "./rebuild.js";
@@ -28,7 +28,7 @@ const GAINS_HEADER = "Date,Ticker,Name,ISIN,Country,Asset Class,Fees (EUR),Quant
 /** Synthetic accounts, as the pool harness: 1120 broker, 1550 investment. */
 const ACCOUNTS: RebuildAccounts = {
   broker_account: 1120, investment_account: 1550, income_account: 8320, interest_account: 8400, fund_distribution_account: 8320,
-  reward_account: 8600, tax_account: 8610, fee_account: 8335, gain_account: 8330, loss_account: 8335, fx_account: 8500,
+  reward_account: 8600, tax_account: 8610, trade_fee_account: 8335, distribution_fee_account: 8610, gain_account: 8330, loss_account: 8335, fx_account: 8500,
 };
 const TOOL_ACCOUNTS = { investment_account: 1550, broker_account: 1120, gain_loss_account: 8330, loss_account: 8335, fee_account: 8335, fx_account: 8500 };
 
@@ -66,6 +66,48 @@ function simulate(rows: string[][], opening: RebuildOpening, options: { gains?: 
     ecb: { fetch: options.fetch ?? rateFetch(), today: () => "2026-10-31", now: () => new Date("2026-10-31T08:00:00Z"), cache: new Map() },
   });
 }
+
+describe("simulateLightyearYear accounts as the booking tools", () => {
+  beforeEach(() => {
+    mockedResolveFileInput.mockReset();
+    mockedResolveFileInput.mockImplementation(async (input: string) => ({ path: input }));
+    mockedReadFileCapped.mockReset();
+  });
+
+  const ROWS = [
+    ["01/10/2026 11:00:00", "IN-TESTFEE001", "BRICEKSP", "IE00BCRY6557", "Distribution", "0", "EUR", "0", "3.36", "1", "0.14", "3.22", "0"],
+    ["22/10/2026 09:00:00", "RW-TESTRWD001", "", "", "Reward", "0", "EUR", "0", "15", "1", "0", "15", "0"],
+  ];
+  const OPENING: RebuildOpening = { as_of: "2026-09-30", usd_cents: 0, eur_cents: 0, rate: "1.1355" };
+  const account = (id: number, allows_dimensions: boolean) => ({ id, name_est: `Konto ${id}`, is_valid: true, allows_dimensions }) as unknown as Account;
+  const CHART = {
+    accounts: [account(1120, false), account(8320, false), account(8600, true), account(8610, true)],
+    dimensions: [
+      { id: 942290, accounts_id: 8600, title_est: "Muud finantstulud", is_deleted: false },
+      { id: 942302, accounts_id: 8610, title_est: "Muud finantskulud", is_deleted: false },
+    ] as unknown as AccountDimension[],
+  };
+  const run = (chart?: typeof CHART) => simulateLightyearYear({
+    statementCsv: lightyearStatementCsv(ROWS), gainsCsv: null,
+    from: "2026-10-01", to: "2026-10-30", lightyearAccount: "TESTACCT1", opening: OPENING, accounts: ACCOUNTS,
+    ecb: { fetch: rateFetch(), today: () => "2026-10-31", now: () => new Date("2026-10-31T08:00:00Z"), cache: new Map() },
+    ...(chart ? { chart } : {}),
+  });
+  const postingsOf = (journals: readonly ProposedJournal[], ref: string) =>
+    journals.find(journal => journal.document_number === `LY:${ref}`)?.postings.map(p => [p.type, p.accounts_id, p.accounts_dimensions_id, p.amount_cents]);
+
+  it("books a distribution fee on the distribution fee account (8610), not the trade fee account", async () => {
+    const sim = await run();
+    expect(postingsOf(sim.journals, "IN-TESTFEE001")).toEqual(expect.arrayContaining([["D", 8610, null, 14], ["C", 8320, null, 336]]));
+    expect(sim.journals.flatMap(journal => journal.postings).some(posting => posting.accounts_id === 8335)).toBe(false);
+  });
+
+  it("with the live chart, fills an account's only dimension the way the tools do", async () => {
+    const sim = await run(CHART);
+    expect(postingsOf(sim.journals, "IN-TESTFEE001")).toEqual(expect.arrayContaining([["D", 8610, 942302, 14]]));
+    expect(postingsOf(sim.journals, "RW-TESTRWD001")).toEqual(expect.arrayContaining([["C", 8600, 942290, 1500]]));
+  });
+});
 
 describe("GetOnlyHttpClient", () => {
   afterEach(() => { vi.unstubAllGlobals(); });

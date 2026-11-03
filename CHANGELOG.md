@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **The Lightyear rebuild comparison now books distribution fees and dimensions the way the booking tools do.** Before, `lightyear:rebuild-compare` put distribution fees on the trade-fee account 8335 without a dimension, while `book_lightyear_distributions` books them on 8610 and fills in an account's only dimension (for example 8600 and 8610), so a year rebuilt with the tools still showed every fee month as "different". Details: `RebuildAccounts.fee_account` is split into `trade_fee_account` (8335) and `distribution_fee_account` (8610); in books mode the script reads the chart and account dimensions first (GET only) and fills a unique dimension before comparing.
+
 ## [0.39.0] - 2026-11-03
 
 ### Added
