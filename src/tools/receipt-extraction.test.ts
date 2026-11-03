@@ -3583,6 +3583,32 @@ describe("receipt fields — invoice number, supplier and document type misreads
       expect(extractReceiptFieldsFromText(text, "x.pdf", options).supplier_name).toBe("Tegelik Tarnija OÜ");
     });
 
+    it.each([
+      ["Pank:", "Swedbank AS"],
+      ["Maksevahendaja:", "Makseagent OÜ"],
+      ["Haldaja:", "Haldusfirma OÜ"],
+      ["Ostja:", "Ostja Firma OÜ"],
+    ] as const)("a role label higher in the header keeps its column from the fallback (%s)", (role, name) => {
+      const text = [
+        "Arve saaja",
+        "Proovi OÜ",
+        "Pargi 1, Tallinn",
+        role,
+        "Aadress 1",
+        "Tallinn",
+        `Rg-kood 12000005                         ${name}`,
+        "                                         Rg-kood 10000018",
+        "Kokku 10,00 EUR",
+        "Tegelik Tarnija OÜ",
+      ].join("\n");
+      expect(extractReceiptFieldsFromText(text, "x.pdf", { ownCompanyName: "Proovi OÜ", ownCompanyRegistryCode: "12000005" }).supplier_name).toBe("Tegelik Tarnija OÜ");
+    });
+
+    it("an indented bare supplier label beside a buyer label takes its own column of the next row", () => {
+      const text = "    Müüja:                  Ostja:\n    Tarnija OÜ              Proovi OÜ\nKokku 10,00 EUR";
+      expect(extractReceiptFieldsFromText(text, "x.pdf").supplier_name).toBe("Tarnija OÜ");
+    });
+
     it("a header column is taken only when the supplier's own code sits in that column below it", () => {
       const header = (codeRow: string) => [
         "Arve saaja",

@@ -1044,6 +1044,13 @@ const ESTONIAN_NONPROFIT_FORM_RE =
 const NONPROFIT_EXCLUDED_ROLE_LABEL_RE =
   /^(?:maksja|ostja|arve\s+saaja|saaja|klient|buyer|bill\s+to|invoice\s+to|recipient|client|haldaja|haldur|haldus|valitseja|administrator|manager|property\s+manager)\b/iu;
 
+// Role labels that name a party other than the supplier in a header block:
+// buyer, payer, manager, bank or payment agent.
+const HEADER_ROLE_LABEL_RE = new RegExp(
+  `${NONPROFIT_EXCLUDED_ROLE_LABEL_RE.source}|^(?:pank|bank|maksevahendaja|maksete\\s+vahendaja|makseagent|payment\\s+(?:agent|provider|institution))\\b`,
+  "iu",
+);
+
 function cleanSupplierCandidate(raw: string): string | undefined {
   let candidate = raw
     .replace(SUPPLIER_LABEL_RE, "")
@@ -3024,10 +3031,16 @@ function extractSupplierNameFromText(
     const columns = rows[index]!.raw.split(/\s{2,}/).map(clampTextLine);
     // Leading indentation is not a left column: the original line (before the
     // own company is blanked) must hold text before the label.
+    // An indented label ("    Müüja:   OÜ Näidis") whose value follows it on
+    // the same row is not a right-column label; an indented bare label
+    // beside another label ("    Müüja:      Ostja:") still is.
     const original = rows[index]!.original;
+    const isBareLabel = (segment: string) => /:\s*$/.test(segment) || PURE_BUYER_LABEL_RE.test(segment) ||
+      (isSupplierLabel(segment) && clean(segment) === undefined);
     const labelColumn = columns.findIndex((segment, column) =>
       column > 0 && isSupplierLabel(segment) && clean(segment) === undefined &&
-      original.slice(0, Math.max(0, original.indexOf(segment))).trim() !== "");
+      (original.slice(0, Math.max(0, original.indexOf(segment))).trim() !== "" ||
+        columns.slice(column + 1).every(next => next === "" || isBareLabel(next))));
     if (labelColumn > 0) {
       const nextColumns = rows[index + 1]?.raw.split(/\s{2,}/).map(clampTextLine) ?? [];
       const columnCandidate = clean(nextColumns[labelColumn] ?? "");
@@ -3135,13 +3148,28 @@ function extractSupplierNameFromText(
       .filter(span => span.name !== undefined && span.name.length <= 80 && isCompanyLine(span.name, index));
     if (spans.length !== 1) return undefined;
     const column = spans[0]!;
+    let codeRow = -1;
     for (let below = index + 1; below < headerEnd && below <= index + 8; below++) {
-      const line = rows[below]!.line;
-      if (NONPROFIT_EXCLUDED_ROLE_LABEL_RE.test(line) || BUYER_OR_RECIPIENT_SECTION_RE.test(line)) return undefined;
       const codeSpan = columnSpans(rows[below]!.original).find(span => hasSupplierCode(span.text));
-      if (codeSpan) return codeSpan.start < column.end && column.start < codeSpan.end ? column.name : undefined;
+      if (!codeSpan) continue;
+      if (codeSpan.start < column.end && column.start < codeSpan.end) codeRow = below;
+      break;
     }
-    return undefined;
+    if (codeRow < 0) return undefined;
+    // Ownership: from the top of the page to the supplier code, the only role
+    // label allowed is one buyer label directly above the own company's
+    // (blanked) row. Any other buyer, manager, bank or payment-agent label,
+    // in any column, means the column may be that party's.
+    let ownBuyerLabels = 0;
+    for (let at = 0; at <= codeRow; at++) {
+      for (const span of columnSpans(rows[at]!.original)) {
+        if (!HEADER_ROLE_LABEL_RE.test(span.text) && !PURE_BUYER_LABEL_RE.test(span.text)) continue;
+        const next = rows[at + 1];
+        const ownBlock = PURE_BUYER_LABEL_RE.test(span.text) && next !== undefined && next.line !== next.original;
+        if (!ownBlock || ++ownBuyerLabels > 1) return undefined;
+      }
+    }
+    return column.name;
   };
 
   const isWholeCompanyRow = (index: number) => {
