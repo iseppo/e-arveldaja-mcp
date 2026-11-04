@@ -13,6 +13,7 @@ import { registerFinancialStatementTools } from "../tools/financial-statements.j
 import { registerAgingTools } from "../tools/aging-analysis.js";
 import { registerRecurringInvoiceTools } from "../tools/recurring-invoices.js";
 import { registerEstonianTaxTools } from "../tools/estonian-tax.js";
+import { registerLimitedVatTool } from "../tools/limited-vat.js";
 import { registerAnnualReportTools } from "../tools/annual-report.js";
 import { registerDocumentAuditTools } from "../tools/document-audit.js";
 import { registerReceiptInboxTools } from "../tools/receipt-inbox.js";
@@ -75,6 +76,7 @@ export function registerDomainTools(ctx: RegisterDomainToolsContext): void {
   registerAgingTools(publicServer, api, toolExposure);
   if (toolExposure.enableSales) registerRecurringInvoiceTools(publicServer, api);
   if (toolExposure.enableTaxTools) registerEstonianTaxTools(publicServer, api);
+  if (toolExposure.enableTaxTools) registerLimitedVatTool(publicServer, api, runtimeSafetyContext);
   if (toolExposure.enableAnnualReport) registerAnnualReportTools(publicServer, api);
   registerDocumentAuditTools(publicServer, api);
   registerReceiptInboxTools(publicServer, api, runtimeSafetyContext, toolExposure);

@@ -123,6 +123,12 @@ Call `run_accounting_report` with report="balance_sheet" and `date_to`: the last
 
 Verify balanced (assets = liabilities + equity).
 
+<!-- E_ARVELDAJA_FEATURE_START:limited-vat -->
+## Step 5b: Limited taxpayer VAT (only for status `limited`)
+
+Call `limited_vat` with `mode: "status"`. Only when `status` is `limited`: after the month's purchase invoices are confirmed and before the 20th of the next month, call `limited_vat` with `mode: "month"` and `month` (dry run). This is the company's own VAT on foreign services (KMS § 21), not the KMD settlement entries above. Show the owner the proposed journal (`PKM-YYYY-MM`), the KMD figures (rows 1, 4, 6/7 — "verify against the e-MTA KMD instructions") and `payment_deadline`. Offer each `review_items` entry inline (an unclassified supplier: yes/no "counts as a KMS § 10 lg 5 service" → `supplier_classifications`). Only after approval call it again with the same arguments, `execute: true` and the `plan_handle`. `already_booked` needs nothing; a `limited_vat_journal_conflict` needs the owner's review of the named journal. Status `none` with `registration_check` candidates: mention the possible registration duty and offer `mode: "guide"`.
+<!-- E_ARVELDAJA_FEATURE_END:limited-vat -->
+
 ## Step 6: Summary report
 
 ```

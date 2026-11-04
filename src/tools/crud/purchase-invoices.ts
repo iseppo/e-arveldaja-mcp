@@ -29,12 +29,12 @@ import type { RuntimeSafetyContext } from "../../runtime-safety-context.js";
 import { PURCHASE_INVOICE_PDF_CONFIRM_DOMAIN } from "../../purchase-invoice-confirm-plan.js";
 import { PlanStoreError } from "../../plan-store.js";
 import { withPurchaseInvoiceLock } from "../../documents/purchase-invoice-lock.js";
+import { isCompanyVatRegistered } from "../../company-vat-status.js";
 import {
   coerceId,
   idParam,
   invoiceListFilterParams,
   isoDateString,
-  isCompanyVatRegistered,
   jsonObjectArrayInput,
   jsonObjectInput,
   pageParam,

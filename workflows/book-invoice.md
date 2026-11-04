@@ -146,6 +146,11 @@ If there is no suitable basis either way, call `list_purchase_articles` or ask t
 - For a `KMS § 30` entertainment/representation note, do not mark input VAT deductible — book the cost gross: item net = the document gross, no VAT account, rate `"-"`, invoice `vat_price` 0 (the other exception to the exact document VAT) — and flag the `TuMS § 49 lg 4` representation-limit aspect to the user.
 - For a `KMS § 30 lg 4` passenger-car note, deduct at most 50% input VAT unless the user confirms a documented exception.
 - Surface every `tax_notes` entry verbatim (title + basis) in the Step 10 approval card so the user can confirm or override; never silently apply a restriction.
+<!-- E_ARVELDAJA_FEATURE_END:standard -->
+<!-- E_ARVELDAJA_FEATURE_START:limited-vat -->
+- A `KMS § 21 lg 1` tax note means a foreign supplier while the company is not fully VAT-registered (status `none` or `limited`, see `limited_vat` mode `status`). Book the invoice in the non-VAT form (no input VAT, no reverse charge) and show the note on the approval card. Status `none`: tell the owner a limited-taxpayer registration may be required and offer `limited_vat` mode `guide`. Status `limited`: say the VAT is booked later by the monthly `limited_vat` mode `month` run. The note never holds the booking.
+<!-- E_ARVELDAJA_FEATURE_END:limited-vat -->
+<!-- E_ARVELDAJA_FEATURE_START:standard -->
 
 ## Step 8: Determine VAT treatment
 

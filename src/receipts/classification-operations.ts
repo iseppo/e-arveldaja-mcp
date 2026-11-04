@@ -1,6 +1,7 @@
 import { plainFailureOutcome as fail, plainSuccessOutcome as ok, type OperationOutcome } from "../operation-outcome.js";
 import type { ApiContext } from "../tools/crud-tools.js";
-import { isCompanyVatRegistered, safeJsonParse, tagNotes } from "../tools/crud-tools.js";
+import { safeJsonParse, tagNotes } from "../tools/crud-tools.js";
+import { isCompanyVatRegistered } from "../company-vat-status.js";
 import type { RuntimeSafetyContext } from "../runtime-safety-context.js";
 import type { ExecutionPlanInput, PlanData, PlanRecord } from "../plan-store.js";
 import { canonicalPlanJson, stripUndefinedDeep } from "../tools/camt-plan.js";

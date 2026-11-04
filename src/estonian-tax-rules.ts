@@ -1,5 +1,6 @@
 import { roundMoney } from "./money.js";
 import { isStrictDate } from "./strict-date.js";
+import { buildLimitedVatGuidance, type LimitedVatGuidance } from "./limited-vat-guidance.js";
 
 // Date-gated Estonian tax reference data + deterministic detectors.
 //
@@ -488,6 +489,65 @@ export const ACCOUNTING_PROCESS_RULES: readonly TaxRuleReference[] = [
 ];
 
 /**
+ * Limited taxpayer (piiratud maksukohustuslane) rules for a non-VAT company
+ * that receives KMS § 10 lg 5 services from foreign businesses not registered
+ * in Estonia (verified 2026-11-04). Surfaced via `earveldaja://tax_rules` and
+ * `limited_vat` mode `guide`; the canonical owner guidance lives in
+ * src/limited-vat-guidance.ts.
+ */
+export const LIMITED_TAXPAYER_RULES: readonly TaxRuleReference[] = [
+  {
+    code: "KMS § 21 lg 1",
+    title: "Piiratud maksukohustuslaseks registreerimine välismaa teenuse saamisel",
+    summary:
+      "Eestis käibemaksukohustuslasena registreerimata isik, kes saab KMS § 10 lg 5 nimetatud teenuse Eestis registreerimata välismaa ettevõtjalt, peab end registreerima piiratud maksukohustuslaseks alates teenuse saamise päevast. Teenuste puhul piirmäära ei ole; 10 000 € piirmäär kehtib ainult kaupade ühendusesisesele soetamisele (§ 21 lg 2). Erand: ELi väikeettevõtja erikorra tarnija, kelle number lõpeb \"EX\".",
+    basis: "KMS § 21 lg 1–2",
+  },
+  {
+    code: "KMS § 21 lg 3",
+    title: "Avaldus 3 tööpäeva jooksul",
+    summary:
+      "Registreerimisavaldus esitatakse 3 tööpäeva jooksul; isik registreeritakse alates kohustuse tekkimise päevast. Varem võib registreerida vabatahtlikult (§ 21 lg 4).",
+    basis: "KMS § 21 lg 3–4",
+  },
+  {
+    code: "KMS § 10 lg 5",
+    title: "Teenused, mille saaja on maksukohustuslane",
+    summary:
+      "1) intellektuaalomandi õigused, 2) reklaam, 3) konsultatsiooni-, raamatupidamis-, õigus-, auditi-, inseneri-, tõlke-, andmetöötlus- ja infoteenus, 4) finants- ja kindlustusteenus (v.a seifirent), 5) personali andmine, 6) vallasasja rent (v.a transpordivahend), 7) elektroonilise side teenus, 8) elektrooniliselt osutatav teenus, 9) gaasi-, elektri- ja soojusvõrgu juurdepääs, 10) heitkoguse ühikud, 11) punktides 1–10 nimetatust hoidumine. Pilv/SaaS/AI API = p 3 ja/või p 8.",
+    basis: "KMS § 10 lg 5",
+  },
+  {
+    code: "KMS § 3 lg 5",
+    title: "Piiratud maksukohustuslane maksab käibemaksu saadud teenustelt",
+    summary:
+      "Piiratud maksukohustuslane maksab käibemaksu Eestis registreerimata välismaa ettevõtjalt saadud teenustelt (§ 3 lg 5, § 29 lg 12).",
+    basis: "KMS § 3 lg 5; KMS § 29 lg 12",
+  },
+  {
+    code: "KMS § 25 lg 1",
+    title: "Sisendkäibemaksu ei arvata maha",
+    summary:
+      "Piiratud maksukohustuslane ei arva sisendkäibemaksu maha ega lisa oma müügile käibemaksu; arvestatud käibemaks on kulu.",
+    basis: "KMS § 25 lg 1",
+  },
+  {
+    code: "KMS § 11 lg 1",
+    title: "Teenuse saamise aeg",
+    summary:
+      "Teenus loetakse saaduks varaseimal järgmistest: teenuse osutamine või (osaline) tasumine. Välisvaluuta arvestatakse eurodesse Euroopa Keskpanga selle päeva kursiga (§ 29 lg 13).",
+    basis: "KMS § 11 lg 1; KMS § 29 lg 13",
+  },
+  {
+    code: "KMS § 27 lg 2 p 2",
+    title: "KMD ainult tehingutega kuude kohta, tasumine 20. kuupäevaks",
+    summary:
+      "Piiratud maksukohustuslane esitab käibedeklaratsiooni ainult maksustamisperioodi kohta, kus selliseid tehinguid oli, ja tasub maksu maksustamisperioodile järgneva kuu 20. kuupäevaks (§ 38 lg 1).",
+    basis: "KMS § 27 lg 2 p 2; KMS § 38 lg 1",
+  },
+];
+
+/**
  * When the figures in this module were last verified against EMTA /
  * Riigi Teataja. Bump on every verification pass so the pull resource tells
  * the operator how fresh the reference data is.
@@ -505,6 +565,8 @@ export interface TaxRulesReference {
   deduction_and_limit_rules: readonly TaxRuleReference[];
   profit_distribution_rules: readonly TaxRuleReference[];
   accounting_process_rules: readonly TaxRuleReference[];
+  limited_taxpayer_rules: readonly TaxRuleReference[];
+  limited_taxpayer_guidance: LimitedVatGuidance;
 }
 
 /** Bundle the full Estonian tax reference dataset for the pull resource. */
@@ -522,6 +584,8 @@ export function buildTaxRulesReference(): TaxRulesReference {
     deduction_and_limit_rules: DEDUCTION_AND_LIMIT_RULES,
     profit_distribution_rules: PROFIT_DISTRIBUTION_RULES,
     accounting_process_rules: ACCOUNTING_PROCESS_RULES,
+    limited_taxpayer_rules: LIMITED_TAXPAYER_RULES,
+    limited_taxpayer_guidance: buildLimitedVatGuidance(),
   };
 }
 
