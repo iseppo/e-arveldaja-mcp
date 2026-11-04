@@ -62,6 +62,8 @@ function reviewCode(warnings: readonly string[] | undefined, reference: string):
 function simulate(rows: string[][], opening: RebuildOpening, options: { gains?: string[][]; fetch?: FetchMock } = {}) {
   return simulateLightyearYear({
     statementCsv: lightyearStatementCsv(rows), gainsCsv: options.gains ? gainsCsv(options.gains) : null,
+    // These fixtures stand for a complete export: from the day after the opening through --to.
+    statementPeriod: { from: new Date(Date.parse(`${opening.as_of}T00:00:00Z`) + 86_400_000).toISOString().slice(0, 10), to: "2026-10-30" },
     from: "2026-01-01", to: "2026-10-30", lightyearAccount: "TESTACCT1", opening, accounts: ACCOUNTS,
     ecb: { fetch: options.fetch ?? rateFetch(), today: () => "2026-10-31", now: () => new Date("2026-10-31T08:00:00Z"), cache: new Map() },
   });
@@ -195,13 +197,46 @@ describe("simulateLightyearYear (plan Q5)", () => {
       ["10/02/2026 09:00:00", "RW-TESTGAP02", "", "", "Reward", "0", "EUR", "0", "5", "1", "0", "5", "0"],
     ];
     const sim = await simulateLightyearYear({
-      statementCsv: lightyearStatementCsv(rows), gainsCsv: null,
+      statementCsv: lightyearStatementCsv(rows), gainsCsv: null, statementPeriod: { from: "2026-01-01", to: "2026-02-28" },
       from: "2026-02-01", to: "2026-02-28", lightyearAccount: "TESTACCT1", opening: { as_of: "2025-12-31", usd_cents: 10000, eur_cents: 10000, rate: "1" }, accounts: ACCOUNTS,
       ecb: { fetch: rateFetch("1"), today: () => "2026-10-31", now: () => new Date("2026-10-31T08:00:00Z"), cache: new Map() },
     });
     expect(sim.monthEnds).toEqual([expect.objectContaining({ month: "2026-02", usd_cents: 11000, eur_cents: 11000 })]);
     expect(sim.journals.map(journal => journal.document_number)).toEqual(["LY:RW-TESTGAP02"]);
     expect(sim.reviews).toEqual([]);
+  });
+
+  describe("rr-lightyear #1: statement coverage is the export's own, never the replay bounds", () => {
+    // Opening 2025-12-31 holds USD 100 / €100; the report is February; the export holds a February USD 50 purchase
+    // paid from the pool. Whether a January movement is missing can only be known from the export's coverage.
+    const opening: RebuildOpening = { as_of: "2025-12-31", usd_cents: 10000, eur_cents: 10000, rate: "1" };
+    const rows = [buy("10/02/2026 10:00:00", "OR-TESTCOV1", "50.00", "0")];
+    const run = (statementPeriod?: { from: string; to: string } | null) => simulateLightyearYear({
+      statementCsv: lightyearStatementCsv(rows), gainsCsv: null, ...(statementPeriod !== undefined ? { statementPeriod } : {}),
+      from: "2026-02-01", to: "2026-02-28", lightyearAccount: "TESTACCT1", opening, accounts: ACCOUNTS,
+      ecb: { fetch: rateFetch("1"), today: () => "2026-10-31", now: () => new Date("2026-10-31T08:00:00Z"), cache: new Map() },
+    });
+
+    it.each([
+      ["a February-only export (declared 2026-02-01..2026-02-28)", { from: "2026-02-01", to: "2026-02-28" }],
+      ["an export ending before the report end (declared 2026-01-01..2026-02-20)", { from: "2026-01-01", to: "2026-02-20" }],
+      ["an export without a declared period whose first row is after the opening", null],
+    ])("%s: the pool purchase is a gap review and no month-end holding is reported", async (_label, statementPeriod) => {
+      const sim = await run(statementPeriod);
+      if (statementPeriod === null || statementPeriod.from !== "2026-01-01") {
+        expect(reviewCode(sim.warnings, "OR-TESTCOV1")).toBe("usd_pool_statement_gap");
+        expect(sim.journals.some(journal => journal.document_number === "LY:OR-TESTCOV1")).toBe(false);
+      }
+      expect(sim.monthEnds).toEqual([]);
+      expect(sim.warnings.some(warning => warning.includes("[usd_pool_statement_gap]") && warning.includes("month-end"))).toBe(true);
+    });
+
+    it("an export covering the opening through the report end books the purchase and reports USD 50 / €50", async () => {
+      const sim = await run({ from: "2026-01-01", to: "2026-02-28" });
+      expect(sim.journals.map(journal => journal.document_number)).toEqual(["LY:OR-TESTCOV1"]);
+      expect(sim.monthEnds).toEqual([expect.objectContaining({ month: "2026-02", usd_cents: 5000, eur_cents: 5000 })]);
+      expect(sim.reviews).toEqual([]);
+    });
   });
 
   it("statement days set the month: 31/03 23:59:59 is March, 01/04 00:00:00 is April", async () => {

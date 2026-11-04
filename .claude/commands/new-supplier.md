@@ -96,7 +96,7 @@ Ask the user for any details to add:
 
 ## Step 5: Preview and ask for approval
 
-First re-check duplicates with the final identifiers: call `resolve_supplier` again with `auto_create: false` and every identifier now known (`name`, `reg_code`, `vat_no`, `iban`, `country`), and apply the step 3 branches again — a VAT number or IBAN added in step 4 can match an existing supplier the name missed. Repeat this whenever an identifying detail changes.
+First re-check duplicates with the final identifiers: call `resolve_supplier` again with `auto_create: false` and every identifier now known (`name`, `reg_code`, `vat_no`, `iban`, `country`), and apply the step 3 branches again — a registry code or VAT number added in step 4 can match an existing supplier the name missed. The IBAN is not a match key (it is only saved on the new client), so a known IBAN never proves the supplier is new or existing. Repeat this whenever an identifying detail changes.
 
 Before creating anything, present one approval card:
 - supplier name

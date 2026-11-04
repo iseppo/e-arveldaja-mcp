@@ -202,6 +202,9 @@ describe("astra prompt review 2026-11-04", () => {
   it("new-supplier re-checks final identifiers and stops on review holds and deactivated clients", () => {
     const body = render("new-supplier", "standard");
     expect(body).toContain("First re-check duplicates with the final identifiers");
+    // resolve_supplier matches registry code, VAT number and name only — never the IBAN.
+    expect(body).toContain("The IBAN is not a match key");
+    expect(body).not.toMatch(/IBAN added in step 4 can match/);
     expect(body).toContain("`requires_manual_review: true`: nothing was created and this is NOT an ordinary not-found result");
     expect(body).toContain("`registry_data.status: \"K\"`");
     expect(body).toContain("call `reactivate_client` with its ID");
