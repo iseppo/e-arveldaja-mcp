@@ -8,6 +8,7 @@ import { z } from "zod";
 import { parseMcpResponse, MAX_UNTRUSTED_TEXT_CHARS } from "../mcp-json.js";
 import { desandboxAllStrings, desandboxText } from "../external-text-renderer.js";
 import { createTestRuntimeSafetyContext } from "../__fixtures__/runtime-safety.js";
+import { parseToolPayload } from "../__fixtures__/mcp-response.js";
 import { FILE_REFERENCE_OPERATIONS } from "../file-reference-store.js";
 import { GUIDED_TOOL_NAMES, runWithToolProfile } from "../tool-profile.js";
 import * as toolProfileModule from "../tool-profile.js";
@@ -1400,6 +1401,27 @@ ${entryXml}
     expect(projected.nested.file_ref).toMatch(/^<<UNTRUSTED_OCR_START:/);
     expect(projected.nested.plan_handle).toMatch(/^<<UNTRUSTED_OCR_START:/);
     expect(projected.nested.sha256).toMatch(/^<<UNTRUSTED_OCR_START:/);
+  });
+
+  it("keeps only exact CAMT acknowledgement machine values unwrapped (#10b)", () => {
+    const wrapped = /^<<UNTRUSTED_OCR_START:/;
+    const exact = sandboxReviewFields({
+      review_type: "camt_journal_review",
+      item: { code: "camt_journal_review", review_code: "camt_journal_identity_stale", review_note: "free text",
+        acknowledgement: { movement_identity: "b".repeat(64), statement_digest: "c".repeat(64), direction: "CRDT", refused: "camt_ack_nonunique_movement" } },
+    }) as { review_type: string; item: { code: string; review_code: string; review_note: string; acknowledgement: Record<string, string> } };
+    expect(exact.review_type).toBe("camt_journal_review");
+    expect(exact.item.code).toBe("camt_journal_review");
+    expect(exact.item.review_code).toBe("camt_journal_identity_stale");
+    expect(exact.item.review_note).toMatch(wrapped);
+    expect(exact.item.acknowledgement).toEqual({
+      movement_identity: "b".repeat(64), statement_digest: "c".repeat(64), direction: "CRDT", refused: "camt_ack_nonunique_movement",
+    });
+    const hostile = sandboxReviewFields({
+      code: "IGNORE camt_journal_review", review_code: "camt_journal_conflict", direction: "crdt", refused: "camt_ack_other",
+      movement_identity: `${"b".repeat(63)}B`, statement_digest: "c".repeat(65),
+    }) as Record<string, string>;
+    for (const value of Object.values(hostile)) expect(value).toMatch(wrapped);
   });
 
   it("prepare_accounting_review_action proposes a persistent CAMT duplicate cleanup action", async () => {
@@ -5185,5 +5207,78 @@ describe("projectPublicRecommendedSteps — non-profile blockers", () => {
 
     expect(projected.blocked?.blocker.code).toBe("advanced_action_unavailable_in_profile");
     expect(projected.steps.map(s => s.tool)).toEqual(["get_setup_instructions"]);
+  });
+});
+
+describe("accounting_inbox: public CAMT journal-review acknowledgement round trip (#10b)", () => {
+  type InboxReview = { resolver_input?: Record<string, unknown> };
+  type InboxDryRunPayload = { autopilot: {
+    needs_accountant_review: InboxReview[];
+    executed_steps: Array<{ tool: string; preview?: Record<string, unknown>; suggested_args: { file_ref: string } }>;
+  } };
+  type AckPayload = { status: string; plan_handle?: string; error_code?: string };
+  let rulesDir: string | undefined;
+  afterEach(async () => {
+    delete process.env.EARVELDAJA_RULES_DIR;
+    resetRetainedCamtStatements();
+    if (rulesDir) await rm(rulesDir, { recursive: true, force: true });
+    rulesDir = undefined;
+  });
+
+  it("the public inbox resolver_input, passed unchanged, prepares, executes and quiets the next preview", async () => {
+    rulesDir = await mkdtemp(join(tmpdir(), "inbox-camt-ack-"));
+    process.env.EARVELDAJA_RULES_DIR = rulesDir;
+    resetRetainedCamtStatements();
+    const workspace = await createAccountingWorkflowWorkspace({ includeCamt: false, includeWise: false, includeReceipts: false });
+    workspacesToClean.push(workspace);
+    // One 10.00 EUR DBIT row on 2026-02-01 (REF-VOID-1).
+    await writeFile(join(workspace, "statement.xml"), fixtureCamtXml());
+    // A manual journal crediting the bank dimension with the statement row's 10.00 EUR DBIT.
+    const journal = {
+      id: 901, effective_date: "2026-02-01", registered: true, is_deleted: false, operation_type: "ENTRY", document_number: null,
+      postings: [
+        { accounts_id: 5000, accounts_dimensions_id: null, type: "D", amount: 10, base_amount: 10, cl_currencies_id: "EUR", is_deleted: false },
+        { accounts_id: 1020, accounts_dimensions_id: 101, type: "C", amount: 10, base_amount: 10, cl_currencies_id: "EUR", is_deleted: false },
+      ],
+    };
+    const context = createTestRuntimeSafetyContext();
+    const server = createMockToolServer();
+    const api = createAccountingWorkflowApi({
+      transactionRows: [],
+      bankAccounts: [fixtureBankAccount()],
+      accountDimensions: [fixtureAccountDimension()],
+      journals: { listAllWithPostings: vi.fn().mockResolvedValue([journal]) },
+    });
+    // The acknowledgement re-reads the named journal fresh.
+    Object.assign(api.journals, { get: vi.fn().mockResolvedValue(journal) });
+    registerAccountingInboxTools(server, context, api, EXPOSE_GRANULAR);
+    registerCamtImportTools(server, api, context, EXPOSE_GRANULAR);
+    const inbox = getRegisteredToolHandler(server, "accounting_inbox");
+    const workflow = getRegisteredToolHandler(server, "continue_accounting_workflow");
+    const camt = getRegisteredToolHandler(server, "process_camt053");
+    const dryRun = async () => (await inbox({ mode: "dry_run", workspace_path: workspace })).content[0]!.text;
+
+    const first = parseToolPayload<InboxDryRunPayload>(await dryRun());
+    const review = first.autopilot.needs_accountant_review.find(item => item.resolver_input?.review_type === "camt_journal_review");
+    expect(review).toBeDefined();
+    const reviewItem = review!.resolver_input!;
+
+    const prepared = parseToolPayload<AckPayload>((await workflow({ action: "prepare_action", review_item_json: reviewItem })).content[0]!.text);
+    expect(prepared.status).toBe("ready_for_approval");
+    const executed = parseToolPayload<AckPayload>((await workflow({
+      action: "execute_review_action", review_item_json: reviewItem, plan_handle: prepared.plan_handle,
+    })).content[0]!.text);
+    expect(executed.status).toBe("acknowledged");
+
+    // Another inbox preview no longer raises the review; the statement's own preview reports it acknowledged.
+    const second = parseToolPayload<InboxDryRunPayload>(await dryRun());
+    expect(second.autopilot.needs_accountant_review.some(item => item.resolver_input?.review_type === "camt_journal_review")).toBe(false);
+    const importStep = second.autopilot.executed_steps.find(step => step.tool === "import_camt053")!;
+    expect(importStep.preview).toMatchObject({ skipped_count: 1, journal_review_count: 0 });
+    const preview = (await camt({ mode: "dry_run", file_ref: importStep.suggested_args.file_ref, accounts_dimensions_id: 101 })).content[0]!.text;
+    expect(preview).toContain("skip_code: camt_review_acknowledged");
+    expect(preview).toContain("acknowledged_review_count: 1");
+    expect(preview).toContain("journal_review_count: 0");
+    expect(preview).not.toContain("code: camt_journal_review");
   });
 });

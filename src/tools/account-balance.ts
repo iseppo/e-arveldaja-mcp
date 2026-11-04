@@ -350,13 +350,25 @@ function roundingDifferences(
 
 const byNullableId = (a: number | null | undefined, b: number | null | undefined) => (a ?? -1) - (b ?? -1);
 
-/** With `date_from`, an INITIAL dated before it is in the opening figure, not "left out". */
+/**
+ * With `date_from`, an INITIAL dated before it feeds the opening figure, not "left out" —
+ * but only through postings inside the account/dimension/client filter (`included`).
+ */
 function openingBeforeWindowWarnings(warnings: string[], opening: OpeningBalanceJournal | null, dateFrom: string | undefined, included: boolean): string[] {
-  if (!opening || !dateFrom || !included || opening.openingDate >= dateFrom) return warnings;
+  if (!opening || !dateFrom || opening.openingDate >= dateFrom) return warnings;
   const outside = `API INITIAL opening balance (as of ${opening.openingDate}) is outside this date range and is not included in these figures.`;
   return warnings.map(warning => warning === outside
-    ? `API INITIAL opening balance (as of ${opening.openingDate}) is before date_from: it is in opening_balance_at_date_from and closing_balance, not in the period figures.`
+    ? included
+      ? `API INITIAL opening balance (as of ${opening.openingDate}) is before date_from: it is in opening_balance_at_date_from and closing_balance, not in the period figures.`
+      : `API INITIAL opening balance (as of ${opening.openingDate}) is before date_from but has no posting within this account, dimension and client filter, so it adds nothing to opening_balance_at_date_from or closing_balance.`
     : warning);
+}
+
+/** Whether the INITIAL has a nonzero active posting the account/dimension/client filters keep. */
+function openingInFilter(opening: OpeningBalanceJournal | null, accountId: number, dimensionId: number | undefined, clientId: number | undefined): boolean {
+  if (!opening || (clientId !== undefined && opening.journal.clients_id !== clientId)) return false;
+  return (opening.journal.postings ?? []).some(p => !p.is_deleted && p.accounts_id === accountId &&
+    (dimensionId === undefined || p.accounts_dimensions_id === dimensionId) && (p.base_amount ?? p.amount) !== 0);
 }
 
 export function registerAccountBalanceTools(server: McpServer, api: ApiContext): void {
@@ -403,7 +415,8 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
 
       const baseWarnings = drafts.warning ? [drafts.warning] : [];
       const unattributedOpening = accounts_dimensions_id !== undefined
-        ? unattributedOpeningBalanceWarning(opening, account_id, date_from, date_to)
+        // No lower bound: an INITIAL before date_from still feeds opening_balance_at_date_from.
+        ? unattributedOpeningBalanceWarning(opening, account_id, undefined, date_to)
         : undefined;
       if (unattributedOpening) baseWarnings.push(unattributedOpening);
 
@@ -459,7 +472,7 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
           entries: result.entries.map(e => ({ ...e, title: wrapUntrustedOcr(e.title) ?? e.title })),
         }),
         ...(drafts.unregistered_drafts && { unregistered_drafts: drafts.unregistered_drafts }),
-        warnings: openingBeforeWindowWarnings(warnings, opening, date_from, clients_id === undefined || opening?.journal.clients_id === clients_id),
+        warnings: openingBeforeWindowWarnings(warnings, opening, date_from, openingInFilter(opening, account_id, accounts_dimensions_id, clients_id)),
       };
 
       return { content: [{ type: "text", text: toMcpJson(summary) }] };

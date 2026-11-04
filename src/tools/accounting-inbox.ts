@@ -50,6 +50,7 @@ import {
   buildCamtReviewAcknowledgementPrepareResponse,
   isCamtJournalReviewItem,
 } from "./camt-review-acknowledgement-action.js";
+import { isAcknowledgeableCamtReviewCode, isCamtAckRefusalCode } from "../camt/review-acknowledgement.js";
 import { assertRuntimeSafetyContext, type RuntimeSafetyContext } from "../runtime-safety-context.js";
 import { FILE_REFERENCE_OPERATIONS } from "../file-reference-store.js";
 import { captureFileInputSnapshot, type FileInputSnapshot } from "../file-input-snapshot.js";
@@ -1413,7 +1414,8 @@ function publicQuestion(question: InboxQuestion): InboxQuestion {
 const REVIEW_TYPED_DATE_KEY = /(?:^|_)(?:date|datetime|timestamp|at|date_from|date_to)$/;
 const REVIEW_TYPED_DATE_VALUE = /^\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z)?$/;
 function isCanonicalReviewOpaqueValue(key: string, value: string): boolean {
-  if (key === "sha256") return /^[0-9a-f]{64}$/.test(value);
+  // CAMT acknowledgement identities (#10b): lowercase SHA-256 hex only.
+  if (key === "sha256" || key === "movement_identity" || key === "statement_digest") return /^[0-9a-f]{64}$/.test(value);
   if (key !== "file_ref" && key !== "plan_handle") return false;
   if (!/^[A-Za-z0-9_-]{43}$/.test(value)) return false;
   try {
@@ -1428,7 +1430,16 @@ function isReviewMachineEnum(key: string, value: string): boolean {
   switch (key) {
     case "review_type":
       return value === "receipt_review" || value === "classification_group" ||
-        value === "camt_possible_duplicate" || value === "unknown";
+        value === "camt_possible_duplicate" || value === "camt_journal_review" || value === "unknown";
+    // CAMT journal-review acknowledgement machine fields (#10b).
+    case "code":
+      return value === "camt_journal_review";
+    case "review_code":
+      return isAcknowledgeableCamtReviewCode(value);
+    case "direction":
+      return value === "CRDT" || value === "DBIT";
+    case "refused":
+      return isCamtAckRefusalCode(value);
     case "source_tool":
       return value === "receipt_batch" || value === "process_receipt_batch" ||
         value === "classify_bank_transactions" || value === "classify_unmatched_transactions" ||
