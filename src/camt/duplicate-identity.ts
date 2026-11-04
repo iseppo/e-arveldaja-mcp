@@ -942,13 +942,15 @@ function existingDuplicateKeysByKind(
   // nameless and stored (and signed) the row so. The bank's v02 export of the
   // same movement cannot tell, so every named entry also claims its nameless key;
   // every other field (bank reference, date, amount, IBAN, text) must still agree.
+  // The nameless key has lost the name, so it is lossy: findLossyIdentityConflicts
+  // holds it when another statement entry could own the same row.
   const nameless: Array<Partial<ParsedCamtEntry>> = normalizeOptionalReference(entry.counterparty_name) ? [{ counterparty_name: undefined }] : [];
   for (const legacy of [...(entry.legacy_identities ?? []), ...nameless]) {
     const legacyEntry = { ...entry, ...legacy, legacy_identities: undefined };
     const legacyKeys = existingDuplicateKeysByKind(legacyEntry, selectedDimensionId);
     for (const key of [...legacyKeys.current, ...legacyKeys.alias]) {
       if (!current.includes(key)) alias.add(key);
-      (legacyKeys.lossy.has(key) ? lossy : exact).add(key);
+      (legacy === nameless[0] || legacyKeys.lossy.has(key) ? lossy : exact).add(key);
     }
   }
   return { current, alias: [...alias], lossy: new Set([...lossy].filter((key) => !exact.has(key))) };
@@ -1017,10 +1019,25 @@ export function findLossyIdentityConflicts(
   for (const [batchKey, { keys }] of keysByBatchKey) {
     for (const key of keys.lossy) pushToMap(claimantsByKey, key, batchKey);
   }
+  // A genuinely nameless entry whose exact key is a named entry's nameless
+  // alias competes for the same stored row.
+  const namedClaimed = new Set([...claimantsByKey].filter(([, claimants]) =>
+    claimants.some((batchKey) => normalizeOptionalReference(keysByBatchKey.get(batchKey)!.entry.counterparty_name))).map(([key]) => key));
+  const exactCompetitors = new Map<string, Set<string>>();
+  for (const [batchKey, { entry, keys }] of keysByBatchKey) {
+    if (normalizeOptionalReference(entry.counterparty_name)) continue;
+    for (const key of [...keys.current, ...keys.alias]) {
+      if (keys.lossy.has(key) || !namedClaimed.has(key)) continue;
+      pushToMap(claimantsByKey, key, batchKey);
+      if (!exactCompetitors.has(batchKey)) exactCompetitors.set(batchKey, new Set());
+      exactCompetitors.get(batchKey)!.add(key);
+    }
+  }
   const occurrences = findExactKeyOccurrences(entries, selectedDimensionId);
   const untruncatedIdentity = (entry: ParsedCamtEntry) => JSON.stringify([
     normalizeBatchDuplicateKeyPart(entry.counterparty_iban),
     normalizeBatchDuplicateKeyPart(markerSafeDescription(entry.description)),
+    normalizeBatchDuplicateKeyPart(entry.counterparty_name),
   ]);
   const held = new Set<string>();
   for (const [key, claimants] of claimantsByKey) {
@@ -1032,6 +1049,7 @@ export function findLossyIdentityConflicts(
       const { keys } = keysByBatchKey.get(batchKey)!;
       const entryOccurrences = occurrences.get(batchKey);
       const nonLossyMatch = [...keys.current, ...keys.alias].some((candidate) => !keys.lossy.has(candidate) &&
+        !exactCompetitors.get(batchKey)?.has(candidate) &&
         (lookup.byEntryKey.get(candidate)?.length ?? 0) >= Math.max(1, entryOccurrences?.get(candidate) ?? 1));
       if (!nonLossyMatch) held.add(batchKey);
     }

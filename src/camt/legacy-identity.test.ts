@@ -500,4 +500,29 @@ describe("CAMT re-import against rows a pre-<Pty> release imported from camt.053
     const rerun = await project(statement(true, movement(true)), other);
     expect(rerun.skipped.filter(row => row.review_note === undefined && row.duplicate_transaction_ids.length > 0)).toHaveLength(0);
   });
+
+  const batchLeg = (name?: string) => `<TxDtls><AmtDtls><TxAmt><Amt Ccy="EUR">25.00</Amt></TxAmt></AmtDtls>` +
+    (name ? `<RltdPties><Cdtr><Nm>${name}</Nm></Cdtr></RltdPties>` : "") + `</TxDtls>`;
+  /** One <Ntry>, bank reference BATCH1, two €25 legs, no IBAN or remittance. */
+  const batch = (first?: string, second?: string) => statement(false,
+    `<Ntry><Amt Ccy="EUR">50.00</Amt><CdtDbtInd>DBIT</CdtDbtInd><BookgDt><Dt>2026-03-10</Dt></BookgDt>` +
+    `<AcctSvcrRef>BATCH1</AcctSvcrRef><NtryDtls>${batchLeg(first)}${batchLeg(second)}</NtryDtls></Ntry>`);
+
+  it.each([
+    ["two named legs (Alpha Store, Beta Store)", "Beta Store"],
+    ["a named leg and a genuinely nameless leg", undefined],
+  ] as const)("holds every claimant when %s compete for one nameless old row", async (_name, second) => {
+    const xml = batch("Alpha Store", second);
+    expect(loaded(xml).entries.map(e => e.counterparty_name)).toEqual(["Alpha Store", second]);
+    // Only the second leg is in the ledger, stored nameless by the pre-<Pty> release.
+    const old = await project(preFixV08(xml), []);
+    expect(old.descriptors).toHaveLength(2);
+    const ledger = readBack(old).slice(1, 2);
+    expect(ledger[0]!.bank_account_name).toBeNull();
+    const rerun = await project(xml, ledger);
+    expect(rerun.descriptors).toHaveLength(0);
+    expect(rerun.skipped).toHaveLength(2);
+    expect(rerun.skipped.filter(row => row.duplicate_transaction_ids.length > 0)).toHaveLength(0);
+    expect(rerun.skipped.every(row => row.skip_code === "camt_lossy_identity_ambiguous")).toBe(true);
+  });
 });
