@@ -781,7 +781,8 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext, run
               found: false,
               created: false,
               code: "legal_entity_identity_required",
-              reason: resolution.reason,
+              // The reason echoes caller-supplied identity text (registry code, country).
+              reason: resolution.reason === undefined ? undefined : sandboxExternalText(resolution.reason),
               suggestion:
                 "Refusing to auto-create a supplier without a verified legal-entity identity. Supply a checksum-valid Estonian registry code (reg_code), set is_physical_entity=true for a natural person, or set foreign_identity_attested=true for an operator-verified foreign registration.",
             } satisfies ResolveSupplierRefusalPayload),
@@ -815,7 +816,9 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext, run
               requires_manual_review: true,
               ...(deactivated ? { code: "supplier_client_deactivated" as const } : {}),
               ...(resolution.match_type === "strong_identifier_conflict" ? { match_type: "strong_identifier_conflict" as const } : {}),
-              ...(resolution.reason !== undefined ? { reason: resolution.reason } : {}),
+              // The reason interpolates supplied and stored identifiers after their
+              // sandbox markers were stripped for matching: re-wrap (and cap) it.
+              ...(resolution.reason !== undefined ? { reason: sandboxExternalText(resolution.reason) } : {}),
               ...(resolution.registry_data !== undefined ? { registry_data: renderRegistryDataForDisplay(resolution.registry_data) } : {}),
               suggestion: deactivated
                 ? "Nothing was created. The matching client is deactivated: after the user approves, reactivate it with reactivate_client and re-read it. Never create a replacement supplier for it."

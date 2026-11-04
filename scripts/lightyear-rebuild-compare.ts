@@ -21,7 +21,7 @@ import { loadAllConfigs, loadDotenvFiles } from "../src/config.js";
 import { JournalsApi } from "../src/api/journals.api.js";
 import { ReferenceDataApi } from "../src/api/readonly.api.js";
 import { resolveEcbRate } from "../src/fx/ecb-rates.js";
-import { usdCentsToEurCents, lightyearAccountFromFileName } from "../src/lightyear/usd-pool.js";
+import { usdCentsToEurCents, lightyearAccountFromFileName, statementPeriodFromFileName } from "../src/lightyear/usd-pool.js";
 import {
   GetOnlyHttpClient,
   REBUILD_USAGE,
@@ -85,6 +85,8 @@ async function main(): Promise<void> {
   const sim = await simulateLightyearYear({
     statementCsv: readFileSync(args.statement, "utf8"), gainsCsv: args.gains === null ? null : readFileSync(args.gains, "utf8"),
     from: args.from, to: args.to, lightyearAccount, opening, accounts, ecb,
+    // The export's own coverage from its file name; without one the rows must prove it.
+    statementPeriod: statementPeriodFromFileName(basename(args.statement)),
     ...(chart ? { chart } : {}),
   });
 

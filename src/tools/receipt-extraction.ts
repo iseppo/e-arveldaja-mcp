@@ -2495,12 +2495,14 @@ function extractAmountsFromTextWithMetadata(text: string): ExtractedAmountsWithM
     // amount as its gross ("Remondifond … 17.70 0.00 KM-ta 17.70", the #5c
     // item line). Any other money before the label ("Ettemaks 10,00 KM-ta
     // 200,00") keeps it, and every amount on the row is a candidate
-    // ("Netosumma 100,00 Vahesumma 162,45" keeps 100,00).
+    // ("Netosumma 100,00 Vahesumma 162,45" keeps 100,00) except an amount
+    // printed under the row's own VAT label ("Netosumma 162,45 Käibemaks
+    // 30,02": 30,02 is the VAT, not a second net).
     const netLabel = classified.hasNetLikeLabel ? RECEIPT_NET_LABEL_RE.exec(classified.line) : null;
     const isExemptItemRow = netLabel !== null && MIXED_VAT_EXEMPT_ITEM_MARKER_RE.test(netLabel[0]) &&
       isExemptItemRowAround(classified.line.slice(0, netLabel.index), classified.line.slice(netLabel.index + netLabel[0].length));
     if (!classified.blockedAsReference && netLabel && classified.amounts.length > 0 && !isExemptItemRow) {
-      netLabelAmounts.push(...classified.amounts);
+      netLabelAmounts.push(...amountsOutsideVatLabelSegments(classified.line, classified.amounts, documentContext));
     }
 
     if (
@@ -4336,6 +4338,35 @@ const MIXED_VAT_MONEY_BEFORE_RE = /\d[.,]\d{2}(?!\d)/;
 const MIXED_VAT_EXEMPT_ITEM_MARKER_RE = /^(?:km-ta|\(km-ta\)|käibemaksuta)$/i;
 const MIXED_VAT_ITEM_NET_ZERO_VAT_BEFORE_RE = /(?:^|\s)(\d+[.,]\d{2})\s+0[.,]00\s*$/;
 const MIXED_VAT_ITEM_GROSS_AFTER_RE = /^\s*(?:€|eur)?\s*(\d+[.,]\d{2})\s*(?:€|eur)?\s*$/i;
+
+// A standalone VAT-amount label ("Käibemaks", "KM", "VAT", "Tax"). Not the net labels
+// "Käibemaksuta" / "KM-ta", not "Käibemaksuga" (a rated subtotal).
+const VAT_AMOUNT_LABEL_TOKEN_RE = /(?<![\p{L}\p{N}-])(?:käibemaks|km|vat|tax)(?![\p{L}\p{N}]|-ta\b)/giu;
+// "ilma KM", "without VAT", "excl. VAT", "incl. VAT", "sisaldab käibemaksu": not a VAT amount label.
+const VAT_LABEL_QUALIFIER_BEFORE_RE = /(?:ilma|without|excl\.?|excluding|ex\.?|incl\.?|including|sisaldab)\s*$/i;
+
+/**
+ * A net-labelled row's amounts minus those printed after a standalone VAT label, up to the
+ * row's next net label ("Netosumma 162,45  Käibemaks 30,02" gives 162,45). A value printed
+ * in both places is kept; a row without such a VAT label keeps every amount.
+ */
+function amountsOutsideVatLabelSegments(line: string, amounts: readonly number[], documentContext: string): number[] {
+  const netLabels = [...line.matchAll(new RegExp(RECEIPT_NET_LABEL_RE.source, "gi"))]
+    .map(match => ({ start: match.index, end: match.index + match[0].length }));
+  let scoped = line;
+  let blanked = false;
+  for (const match of line.matchAll(VAT_AMOUNT_LABEL_TOKEN_RE)) {
+    const start = match.index;
+    if (netLabels.some(label => start >= label.start && start < label.end)) continue;
+    if (VAT_LABEL_QUALIFIER_BEFORE_RE.test(line.slice(0, start))) continue;
+    const end = netLabels.find(label => label.start > start)?.start ?? line.length;
+    scoped = scoped.slice(0, start) + " ".repeat(end - start) + scoped.slice(end);
+    blanked = true;
+  }
+  if (!blanked) return [...amounts];
+  const kept = new Set(extractAmountsFromLine(scoped, documentContext));
+  return amounts.filter(amount => kept.has(amount));
+}
 
 /** An exempt item row around its marker: "17.70 0.00" before it and the same 17.70 as the row's only figure after it. */
 function isExemptItemRowAround(before: string, after: string): boolean {

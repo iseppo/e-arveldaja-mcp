@@ -672,7 +672,7 @@ the same ownership rules.
 Read-only rebuild (`src/lightyear/rebuild.ts`, script `npm run lightyear:rebuild-compare`): `simulateLightyearYear`
 runs the production planners `extractLightyearDistributions` / `planLightyearDistributions` / `planLightyearTrades`
 (the code `book_lightyear_distributions` and `book_lightyear_trades` run after reading their files) over an
-in-memory ledger and pool store from an asserted opening (every statement row after the opening is replayed; output is limited to `--from..--to`), so it stops with production's review codes;
+in-memory ledger and pool store from an asserted opening (every statement row after the opening is replayed; output is limited to `--from..--to`; pool coverage is the export's file-name period, else what its rows prove, never the replay bounds, and without coverage from the opening through `--to` no month-end holding is reported), so it stops with production's review codes;
 `compareWithBooks` (pure) diffs the proposal with live journals over the run's inclusive `--from..--to` range per account/month, `LY:` reference (equal = one
 journal, same effective date, same posting multiset) and broker TRANSACTION transfers. The script's `GetOnlyHttpClient` throws on any non-GET before sending; nothing is written.
 
