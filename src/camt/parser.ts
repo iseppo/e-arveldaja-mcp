@@ -259,17 +259,24 @@ function extractIban(account: unknown): string | undefined {
   return sourceTextAt(account, ["Id", "IBAN"]);
 }
 
+// camt.053.001.08 (LHV's newer export) wraps the party in <Pty>
+// (<Dbtr><Pty><Nm>…</Nm></Pty></Dbtr>); camt.053.001.02 puts <Nm>/<Id> directly
+// under <Dbtr>. A party given only as an agent (<Dbtr><Agt>) has no name or code.
+function partyOf(node: unknown): unknown {
+  return valueAt(node, ["Pty"]) ?? node;
+}
+
 function pickCounterparty(txDetails: unknown, direction: "CRDT" | "DBIT"): { party?: unknown; account?: unknown } {
   const parties = valueAt(txDetails, ["RltdPties"]);
   if (direction === "CRDT") {
     return {
-      party: valueAt(parties, ["Dbtr"]),
+      party: partyOf(valueAt(parties, ["Dbtr"])),
       account: valueAt(parties, ["DbtrAcct"]),
     };
   }
 
   return {
-    party: valueAt(parties, ["Cdtr"]),
+    party: partyOf(valueAt(parties, ["Cdtr"])),
     account: valueAt(parties, ["CdtrAcct"]),
   };
 }
@@ -559,7 +566,8 @@ function buildStatement(xml: string, rejected: ImportRejectedField[]): CamtParse
       statement_id: sourceTextAt(statement, ["Id"]),
       iban: accountIban,
       currency: accountCurrency,
-      bank_bic: textAt(statement, ["Acct", "Svcr", "FinInstnId", "BIC"]),
+      bank_bic: textAt(statement, ["Acct", "Svcr", "FinInstnId", "BIC"])
+        ?? textAt(statement, ["Acct", "Svcr", "FinInstnId", "BICFI"]),
       bank_name: sourceTextAt(statement, ["Acct", "Svcr", "FinInstnId", "Nm"]),
       period: { from: periodFrom, to: periodTo },
       opening_balance: openingBalance,
