@@ -253,7 +253,7 @@ export interface FieldProvenance {
     | "ref_number"
     | "currency";
   value: string | number;
-  source: "label" | "regex" | "coordinate" | "fallback" | "ocr" | "registry" | "unknown";
+  source: "label" | "regex" | "coordinate" | "fallback" | "ocr" | "unknown";
   pageNum?: number;
   bbox?: { x: number; y: number; width: number; height: number };
   confidence?: number;

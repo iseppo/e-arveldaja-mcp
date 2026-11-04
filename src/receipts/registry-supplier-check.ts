@@ -5,17 +5,25 @@
  * page either named the wrong block (a bank, a buyer) or carries another
  * party's code.
  *
- * - The register's name is printed on the page, the read name has no supplier
- *   label and the register's name sits under no other party's role label → the
- *   supplier name becomes the register's name.
- * - The register's name is printed but either condition fails (a labelled
- *   "Müüja: X" against a bank's or buyer's code) → both companies are on the
- *   page and the code is not X's: `supplier_identifier_ambiguous` holds it.
- * - The register's name is not on the page → an extraction note only. The
- *   page's name may be OCR noise or a brand; supplier resolution still matches
- *   by the code and names a new client from the register (P2 E1).
+ * The check never changes `supplier_name` or any other field supplier
+ * resolution reads: the name is evidence the resolver compares against the
+ * code (a strong-identifier conflict needs it), and a replaced name can match
+ * a different client by name (review 2026-11-04 r1/r2). It reports:
+ *
+ * - The register's name is printed on the page, under a supplier label-free
+ *   read name and no other party's role label → an extraction note naming the
+ *   register's company. Resolution still matches by the code, and a new client
+ *   is still named by the register (P2 E1).
+ * - The register's name is printed and the read name is labelled ("Müüja: X")
+ *   or the register's name sits under another party's role label (bank, buyer)
+ *   → both companies are on the page and the code may not be the supplier's:
+ *   `supplier_identifier_ambiguous` holds it.
+ * - The register's name is not on the page → an extraction note.
  * - No lookup (no Estonian code, own code, register unreachable or nameless)
  *   leaves the extraction exactly as it is.
+ *
+ * The register's name appears only inside extraction notes, which every
+ * output site caps and sandbox-wraps.
  */
 import { distance } from "fastest-levenshtein";
 import { normalizeCompanyName } from "../company-name.js";
@@ -105,21 +113,7 @@ export async function crossCheckSupplierWithRegistry(
       supplier_identifier_ambiguous: true,
       extraction_notes: [
         ...(extracted.extraction_notes ?? []),
-        `Registry code ${regCode} belongs to another company in the Estonian business register, and that company is also printed on the document (${nameLabelled ? "the supplier name is labelled" : "under another party's label"}); verify which company is the supplier and whose code this is.`,
-      ],
-    };
-  }
-  if (printed) {
-    return {
-      ...extracted,
-      supplier_name: registryName,
-      field_provenance: [
-        ...(extracted.field_provenance ?? []).filter(entry => entry.field !== "supplier_name"),
-        { field: "supplier_name", value: registryName, source: "registry", rationale: "registry_name_on_page" },
-      ],
-      extraction_notes: [
-        ...(extracted.extraction_notes ?? []),
-        `Supplier name taken from the Estonian business register for registry code ${regCode}: the register's name is printed on the document, the line first read as the supplier is not that company.`,
+        `The Estonian business register names "${registryName}" for registry code ${regCode}, a different company from the supplier read, and that company is also printed on the document (${nameLabelled ? "the supplier name is labelled" : "under another party's label"}); verify which company is the supplier and whose code this is.`,
       ],
     };
   }
@@ -127,7 +121,9 @@ export async function crossCheckSupplierWithRegistry(
     ...extracted,
     extraction_notes: [
       ...(extracted.extraction_notes ?? []),
-      `Registry code ${regCode} belongs to another company in the Estonian business register, and that company's name is not printed on the document; check that the code is the supplier's.`,
+      printed
+        ? `The Estonian business register names "${registryName}" for registry code ${regCode}, and that name is printed on the document: the supplier read here is probably another line (a bank or footer). Supplier matching uses the registry code.`
+        : `The Estonian business register names "${registryName}" for registry code ${regCode}, and that name is not printed on the document; check that the code is the supplier's.`,
     ],
   };
 }

@@ -30,6 +30,9 @@ const fields = (overrides: Partial<ExtractedReceiptFields> = {}): ExtractedRecei
   ...overrides,
 });
 
+/** Everything but the check's own outputs (notes, the ambiguity hold). */
+const withoutNotes = ({ extraction_notes: _notes, supplier_identifier_ambiguous: _ambiguous, ...rest }: ExtractedReceiptFields) => rest;
+
 const registry = (name: string | null) => vi.fn(async () => (name === null ? null : { name }));
 
 afterEach(() => {
@@ -38,16 +41,42 @@ afterEach(() => {
 });
 
 describe("crossCheckSupplierWithRegistry", () => {
-  it("takes the register's name when it is printed on the page and the read name is another company", async () => {
+  it("names the register's company in a note when it is printed on the page, changing no resolution field", async () => {
     const lookup = registry("Näidis Stuudio OÜ");
-    const result = await crossCheckSupplierWithRegistry(fields(), { lookup, ownCompanyRegistryCode: "12000005", ownCompanyName: "Proovi OÜ" });
+    const input = fields();
+    const result = await crossCheckSupplierWithRegistry(input, { lookup, ownCompanyRegistryCode: "12000005", ownCompanyName: "Proovi OÜ" });
     expect(lookup).toHaveBeenCalledWith("10000018");
-    expect(result.supplier_name).toBe("Näidis Stuudio OÜ");
-    expect(result.field_provenance).toEqual([
-      { field: "supplier_name", value: "Näidis Stuudio OÜ", source: "registry", rationale: "registry_name_on_page" },
+    expect(withoutNotes(result)).toEqual(input);
+    expect(result.extraction_notes).toEqual([
+      expect.stringMatching(/register names "Näidis Stuudio OÜ" for registry code 10000018, and that name is printed on the document/),
     ]);
-    expect(result.extraction_notes?.join(" ")).toMatch(/business register for registry code 10000018/);
     expect(buildExtractionConfidenceSignals(result, {})).toEqual({});
+  });
+
+  it.each([
+    ["a customer label the role list does not know", "Õige Stuudio OÜ\nArve nr INV-731\nKuupäev 01.10.2026\nTellija: Näidis Finants AS\nReg-kood 10000018\nKokku 124 EUR"],
+    ["a bank heading three lines above the bank's name", "Õige Stuudio OÜ\nArve nr INV-731\nPanga andmed:\nIBAN EE471000001020145685\nSWIFT NDEAEE2X\nNäidis Finants AS\nReg-kood 10000018"],
+  ])("keeps every field resolution reads when the code belongs to another printed party (%s)", async (_label, raw) => {
+    // Supplier resolution compares the read name with the code (strong-identifier
+    // conflict); the check must never replace that evidence (review r2, finding 1).
+    const input: ExtractedReceiptFields = {
+      supplier_name: "Õige Stuudio OÜ",
+      supplier_reg_code: "10000018",
+      raw_text: raw,
+      field_provenance: [{ field: "supplier_name", value: "Õige Stuudio OÜ", source: "ocr", rationale: "top_line" }],
+    };
+    const result = await crossCheckSupplierWithRegistry(input, { lookup: registry("Näidis Finants AS") });
+    expect(withoutNotes(result)).toMatchObject(input);
+    expect(result.supplier_name).toBe("Õige Stuudio OÜ");
+  });
+
+  it("does not hand resolution a register name that a legal-form twin could match", async () => {
+    // Register: 10000018 is "Näidis Stuudio AS"; a code-less "Näidis Stuudio OÜ" client
+    // would win a relaxed name match if the name were replaced (review r2, finding 2).
+    const input = fields({ raw_text: `Näidis Stuudio AS\nReg-kood 10000018\nKokku 124 EUR\nNäidis Finants AS IBAN EE471000001020145685` });
+    const result = await crossCheckSupplierWithRegistry(input, { lookup: registry("Näidis Stuudio AS") });
+    expect(result.supplier_name).toBe("Näidis Finants AS");
+    expect(withoutNotes(result)).toEqual(input);
   });
 
   it("holds instead of renaming a labelled supplier to the company the code belongs to", async () => {
@@ -59,7 +88,7 @@ describe("crossCheckSupplierWithRegistry", () => {
       field_provenance: [{ field: "supplier_name", value: "Õige Stuudio OÜ", source: "label", rationale: "labeled" }],
     };
     const result = await crossCheckSupplierWithRegistry(input, { lookup: registry("Näidis Finants AS") });
-    expect(result.supplier_name).toBe("Õige Stuudio OÜ");
+    expect(withoutNotes(result)).toEqual(input);
     expect(result.supplier_identifier_ambiguous).toBe(true);
     expect(result.extraction_notes?.join(" ")).toMatch(/also printed on the document \(the supplier name is labelled\)/);
     expect(buildExtractionConfidenceSignals(result, {}).supplier_identifier_ambiguous).toBe(true);
@@ -73,7 +102,7 @@ describe("crossCheckSupplierWithRegistry", () => {
       field_provenance: [{ field: "supplier_name", value: "Õige Stuudio OÜ", source: "label", rationale: "labeled" }],
     };
     const result = await crossCheckSupplierWithRegistry(input, { lookup: registry("Näidis Finants AS") });
-    expect(result.supplier_name).toBe("Õige Stuudio OÜ");
+    expect(withoutNotes(result)).toEqual(input);
     expect(result.supplier_identifier_ambiguous).toBe(true);
   });
 
@@ -90,7 +119,7 @@ describe("crossCheckSupplierWithRegistry", () => {
     const result = await crossCheckSupplierWithRegistry(fields(), { lookup: registry("Hoopis Teine OÜ") });
     expect(result.supplier_name).toBe("Näidis Finants AS");
     expect(result.field_provenance).toEqual(fields().field_provenance);
-    expect(result.extraction_notes?.join(" ")).toMatch(/Registry code 10000018 belongs to another company/);
+    expect(result.extraction_notes?.join(" ")).toMatch(/register names "Hoopis Teine OÜ" for registry code 10000018, and that name is not printed/);
     expect(buildExtractionConfidenceSignals(result, {})).toEqual({});
   });
 
@@ -135,8 +164,8 @@ describe("crossCheckSupplierWithRegistry", () => {
     vi.stubGlobal("fetch", fetchMock);
     const first = await crossCheckSupplierWithRegistry(fields());
     const second = await crossCheckSupplierWithRegistry(fields());
-    expect(first.supplier_name).toBe("Näidis Stuudio OÜ");
-    expect(second.supplier_name).toBe("Näidis Stuudio OÜ");
+    expect(first.extraction_notes?.join(" ")).toMatch(/"Näidis Stuudio OÜ"/);
+    expect(second.extraction_notes?.join(" ")).toMatch(/"Näidis Stuudio OÜ"/);
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(String((fetchMock.mock.calls[0] as unknown[])[0])).toBe("https://ariregister.rik.ee/est/api/autocomplete?q=10000018");
   });
