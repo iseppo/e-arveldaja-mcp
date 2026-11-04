@@ -1068,8 +1068,6 @@ function cleanSupplierCandidate(raw: string): string | undefined {
     return undefined;
   }
   if (/^(?:bill to|invoice to|arve saaja|saaja|vastuvõtja|receiver|klient|client)\b/i.test(candidate)) return undefined;
-  // A bare buyer label ("Ostja:" beside "Müüja:") is never the supplier.
-  if (PURE_BUYER_LABEL_RE.test(candidate)) return undefined;
   if (/^(?:invoice|arve|receipt|müügiarve|order details|search|thank you)\b/i.test(candidate)) return undefined;
   // Document-type and field labels (+ an optional number) are never a supplier:
   // "Sularahaarve 1633", "Dokumendi number".

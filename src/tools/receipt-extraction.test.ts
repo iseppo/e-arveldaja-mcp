@@ -3541,11 +3541,11 @@ describe("receipt fields — invoice number, supplier and document type misreads
   });
 
   describe("supplier label rows and header columns (review reproducers)", () => {
-    it("a bare supplier label next to another label is not given that label as its value", () => {
-      const text = ["Müüja:      Ostja:", "Näidis Kaubandus OÜ      Proovi OÜ", "Arve nr 7", "Kokku 10,00 EUR"].join("\n");
-      const name = extractReceiptFieldsFromText(text, "x.pdf", { ownCompanyName: "Proovi OÜ" }).supplier_name;
-      expect(name).not.toMatch(/^Ostja/);
-      expect(name).toBe("Näidis Kaubandus OÜ");
+    it("side-by-side seller and buyer labels never put the buyer's company into the supplier name", () => {
+      // Astra r3: rejecting the bare "Ostja:" let a fallback merge the whole next row
+      // ("ABC OÜ Põhjaranniku Haldusteenused AS"), which fuzzy-matched the buyer.
+      const text = ["Müüja:      Ostja:", "ABC OÜ      Põhjaranniku Haldusteenused AS", "Arve nr INV-42", "Kuupäev 03.11.2026", "Summa ilma KM-ta 10,00", "Käibemaks 0% 0,00", "Kokku 10,00 EUR"].join("\n");
+      expect(extractReceiptFieldsFromText(text, "receipt.pdf").supplier_name).not.toMatch(/Põhjaranniku/);
     });
 
     it.each([
