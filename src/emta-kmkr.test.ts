@@ -72,13 +72,19 @@ describe("EMTA KMKR answer parsing", () => {
     ["a limited row whose </tr> is omitted after a full row", `<table class="grid">${EMTA_HEADER_ROW}${emtaRow(FULL_ROW)}${emtaRow(sameNumberLimited, 2).replace(/<\/tr>$/, "")}</table>`],
     ["the limited marker outside the table", emtaAnswerHtml([FULL_ROW]).replace("</table>", "</table><p>Piiratud käibemaksukohustuslane</p>")],
     ["two full rows with text between them", `<table class="grid">${EMTA_HEADER_ROW}${emtaRow(FULL_ROW)}x${emtaRow(FULL_ROW, 2)}</table>`],
+    ["a changed header around one row", `<table class="grid">${EMTA_HEADER_ROW.replace("Nimi", "Name")}${emtaRow(FULL_ROW)}</table>`],
+    // Review r3 #2: one deleted registration is registration content too.
+    ["a single deleted row without its </tr>", `<table class="grid">${EMTA_HEADER_ROW}${emtaRow({ ...FULL_ROW, deleted: "01.11.2026" }).replace(/<\/tr>$/, "")}</table>`],
+    ["a changed header around a single deleted row", `<table class="grid">${EMTA_HEADER_ROW.replace("Nimi", "Name")}${emtaRow({ ...FULL_ROW, deleted: "01.11.2026" })}</table>`],
+    ["a deletion date without the VAT number", `<table class="grid">${EMTA_HEADER_ROW}<tr><td>1</td><td>01.11.2026</td></tr></table>`],
   ])("a refused page with registration content (%s) is contradictory evidence, never full", async (_label, html) => {
+    expect(parseEmtaKmkrTable(html)).toBeNull();
     expect(await lookupEmtaKmkr(FULL_ROW.vatNumber, { fetch: fakeEmtaFetch(html).impl })).toMatchObject({ ok: false, code: "emta_response_contradictory" });
   });
 
   it.each([
-    ["a changed header around one row", `<table class="grid">${EMTA_HEADER_ROW.replace("Nimi", "Name")}${emtaRow(FULL_ROW)}</table>`],
     ["an unclosed table without rows", `<table class="grid">${EMTA_HEADER_ROW}`],
+    ["a cell without registration content", `<table class="grid"><tr><td>x</td></tr></table>`],
   ])("a refused page without registration content (%s) is an invalid answer (unavailable)", async (_label, html) => {
     expect(await lookupEmtaKmkr(FULL_ROW.vatNumber, { fetch: fakeEmtaFetch(html).impl })).toMatchObject({ ok: false, code: "emta_response_invalid" });
   });

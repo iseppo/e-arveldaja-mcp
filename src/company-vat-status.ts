@@ -17,7 +17,9 @@ import type { CompanyVatInfo } from "./types/api.js";
  * 3. EMTA's latest evidence per number is stored (one record: a registration
  *    or a contradiction — no row, deleted only, several active, or an
  *    unreadable page with registration content), written only over older
- *    evidence; the status always derives from the newest record. A
+ *    evidence (at the same moment, only over less cautious evidence: a
+ *    contradiction beats limited beats full); the status always derives
+ *    from the newest record. A
  *    contradiction is `unknown` (fail closed) until EMTA answers or the owner
  *    confirms the status; an unavailable lookup (network, timeout, HTTP, an
  *    unexpected page without registration content) is never stored and
@@ -346,11 +348,29 @@ function evidenceRecord(vatNumber: string, outcome: EmtaKmkrOutcome, at: number)
   return reason ? { ...base, evidence: { kind: "contradiction", reason, detail: outcome.detail } } : undefined;
 }
 
+/** How cautious a lookup record is: a contradiction, then a limited registration, then a full one. */
+function caution(record: CompanyVatLookupRecord): number {
+  return record.evidence.kind === "contradiction" ? 2 : record.evidence.registration.limited ? 1 : 0;
+}
+
+/**
+ * True when `incoming` is newer evidence than `current`: looked up later, or
+ * at the same moment and more cautious (so an equal-time conflict never
+ * leaves `full` the winner). Used under the store lock and in derivation.
+ */
+function supersedes(incoming: CompanyVatLookupRecord, current: CompanyVatLookupRecord | undefined): boolean {
+  if (!current) return true;
+  const incomingAt = Date.parse(incoming.looked_up_at);
+  const currentAt = Date.parse(current.looked_up_at);
+  return incomingAt > currentAt || (incomingAt === currentAt && caution(incoming) > caution(current));
+}
+
 /**
  * The lookup the status derives from: the newer of the stored record and
- * this call's own evidence (the store wins a tie). A contradiction is a
- * failure; an expired success is `stale` (with `unavailable` as the reason
- * the re-check failed); no evidence at all is the unavailable outcome.
+ * this call's own evidence (`supersedes`; the store wins an exact tie). A
+ * contradiction is a failure; an expired success is `stale` (with
+ * `unavailable` as the reason the re-check failed); no evidence at all is
+ * the unavailable outcome.
  */
 function winningLookup(
   records: readonly LimitedVatStoreRecord[] | null,
@@ -360,7 +380,7 @@ function winningLookup(
   unavailable?: Extract<CompanyVatLookupInput, { ok: false }>,
 ): CompanyVatLookupInput {
   const stored = storedLookup(records, vatNumber);
-  const winner = own && (!stored || Date.parse(stored.looked_up_at) < Date.parse(own.looked_up_at)) ? own : stored;
+  const winner = own && supersedes(own, stored) ? own : stored;
   if (!winner) return unavailable ?? { ok: false, code: "emta_lookup_unavailable", detail: "not looked up" };
   if (winner.evidence.kind === "contradiction") return { ok: false, code: CONTRADICTION_CODES[winner.evidence.reason], detail: winner.evidence.detail };
   const stale = now - Date.parse(winner.looked_up_at) >= EMTA_LOOKUP_MAX_AGE_MS;
@@ -419,7 +439,7 @@ export async function resolveCompanyVatStatus(
 /**
  * The same decision for a caller that already read `/vat_info`. EMTA is
  * asked unless the newest stored record is a success younger than 7 days;
- * its evidence is written only over older evidence, under the store lock;
+ * its evidence is written only over older evidence (`supersedes`), under the store lock;
  * then the store is read again and the status derives from the newest
  * evidence and the owner decision as they are now.
  */
@@ -445,13 +465,13 @@ export async function companyVatStatusFromInfo(
   const own = evidenceRecord(vatNumber, outcome, at);
   if (own && first.records !== null) {
     try {
-      limitedVatStore.upsertIf([own], current => {
-        const newest = storedLookup(current, vatNumber);
-        return !newest || Date.parse(newest.looked_up_at) < at;
-      });
+      limitedVatStore.upsertIf([own], current => supersedes(own, storedLookup(current, vatNumber)));
     } catch (error) {
-      // An unstored contradiction would leave an older answer the newest record: say so.
+      // An unstored contradiction would leave an older answer the newest record:
+      // say so, unless an owner decision for this number has been saved meanwhile.
       if (own.evidence.kind === "contradiction") {
+        const current = readAndDerive(vatInfo).resolved;
+        if (current.source === "setting") return current;
         return deriveCompanyVatStatus(vatInfo, first.records, `EMTA's answer for ${vatNumber} could not be stored: ${(error as Error).message}`);
       }
       // An unstored success: this call still derives from it when it is the newest evidence.

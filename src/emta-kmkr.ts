@@ -55,7 +55,7 @@ export type EmtaKmkrFailureCode =
   | "emta_response_invalid"
   /**
    * The answer does not have the expected shape but carries registration
-   * content (the limited-taxpayer marker, or more than one VAT number): it
+   * content (the limited-taxpayer marker, a VAT number or a date): it
    * cannot be read, and it may contradict an earlier answer.
    */
   | "emta_response_contradictory"
@@ -203,12 +203,14 @@ function limitedMarkCount(html: string): number {
 }
 
 /**
- * True when a page the parser refused still shows registration content: the
- * limited-taxpayer marker, or more than one VAT number in its text. Such a
- * page may contradict an earlier answer, so it is evidence, not an outage.
+ * True when a page the parser refused still shows any registration content:
+ * the limited-taxpayer marker, a VAT number, or a date (registration,
+ * deletion or decision) in its text. Such a page may contradict an earlier
+ * answer (one deleted row is enough), so it is evidence, not an outage.
  */
 function carriesRegistrations(html: string): boolean {
-  return limitedMarkCount(html) > 0 || (cellText(html).match(/\bEE\d{9}\b/gi) ?? []).length > 1;
+  const text = cellText(html);
+  return limitedMarkCount(html) > 0 || /\bEE\d{9}\b/i.test(text) || /\b\d{2}\.\d{2}\.\d{4}\b/.test(text);
 }
 
 /**
@@ -385,7 +387,7 @@ export async function lookupEmtaKmkr(vatNumber: string, deps: EmtaKmkrDeps = {})
     const rows = parseEmtaKmkrTable(answer.html);
     if (rows === null) {
       return carriesRegistrations(answer.html)
-        ? { ok: false, code: "emta_response_contradictory", detail: "EMTA answer carries registration content (the limited-taxpayer marker or several VAT numbers) in an unexpected shape" }
+        ? { ok: false, code: "emta_response_contradictory", detail: "EMTA answer carries registration content (the limited-taxpayer marker, a VAT number or a date) in an unexpected shape" }
         : { ok: false, code: "emta_response_invalid", detail: "EMTA answer does not have the expected result table" };
     }
     return selectEmtaRegistration(rows, normalized);
