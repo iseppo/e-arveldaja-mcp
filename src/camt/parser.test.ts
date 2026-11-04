@@ -322,6 +322,35 @@ describe("parseCamt053Xml", () => {
     });
   });
 
+  it("reads a camt.053.001.08 export (LHV's new format) with the same values as camt.053.001.02", () => {
+    // camt.053.001.08 wraps a party in <Pty> (<Dbtr><Pty><Nm>…</Nm></Pty></Dbtr>),
+    // renames <BIC> to <BICFI> and wraps the entry status in <Sts><Cd>.
+    const v08Xml = sampleXml
+      .replace("camt.053.001.02", "camt.053.001.08")
+      .replace(/<BIC>(.*?)<\/BIC>/g, "<BICFI>$1</BICFI>")
+      .replace(/<(Dbtr|Cdtr)>([\s\S]*?)<\/\1>/g, "<$1><Pty>$2</Pty></$1>")
+      .replace(/<Sts>(\w+)<\/Sts>/g, "<Sts><Cd>$1</Cd></Sts>");
+    expect(v08Xml).toContain("<Dbtr><Pty>");
+    expect(v08Xml).toContain("<BICFI>LHVBEE22</BICFI>");
+
+    const result = parseCamt053Xml(v08Xml);
+
+    expect(result.statement_metadata.bank_bic).toBe("LHVBEE22");
+    expect(result.entries[0]).toMatchObject({
+      direction: "CRDT",
+      counterparty_name: "Seppo OÜ",
+      counterparty_iban: "EE307700771002928927",
+      counterparty_reg_code: "14417608",
+    });
+    expect(result.entries[1]).toMatchObject({
+      direction: "DBIT",
+      counterparty_name: "OÜ Meening",
+      counterparty_reg_code: "14999999",
+    });
+    expect(result.entries).toEqual(parseCamt053Xml(sampleXml).entries);
+    expect(result.statement_metadata).toEqual(parseCamt053Xml(sampleXml).statement_metadata);
+  });
+
   it("splits batched entries across all NtryDtls blocks and keeps the booked entry amount in account currency", () => {
     const result = parseCamt053Xml(batchedMixedCurrencyXml);
 
