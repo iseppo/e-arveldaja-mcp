@@ -68,8 +68,18 @@ describe("EMTA KMKR answer parsing", () => {
     expect(parseEmtaKmkrTable(html)).toBeNull();
   });
 
-  it("a contradictory page is an invalid answer, never full", async () => {
-    const html = `<table class="grid">${EMTA_HEADER_ROW}${emtaRow(FULL_ROW)}${emtaRow(sameNumberLimited, 2).replace(/<\/tr>$/, "")}</table>`;
+  it.each([
+    ["a limited row whose </tr> is omitted after a full row", `<table class="grid">${EMTA_HEADER_ROW}${emtaRow(FULL_ROW)}${emtaRow(sameNumberLimited, 2).replace(/<\/tr>$/, "")}</table>`],
+    ["the limited marker outside the table", emtaAnswerHtml([FULL_ROW]).replace("</table>", "</table><p>Piiratud käibemaksukohustuslane</p>")],
+    ["two full rows with text between them", `<table class="grid">${EMTA_HEADER_ROW}${emtaRow(FULL_ROW)}x${emtaRow(FULL_ROW, 2)}</table>`],
+  ])("a refused page with registration content (%s) is contradictory evidence, never full", async (_label, html) => {
+    expect(await lookupEmtaKmkr(FULL_ROW.vatNumber, { fetch: fakeEmtaFetch(html).impl })).toMatchObject({ ok: false, code: "emta_response_contradictory" });
+  });
+
+  it.each([
+    ["a changed header around one row", `<table class="grid">${EMTA_HEADER_ROW.replace("Nimi", "Name")}${emtaRow(FULL_ROW)}</table>`],
+    ["an unclosed table without rows", `<table class="grid">${EMTA_HEADER_ROW}`],
+  ])("a refused page without registration content (%s) is an invalid answer (unavailable)", async (_label, html) => {
     expect(await lookupEmtaKmkr(FULL_ROW.vatNumber, { fetch: fakeEmtaFetch(html).impl })).toMatchObject({ ok: false, code: "emta_response_invalid" });
   });
 });
@@ -167,6 +177,16 @@ describe("lookupEmtaKmkrCached", () => {
     expect(failing.queries()).toHaveLength(1);
     await lookupEmtaKmkrCached("EE103050067", 62_000, { fetch: failing.impl });
     expect(failing.queries()).toHaveLength(2);
+  });
+
+  it("a cached answer older than the caller's stored evidence is not reused", async () => {
+    resetEmtaKmkrCache();
+    const fake = fakeEmtaFetch(emtaAnswerHtml([FULL_ROW]));
+    await lookupEmtaKmkrCached("EE102809963", 1_000, { fetch: fake.impl });
+    await lookupEmtaKmkrCached("EE102809963", 3_000, { fetch: fake.impl }, 1_000);
+    expect(fake.queries()).toHaveLength(1);
+    expect(await lookupEmtaKmkrCached("EE102809963", 3_000, { fetch: fake.impl }, 2_000)).toMatchObject({ at: 3_000 });
+    expect(fake.queries()).toHaveLength(2);
   });
 
   it("concurrent cold calls for one number share one request", async () => {

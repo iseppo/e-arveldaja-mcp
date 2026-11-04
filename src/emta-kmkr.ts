@@ -51,8 +51,14 @@ export interface EmtaKmkrRegistration {
 export type EmtaKmkrFailureCode =
   /** Network, timeout, HTTP error or an oversized answer. */
   | "emta_lookup_unavailable"
-  /** The answer does not have the expected shape. */
+  /** The answer does not have the expected shape and carries no registration content. */
   | "emta_response_invalid"
+  /**
+   * The answer does not have the expected shape but carries registration
+   * content (the limited-taxpayer marker, or more than one VAT number): it
+   * cannot be read, and it may contradict an earlier answer.
+   */
+  | "emta_response_contradictory"
   /** No registration row for the number. */
   | "emta_registration_not_found"
   /** Only deleted registrations for the number. */
@@ -194,6 +200,15 @@ interface ParsedRow {
 /** How often the limited-taxpayer marker appears in the page's text (any case, entities decoded). */
 function limitedMarkCount(html: string): number {
   return cellText(html).toLowerCase().split(LIMITED_MARK.toLowerCase()).length - 1;
+}
+
+/**
+ * True when a page the parser refused still shows registration content: the
+ * limited-taxpayer marker, or more than one VAT number in its text. Such a
+ * page may contradict an earlier answer, so it is evidence, not an outage.
+ */
+function carriesRegistrations(html: string): boolean {
+  return limitedMarkCount(html) > 0 || (cellText(html).match(/\bEE\d{9}\b/gi) ?? []).length > 1;
 }
 
 /**
@@ -368,7 +383,11 @@ export async function lookupEmtaKmkr(vatNumber: string, deps: EmtaKmkrDeps = {})
     if (!answer.response.ok) return { ok: false, code: "emta_lookup_unavailable", detail: `EMTA query answered HTTP ${answer.response.status}`, ...(throttledStatus(answer.response.status) ? { throttled: true } : {}) };
     if (answer.html === null) return { ok: false, code: "emta_response_invalid", detail: "EMTA answer is too large or undecodable" };
     const rows = parseEmtaKmkrTable(answer.html);
-    if (rows === null) return { ok: false, code: "emta_response_invalid", detail: "EMTA answer does not have the expected result table" };
+    if (rows === null) {
+      return carriesRegistrations(answer.html)
+        ? { ok: false, code: "emta_response_contradictory", detail: "EMTA answer carries registration content (the limited-taxpayer marker or several VAT numbers) in an unexpected shape" }
+        : { ok: false, code: "emta_response_invalid", detail: "EMTA answer does not have the expected result table" };
+    }
     return selectEmtaRegistration(rows, normalized);
   } catch (error) {
     const aborted = (error as { name?: string }).name === "AbortError";
@@ -399,32 +418,16 @@ type CachedLookup = { outcome: EmtaKmkrOutcome; at: number };
 const lookupCache = new Map<string, CachedLookup>();
 /** One request per number at a time: concurrent callers share it. */
 const inFlight = new Map<string, Promise<CachedLookup>>();
-/** When EMTA disproved a registration (not found / deleted / ambiguous), per number (ms). */
-const contradictedAt = new Map<string, number>();
 let cooldownUntil = 0;
 
 /** Test seam: drop the in-process lookup cache, the pending lookups and the cooldown. */
 export function resetEmtaKmkrCache(): void {
   lookupCache.clear();
   inFlight.clear();
-  contradictedAt.clear();
   cooldownUntil = 0;
 }
 
-/** EMTA answered, and the answer leaves no single active registration of the number. */
-export function isContradictingEmtaFailure(code: EmtaKmkrFailureCode): boolean {
-  return code === "emta_registration_not_found" || code === "emta_registration_deleted" || code === "emta_registration_ambiguous";
-}
-
-/** The latest time (ms) this process saw EMTA disprove a registration of the number, if any. */
-export function emtaContradictedAt(vatNumber: string): number | undefined {
-  return contradictedAt.get(normalizeEstonianVatNumber(vatNumber) ?? vatNumber);
-}
-
 function remember(key: string, entry: CachedLookup): CachedLookup {
-  if (!entry.outcome.ok && isContradictingEmtaFailure(entry.outcome.code)) {
-    contradictedAt.set(key, Math.max(contradictedAt.get(key) ?? entry.at, entry.at));
-  }
   const existing = lookupCache.get(key);
   // Older evidence never replaces newer.
   if (existing && existing.at > entry.at) return existing;
@@ -442,11 +445,13 @@ function remember(key: string, entry: CachedLookup): CachedLookup {
  * `lookupEmtaKmkr` behind the in-process cache; `at` = when the outcome was
  * fetched (ms). Concurrent calls for one number share one request, and a
  * cooldown after a throttling answer answers "unavailable" without a request.
+ * A cached outcome older than `notBefore` (ms; the caller's stored evidence)
+ * is not reused.
  */
-export async function lookupEmtaKmkrCached(vatNumber: string, now: number, deps: EmtaKmkrDeps = {}): Promise<CachedLookup> {
+export async function lookupEmtaKmkrCached(vatNumber: string, now: number, deps: EmtaKmkrDeps = {}, notBefore = -Infinity): Promise<CachedLookup> {
   const key = normalizeEstonianVatNumber(vatNumber) ?? vatNumber;
   const cached = lookupCache.get(key);
-  if (cached && now - cached.at >= 0 && now - cached.at < (cached.outcome.ok ? SUCCESS_REUSE_MS : FAILURE_RETRY_MS)) return cached;
+  if (cached && cached.at >= notBefore && now - cached.at >= 0 && now - cached.at < (cached.outcome.ok ? SUCCESS_REUSE_MS : FAILURE_RETRY_MS)) return cached;
   const pending = inFlight.get(key);
   if (pending) return pending;
   if (now < cooldownUntil) {

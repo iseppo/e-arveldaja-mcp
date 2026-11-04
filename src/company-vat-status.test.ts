@@ -12,13 +12,15 @@ import {
   isCompanyVatRegistered,
   limitedVatStore,
   readLimitedVatRecords,
+  requireKnownCompanyVatStatus,
   resolveCompanyVatStatus,
+  type CompanyVatLookupRecord,
   type CompanyVatStatusRecord,
   type LimitedVatStoreRecord,
 } from "./company-vat-status.js";
-import { resetEmtaKmkrCache } from "./emta-kmkr.js";
+import { EMTA_KMKR_QUERY_URL, resetEmtaKmkrCache } from "./emta-kmkr.js";
 import { resolveBundleStorePath } from "./accounting-rules.js";
-import { FULL_ROW, LIMITED_ROW, emtaAnswerHtml, fakeEmtaFetch } from "./__fixtures__/emta-kmkr.js";
+import { EMTA_HEADER_ROW, FULL_ROW, LIMITED_ROW, emtaAnswerHtml, emtaRow, fakeEmtaFetch } from "./__fixtures__/emta-kmkr.js";
 
 const LIMITED_NUMBER = "EE103050067";
 const FULL_NUMBER = "EE102809963";
@@ -189,8 +191,27 @@ describe("owner decision precedence", () => {
 const storePath = () => resolveBundleStorePath(LIMITED_VAT_STORE_FILE)!;
 const lookupRecord = (vatNumber: string, limited: boolean, lookedUpAt: string): LimitedVatStoreRecord => ({
   kind: "emta_lookup", key: `emta_lookup:${vatNumber}`, vat_number: vatNumber, looked_up_at: lookedUpAt,
-  registration: { vat_number: vatNumber, limited, registered_on: "2024-12-16", decision_on: "2024-12-14" },
+  evidence: { kind: "success", registration: { vat_number: vatNumber, limited, registered_on: "2024-12-16", decision_on: "2024-12-14" } },
 });
+const storedEvidence = () => (readLimitedVatRecords()!.find(record => record.kind === "emta_lookup") as CompanyVatLookupRecord | undefined);
+/** A fetch whose query answer waits for `release()`. */
+const heldAnswer = (html: string) => {
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const fake = fakeEmtaFetch(html);
+  const impl: typeof fake.impl = async (input, init) => {
+    if (String(input) === EMTA_KMKR_QUERY_URL) await gate;
+    return fake.impl(input, init);
+  };
+  return { impl, release };
+};
+/** A second process sharing the store: fresh module instances (own in-process caches). */
+const otherProcess = async () => {
+  vi.resetModules();
+  return import("./company-vat-status.js");
+};
+/** The malformed page of review r2: a full row, then a limited row of the same number without its </tr>. */
+const contradictoryPage = `<table class="grid">${EMTA_HEADER_ROW}${emtaRow(FULL_ROW)}${emtaRow({ ...LIMITED_ROW, vatNumber: FULL_ROW.vatNumber }, 2).replace(/<\/tr>$/, "")}</table>`;
 /** A fetch that runs `during` while EMTA's answer is pending, then answers `html`. */
 const answerAfter = (html: string, during: () => void) =>
   fakeEmtaFetch(() => {
@@ -200,35 +221,103 @@ const answerAfter = (html: string, during: () => void) =>
 
 describe("review fixes: contradicting EMTA evidence (finding 2)", () => {
   it.each([
-    ["deleted", emtaAnswerHtml([{ ...FULL_ROW, deleted: "01.11.2026" }]), "emta_registration_deleted"],
-    ["not found", emtaAnswerHtml([LIMITED_ROW]), "emta_registration_not_found"],
-    ["ambiguous", emtaAnswerHtml([FULL_ROW, FULL_ROW]), "emta_registration_ambiguous"],
-  ])("an expired full answer is not used when EMTA now says %s, and no later failure falls back to it", async (_label, html, code) => {
+    ["deleted", emtaAnswerHtml([{ ...FULL_ROW, deleted: "01.11.2026" }]), "emta_registration_deleted", "deleted"],
+    ["not found", emtaAnswerHtml([LIMITED_ROW]), "emta_registration_not_found", "not_found"],
+    ["ambiguous", emtaAnswerHtml([FULL_ROW, FULL_ROW]), "emta_registration_ambiguous", "ambiguous"],
+    ["a contradictory page", contradictoryPage, "emta_response_contradictory", "contradictory_page"],
+  ])("an expired full answer is not used when EMTA now says %s, and no later failure falls back to it", async (_label, html, code, reason) => {
     limitedVatStore.upsert([lookupRecord(FULL_NUMBER, false, "2026-11-04T10:00:00.000Z")]);
     const resolved = await companyVatStatusFromInfo({ vat_number: FULL_NUMBER }, { emta: { fetch: fakeEmtaFetch(html).impl }, now: at(8 * DAY) });
     expect(resolved).toMatchObject({ status: "unknown", reason: COMPANY_VAT_STATUS_LOOKUP_AMBIGUOUS, lookup_error_code: code });
-    expect(readLimitedVatRecords()!.some(record => record.kind === "emta_lookup")).toBe(false);
+    expect(storedEvidence()).toMatchObject({ looked_up_at: new Date(at(8 * DAY)()).toISOString(), evidence: { kind: "contradiction", reason } });
     // Same process after the retry window, and a new process: EMTA unreachable → still unknown.
     expect(await companyVatStatusFromInfo({ vat_number: FULL_NUMBER }, { emta: { fetch: fakeEmtaFetch("network").impl }, now: at(8 * DAY + 120_000) }))
-      .toMatchObject({ status: "unknown", reason: COMPANY_VAT_STATUS_LOOKUP_UNAVAILABLE });
+      .toMatchObject({ status: "unknown", lookup_error_code: code });
     resetEmtaKmkrCache();
     expect(await companyVatStatusFromInfo({ vat_number: FULL_NUMBER }, { emta: { fetch: fakeEmtaFetch("network").impl }, now: at(8 * DAY + 240_000) }))
-      .toMatchObject({ status: "unknown", reason: COMPANY_VAT_STATUS_LOOKUP_UNAVAILABLE });
+      .toMatchObject({ status: "unknown", lookup_error_code: code });
+    // EMTA settling the number again replaces the contradiction.
+    expect(await companyVatStatusFromInfo({ vat_number: FULL_NUMBER }, { emta: { fetch: fakeEmtaFetch(emtaAnswerHtml([FULL_ROW])).impl }, now: at(8 * DAY + 360_000) }))
+      .toMatchObject({ status: "full", lookup: { stale: false } });
   });
 
-  it("when the disproved record cannot be removed, this process still never falls back to it", async () => {
+  it("a contradiction that cannot be stored is unknown naming the store, not a lookup failure", async () => {
     limitedVatStore.upsert([lookupRecord(FULL_NUMBER, false, "2026-11-04T10:00:00.000Z")]);
-    vi.spyOn(limitedVatStore, "removeIf").mockImplementation(() => { throw new Error("EACCES"); });
+    vi.spyOn(limitedVatStore, "upsertIf").mockImplementation(() => { throw new Error("EACCES"); });
     const deleted = fakeEmtaFetch(emtaAnswerHtml([{ ...FULL_ROW, deleted: "01.11.2026" }]));
-    expect((await companyVatStatusFromInfo({ vat_number: FULL_NUMBER }, { emta: { fetch: deleted.impl }, now: at(8 * DAY) })).status).toBe("unknown");
-    expect(await companyVatStatusFromInfo({ vat_number: FULL_NUMBER }, { emta: { fetch: fakeEmtaFetch("network").impl }, now: at(8 * DAY + 120_000) }))
-      .toMatchObject({ status: "unknown", reason: COMPANY_VAT_STATUS_LOOKUP_UNAVAILABLE });
+    const resolved = await companyVatStatusFromInfo({ vat_number: FULL_NUMBER }, { emta: { fetch: deleted.impl }, now: at(8 * DAY) });
+    expect(resolved).toMatchObject({ status: "unknown", source: "store_error", reason: COMPANY_VAT_STATUS_UNKNOWN });
+    expect(resolved.store_error).toContain("EACCES");
   });
 
-  it("an unavailable or invalid answer still falls back to the expired stored answer (stale)", async () => {
+  it("an unavailable answer or a malformed page without registration content falls back to the expired stored answer (stale)", async () => {
     limitedVatStore.upsert([lookupRecord(FULL_NUMBER, false, "2026-11-04T10:00:00.000Z")]);
     expect(await companyVatStatusFromInfo({ vat_number: FULL_NUMBER }, { emta: { fetch: fakeEmtaFetch("<table class=\"grid\"></table>").impl }, now: at(8 * DAY) }))
       .toMatchObject({ status: "full", lookup: { stale: true } });
+    expect(storedEvidence()).toMatchObject({ looked_up_at: "2026-11-04T10:00:00.000Z", evidence: { kind: "success" } });
+  });
+});
+
+describe("review r2: the newest stored evidence wins after every outcome", () => {
+  it("r2 #1: a malformed page with a limited row after an expired full record is unknown, never stale full", async () => {
+    limitedVatStore.upsert([lookupRecord(FULL_NUMBER, false, "2026-11-04T10:00:00.000Z")]);
+    const resolved = await companyVatStatusFromInfo({ vat_number: FULL_NUMBER }, { emta: { fetch: fakeEmtaFetch(contradictoryPage).impl }, now: at(8 * DAY) });
+    expect(resolved).toMatchObject({ status: "unknown", lookup_error_code: "emta_response_contradictory" });
+    expect(() => requireKnownCompanyVatStatus(resolved)).toThrow(CompanyVatStatusUnknownError);
+  });
+
+  it("r2 #2: a failing refresh returns the newer limited evidence another writer stored meanwhile", async () => {
+    limitedVatStore.upsert([lookupRecord(FULL_NUMBER, false, "2026-10-20T10:00:00.000Z")]);
+    const failing = fakeEmtaFetch(() => {
+      limitedVatStore.upsert([lookupRecord(FULL_NUMBER, true, "2026-11-04T10:00:01.000Z")]);
+      throw new TypeError("fetch failed");
+    });
+    expect(await companyVatStatusFromInfo({ vat_number: FULL_NUMBER }, { emta: { fetch: failing.impl }, now: at(0) }))
+      .toMatchObject({ status: "limited", source: "emta_lookup", lookup: { stale: false, looked_up_at: "2026-11-04T10:00:01.000Z" } });
+  });
+
+  it("r2 #3: an older full lookup finishing after a newer contradiction (another process) never resurrects full", async () => {
+    limitedVatStore.upsert([lookupRecord(FULL_NUMBER, false, "2026-10-20T10:00:00.000Z")]);
+    const older = heldAnswer(emtaAnswerHtml([FULL_ROW]));
+    const pending = companyVatStatusFromInfo({ vat_number: FULL_NUMBER }, { emta: { fetch: older.impl }, now: at(0) });
+    const second = await otherProcess();
+    const deleted = fakeEmtaFetch(emtaAnswerHtml([{ ...FULL_ROW, deleted: "01.11.2026" }]));
+    expect(await second.companyVatStatusFromInfo({ vat_number: FULL_NUMBER }, { emta: { fetch: deleted.impl }, now: at(1_000) }))
+      .toMatchObject({ status: "unknown", lookup_error_code: "emta_registration_deleted" });
+    older.release();
+    expect(await pending).toMatchObject({ status: "unknown", lookup_error_code: "emta_registration_deleted" });
+    expect(storedEvidence()).toMatchObject({ looked_up_at: "2026-11-04T10:00:01.000Z", evidence: { kind: "contradiction" } });
+    // Neither process reuses full afterwards: not from the store, nor from its in-process cache.
+    expect(await second.companyVatStatusFromInfo({ vat_number: FULL_NUMBER }, { emta: { fetch: fakeEmtaFetch("network").impl }, now: at(2_000) }))
+      .toMatchObject({ status: "unknown" });
+    expect(await companyVatStatusFromInfo({ vat_number: FULL_NUMBER }, { emta: { fetch: fakeEmtaFetch("network").impl }, now: at(3_000) }))
+      .toMatchObject({ status: "unknown" });
+  });
+
+  it("r2 #3: a contradiction with an empty initial snapshot overrides an older full stored meanwhile", async () => {
+    const deleted = fakeEmtaFetch(() => {
+      limitedVatStore.upsert([lookupRecord(FULL_NUMBER, false, "2026-11-04T09:59:59.000Z")]);
+      return emtaAnswerHtml([{ ...FULL_ROW, deleted: "01.11.2026" }]);
+    });
+    expect(await companyVatStatusFromInfo({ vat_number: FULL_NUMBER }, { emta: { fetch: deleted.impl }, now: at(0) }))
+      .toMatchObject({ status: "unknown", lookup_error_code: "emta_registration_deleted" });
+    expect(storedEvidence()).toMatchObject({ looked_up_at: "2026-11-04T10:00:00.000Z", evidence: { kind: "contradiction" } });
+    resetEmtaKmkrCache();
+    expect(await companyVatStatusFromInfo({ vat_number: FULL_NUMBER }, { emta: { fetch: fakeEmtaFetch("network").impl }, now: at(120_000) }))
+      .toMatchObject({ status: "unknown" });
+  });
+
+  it("a newer contradiction stored by another process is honoured even while this process holds a fresh full answer", async () => {
+    await companyVatStatusFromInfo({ vat_number: FULL_NUMBER }, { emta: { fetch: fakeEmtaFetch(emtaAnswerHtml([FULL_ROW])).impl }, now: at(0) });
+    // Another process saw EMTA show no registration a day later.
+    limitedVatStore.upsert([{
+      kind: "emta_lookup", key: `emta_lookup:${FULL_NUMBER}`, vat_number: FULL_NUMBER, looked_up_at: "2026-11-05T10:00:00.000Z",
+      evidence: { kind: "contradiction", reason: "not_found", detail: `EMTA shows no registration for ${FULL_NUMBER}` },
+    }]);
+    const unreachable = fakeEmtaFetch("network");
+    expect(await companyVatStatusFromInfo({ vat_number: FULL_NUMBER }, { emta: { fetch: unreachable.impl }, now: at(DAY + 1_000) }))
+      .toMatchObject({ status: "unknown", lookup_error_code: "emta_registration_not_found" });
+    expect(unreachable.queries()).toHaveLength(1);
   });
 });
 
@@ -260,8 +349,7 @@ describe("review fixes: newer lookup evidence wins (finding 4)", () => {
     });
     expect(await companyVatStatusFromInfo({ vat_number: FULL_NUMBER }, { emta: { fetch: fake.impl }, now: at(0) }))
       .toMatchObject({ status: "limited", source: "emta_lookup", lookup: { looked_up_at: "2026-11-04T10:00:01.000Z" } });
-    const persisted = readLimitedVatRecords()!.find(record => record.kind === "emta_lookup");
-    expect(persisted).toMatchObject({ looked_up_at: "2026-11-04T10:00:01.000Z", registration: { limited: true } });
+    expect(storedEvidence()).toMatchObject({ looked_up_at: "2026-11-04T10:00:01.000Z", evidence: { registration: { limited: true } } });
     expect(await companyVatStatusFromInfo({ vat_number: FULL_NUMBER }, { emta: { fetch: fake.impl }, now: at(2_000) }))
       .toMatchObject({ status: "limited" });
   });
@@ -270,7 +358,7 @@ describe("review fixes: newer lookup evidence wins (finding 4)", () => {
     limitedVatStore.upsert([lookupRecord(FULL_NUMBER, true, "2026-10-01T10:00:00.000Z")]);
     expect(await companyVatStatusFromInfo({ vat_number: FULL_NUMBER }, { emta: { fetch: fakeEmtaFetch(emtaAnswerHtml([FULL_ROW])).impl }, now: at(0) }))
       .toMatchObject({ status: "full", lookup: { looked_up_at: "2026-11-04T10:00:00.000Z" } });
-    expect(readLimitedVatRecords()!.find(record => record.kind === "emta_lookup")).toMatchObject({ registration: { limited: false } });
+    expect(storedEvidence()).toMatchObject({ evidence: { registration: { limited: false } } });
   });
 });
 

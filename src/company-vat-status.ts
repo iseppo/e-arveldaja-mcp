@@ -1,5 +1,5 @@
 import { createConnectionScopedBundleStore } from "./connection-scoped-bundle-store.js";
-import { emtaContradictedAt, isContradictingEmtaFailure, lookupEmtaKmkrCached, normalizeEstonianVatNumber, type EmtaKmkrDeps, type EmtaKmkrFailureCode, type EmtaKmkrRegistration } from "./emta-kmkr.js";
+import { lookupEmtaKmkrCached, normalizeEstonianVatNumber, type EmtaKmkrDeps, type EmtaKmkrFailureCode, type EmtaKmkrOutcome, type EmtaKmkrRegistration } from "./emta-kmkr.js";
 import type { CompanyVatInfo } from "./types/api.js";
 
 /**
@@ -13,12 +13,15 @@ import type { CompanyVatInfo } from "./types/api.js";
  *    VAT number wins;
  * 2. otherwise a number is looked up in EMTA's public KMKR query
  *    (`src/emta-kmkr.ts`): the one active registration says `limited` or
- *    `full` (source `emta_lookup`), cached per number for 7 days;
- * 3. a failed or inconclusive lookup is `unknown` (fail closed) until EMTA
- *    answers or the owner confirms the status; only an unavailable lookup
- *    (network, timeout, HTTP, unexpected page) falls back to an expired
- *    stored answer, never one EMTA has since disproved (no row, deleted
- *    only, several active);
+ *    `full` (source `emta_lookup`), reused per number for 7 days;
+ * 3. EMTA's latest evidence per number is stored (one record: a registration
+ *    or a contradiction — no row, deleted only, several active, or an
+ *    unreadable page with registration content), written only over older
+ *    evidence; the status always derives from the newest record. A
+ *    contradiction is `unknown` (fail closed) until EMTA answers or the owner
+ *    confirms the status; an unavailable lookup (network, timeout, HTTP, an
+ *    unexpected page without registration content) is never stored and
+ *    falls back to an expired answer only when that is the newest record;
  * 4. no number is `none`.
  * Only `full` is VAT-registered.
  */
@@ -106,14 +109,29 @@ export interface CompanyVatStatusRecord {
   vat_number?: string | null;
 }
 
-/** A successful EMTA KMKR lookup of one VAT number (the cache). */
+/** Why EMTA's answer leaves no single active registration of the number. */
+export type EmtaContradictionReason = "not_found" | "deleted" | "ambiguous" | "contradictory_page";
+
+const CONTRADICTION_CODES: Record<EmtaContradictionReason, EmtaKmkrFailureCode> = {
+  not_found: "emta_registration_not_found",
+  deleted: "emta_registration_deleted",
+  ambiguous: "emta_registration_ambiguous",
+  contradictory_page: "emta_response_contradictory",
+};
+
+/**
+ * EMTA's latest evidence about one VAT number: its single active
+ * registration, or a contradiction. An unavailable lookup is never stored.
+ */
 export interface CompanyVatLookupRecord {
   kind: "emta_lookup";
   /** `emta_lookup:<EE…>` */
   key: string;
   vat_number: string;
-  registration: EmtaKmkrRegistration;
   looked_up_at: string;
+  evidence:
+    | { kind: "success"; registration: EmtaKmkrRegistration }
+    | { kind: "contradiction"; reason: EmtaContradictionReason; detail: string };
 }
 
 /** An owner classification of a foreign supplier for the monthly limited-VAT run. */
@@ -311,65 +329,45 @@ export interface CompanyVatStatusDeps {
 function storedLookup(records: readonly LimitedVatStoreRecord[] | null, vatNumber: string): CompanyVatLookupRecord | undefined {
   const record = records?.find((entry): entry is CompanyVatLookupRecord => entry.kind === "emta_lookup" && entry.key === lookupRecordKey(vatNumber));
   if (!record || record.vat_number !== vatNumber || typeof record.looked_up_at !== "string" || Number.isNaN(Date.parse(record.looked_up_at))) return undefined;
-  const registration = record.registration as Partial<EmtaKmkrRegistration> | undefined;
+  const evidence = record.evidence as Partial<CompanyVatLookupRecord["evidence"]> | undefined;
+  if (evidence?.kind === "contradiction") {
+    return Object.hasOwn(CONTRADICTION_CODES, evidence.reason ?? "") && typeof evidence.detail === "string" ? record : undefined;
+  }
+  const registration = evidence?.kind === "success" ? evidence.registration as Partial<EmtaKmkrRegistration> | undefined : undefined;
   if (!registration || registration.vat_number !== vatNumber || typeof registration.limited !== "boolean" || typeof registration.registered_on !== "string") return undefined;
   return record;
 }
 
-async function lookupFor(
-  vatNumber: string,
+/** The record of an EMTA outcome, or undefined when EMTA was unavailable (never stored). */
+function evidenceRecord(vatNumber: string, outcome: EmtaKmkrOutcome, at: number): CompanyVatLookupRecord | undefined {
+  const base = { kind: "emta_lookup" as const, key: lookupRecordKey(vatNumber), vat_number: vatNumber, looked_up_at: new Date(at).toISOString() };
+  if (outcome.ok) return { ...base, evidence: { kind: "success", registration: outcome.registration } };
+  const reason = (Object.keys(CONTRADICTION_CODES) as EmtaContradictionReason[]).find(key => CONTRADICTION_CODES[key] === outcome.code);
+  return reason ? { ...base, evidence: { kind: "contradiction", reason, detail: outcome.detail } } : undefined;
+}
+
+/**
+ * The lookup the status derives from: the newer of the stored record and
+ * this call's own evidence (the store wins a tie). A contradiction is a
+ * failure; an expired success is `stale` (with `unavailable` as the reason
+ * the re-check failed); no evidence at all is the unavailable outcome.
+ */
+function winningLookup(
   records: readonly LimitedVatStoreRecord[] | null,
-  deps: CompanyVatStatusDeps,
-): Promise<CompanyVatLookupInput> {
-  const normalized = normalizeEstonianVatNumber(vatNumber);
-  if (!normalized) return { ok: false, code: "emta_registration_not_found", detail: `${vatNumber} is not an Estonian VAT number (EE + 9 digits)` };
-  const now = (deps.now ?? (() => new Date()))().getTime();
-  const stored = storedLookup(records, normalized);
-  if (stored && now - Date.parse(stored.looked_up_at) < EMTA_LOOKUP_MAX_AGE_MS) {
-    return { ok: true, view: { registration: stored.registration, looked_up_at: stored.looked_up_at, stale: false } };
-  }
-  const { outcome, at } = await lookupEmtaKmkrCached(normalized, now, deps.emta);
-  const key = lookupRecordKey(normalized);
-  if (outcome.ok) {
-    const lookedUpAt = new Date(at).toISOString();
-    if (records !== null) {
-      try {
-        // Under the lock: never replace a lookup made later (by another call or process).
-        const wrote = limitedVatStore.upsertIf(
-          [{ kind: "emta_lookup", key, vat_number: normalized, registration: outcome.registration, looked_up_at: lookedUpAt }],
-          own => {
-            const current = storedLookup(own, normalized);
-            return !current || Date.parse(current.looked_up_at) < at;
-          },
-        );
-        const winner = wrote ? undefined : storedLookup(readLimitedVatRecords(), normalized);
-        if (winner) return { ok: true, view: { registration: winner.registration, looked_up_at: winner.looked_up_at, stale: false } };
-      } catch {
-        // The in-process cache still holds it; the record is only a cache.
-      }
-    }
-    return { ok: true, view: { registration: outcome.registration, looked_up_at: lookedUpAt, stale: false } };
-  }
-  if (isContradictingEmtaFailure(outcome.code)) {
-    // EMTA disproved the stored answer: drop it (unless it is newer), so no
-    // later unavailable lookup falls back to it.
-    if (records !== null && stored) {
-      try {
-        limitedVatStore.removeIf([key], own => {
-          const current = storedLookup(own, normalized);
-          return current !== undefined && Date.parse(current.looked_up_at) < at;
-        });
-      } catch {
-        // This process still remembers the contradiction (emtaContradictedAt).
-      }
-    }
-    return outcome;
-  }
-  const contradicted = emtaContradictedAt(normalized);
-  if (stored && (contradicted === undefined || contradicted < Date.parse(stored.looked_up_at))) {
-    return { ok: true, view: { registration: stored.registration, looked_up_at: stored.looked_up_at, stale: true, refresh_error: outcome.detail } };
-  }
-  return outcome;
+  vatNumber: string,
+  now: number,
+  own?: CompanyVatLookupRecord,
+  unavailable?: Extract<CompanyVatLookupInput, { ok: false }>,
+): CompanyVatLookupInput {
+  const stored = storedLookup(records, vatNumber);
+  const winner = own && (!stored || Date.parse(stored.looked_up_at) < Date.parse(own.looked_up_at)) ? own : stored;
+  if (!winner) return unavailable ?? { ok: false, code: "emta_lookup_unavailable", detail: "not looked up" };
+  if (winner.evidence.kind === "contradiction") return { ok: false, code: CONTRADICTION_CODES[winner.evidence.reason], detail: winner.evidence.detail };
+  const stale = now - Date.parse(winner.looked_up_at) >= EMTA_LOOKUP_MAX_AGE_MS;
+  return {
+    ok: true,
+    view: { registration: winner.evidence.registration, looked_up_at: winner.looked_up_at, stale, ...(stale && unavailable ? { refresh_error: unavailable.detail } : {}) },
+  };
 }
 
 /**
@@ -380,7 +378,7 @@ async function lookupFor(
  */
 function readAndDerive(
   vatInfo: CompanyVatInfo | undefined,
-  lookup?: CompanyVatLookupInput,
+  lookup?: (records: readonly LimitedVatStoreRecord[] | null) => CompanyVatLookupInput,
 ): { resolved: ResolvedCompanyVatStatus; records: LimitedVatStoreRecord[] | null } {
   let records: LimitedVatStoreRecord[] | null = null;
   for (let attempt = 0; attempt < 2; attempt++) {
@@ -389,7 +387,7 @@ function readAndDerive(
     } catch (error) {
       return { resolved: deriveCompanyVatStatus(vatInfo, null, (error as Error).message), records: null };
     }
-    const resolved = deriveCompanyVatStatus(vatInfo, records, undefined, lookup);
+    const resolved = deriveCompanyVatStatus(vatInfo, records, undefined, lookup?.(records));
     const legacy = records !== null && resolved.source === "setting" ? legacyStatusRecord(records) : undefined;
     if (!legacy) return { resolved, records };
     try {
@@ -418,18 +416,48 @@ export async function resolveCompanyVatStatus(
   return companyVatStatusFromInfo(vatInfo, deps);
 }
 
-/** The same decision for a caller that already read `/vat_info`. */
+/**
+ * The same decision for a caller that already read `/vat_info`. EMTA is
+ * asked unless the newest stored record is a success younger than 7 days;
+ * its evidence is written only over older evidence, under the store lock;
+ * then the store is read again and the status derives from the newest
+ * evidence and the owner decision as they are now.
+ */
 export async function companyVatStatusFromInfo(
   vatInfo: CompanyVatInfo | undefined,
   deps: CompanyVatStatusDeps = {},
 ): Promise<ResolvedCompanyVatStatus> {
+  const now = () => (deps.now ?? (() => new Date()))().getTime();
   const first = readAndDerive(vatInfo);
   const withoutLookup = first.resolved;
   if (withoutLookup.status !== "unknown" || withoutLookup.source === "store_error" || !withoutLookup.vat_number) return withoutLookup;
-  const lookup = await lookupFor(withoutLookup.vat_number, first.records, deps);
-  // The owner may have decided while EMTA was asked: the store as it is now
-  // wins, and a store that can no longer be read is `unknown`.
-  return readAndDerive(vatInfo, lookup).resolved;
+  const vatNumber = normalizeEstonianVatNumber(withoutLookup.vat_number);
+  if (!vatNumber) {
+    return deriveCompanyVatStatus(vatInfo, first.records, undefined,
+      { ok: false, code: "emta_registration_not_found", detail: `${withoutLookup.vat_number} is not an Estonian VAT number (EE + 9 digits)` });
+  }
+  const startedAt = now();
+  const stored = storedLookup(first.records, vatNumber);
+  if (stored?.evidence.kind === "success" && startedAt - Date.parse(stored.looked_up_at) < EMTA_LOOKUP_MAX_AGE_MS) {
+    return deriveCompanyVatStatus(vatInfo, first.records, undefined, winningLookup(first.records, vatNumber, startedAt));
+  }
+  const { outcome, at } = await lookupEmtaKmkrCached(vatNumber, startedAt, deps.emta, stored ? Date.parse(stored.looked_up_at) : undefined);
+  const own = evidenceRecord(vatNumber, outcome, at);
+  if (own && first.records !== null) {
+    try {
+      limitedVatStore.upsertIf([own], current => {
+        const newest = storedLookup(current, vatNumber);
+        return !newest || Date.parse(newest.looked_up_at) < at;
+      });
+    } catch (error) {
+      // An unstored contradiction would leave an older answer the newest record: say so.
+      if (own.evidence.kind === "contradiction") {
+        return deriveCompanyVatStatus(vatInfo, first.records, `EMTA's answer for ${vatNumber} could not be stored: ${(error as Error).message}`);
+      }
+      // An unstored success: this call still derives from it when it is the newest evidence.
+    }
+  }
+  return readAndDerive(vatInfo, records => winningLookup(records, vatNumber, now(), own, own || outcome.ok ? undefined : outcome)).resolved;
 }
 
 /** The resolved status for a VAT decision; throws `CompanyVatStatusUnknownError` for `unknown`. */
