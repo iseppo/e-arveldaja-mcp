@@ -96,7 +96,7 @@ export function registerSystemTools(ctx: RegisterSystemToolsContext): void {
   // core read: visible in standard/full, hidden from guided/guided-sales by
   // isToolVisibleForProfile, and in no opt-out feature-group so no flag drops it.
   registerTool(publicServer, "get_server_status",
-    "Report the running e-arveldaja MCP server version, the active tool profile, any active point-of-use release notices, and the last API health-probe outcome (cached; no API call). Read-only; needs no credentials.",
+    "Report the running e-arveldaja MCP server version, the active tool profile, any active point-of-use release notices, and any active per-server 401 cooldown (in-memory; no API call). Read-only; needs no credentials.",
     {},
     { ...readOnly, title: "Get Server Status" },
     async () => ({

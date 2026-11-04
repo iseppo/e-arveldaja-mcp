@@ -1,161 +1,124 @@
-// API health probe + per-connection 401 brake.
+// 401 brake, shared per API server.
 //
-// When an authenticated API request fails with 401, 5xx or a network/timeout
-// error, ONE unauthenticated GET is sent to the same API server to tell "the
-// server is responding" apart from "the server is down or unreachable"
-// (timeout, network/TLS error, 5xx). An unauthenticated probe cannot tell a
-// healthy API apart from one that rejects every key: both may answer it with
-// 401. The probe only enriches the original error; it never changes its outcome.
+// Every connection to the same server (base URL) feeds one brake, so a burst of
+// 401s across several connections — e.g. stale connections all refused at once,
+// or an all-401 incident / IP block — trips it, and switching connections does
+// not bypass it. No extra request is ever sent: advice is derived from the
+// failing request alone (an unauthenticated probe cannot tell a healthy API
+// from one that refuses every key — both answer 401, live-verified 2026-11-04).
 
-/**
- * Single place for the probe target.
- * LIVE-VERIFIED 2026-11-04: the healthy live API answers an unauthenticated
- * `GET https://rmp-api.rik.ee/v1/openapi.yaml` with 401 in ~0.2 s (while an
- * authenticated request on a valid key got 200). So any HTTP answer below 500
- * means "reachable"; only a timeout, network/TLS error or 5xx means
- * "unreachable" (the outages seen that day hung after TLS without answering).
- */
-export const API_HEALTH_PROBE = Object.freeze({
-  /** Appended to the connection's base URL (which already ends in `/v1`). */
-  path: "/openapi.yaml",
-  timeoutMs: 5_000,
-  /** At most one probe per server per window; the outcome is reused inside it. */
-  cacheWindowMs: 60_000,
-});
-
-/** Consecutive-401 brake: N 401s within the window → refuse locally for the cooldown. */
+/** 401 brake: N 401s on one server within the window → refuse locally for the cooldown. */
 export const AUTH_BRAKE = Object.freeze({
   threshold: 3,
   windowMs: 60_000,
   cooldownMs: 60_000,
 });
 
-/**
- * "reachable": the server answered the probe with a non-5xx status (401 is the
- * normal answer). "unreachable": timeout, network/TLS error or 5xx.
- * "unknown": no probe outcome.
- */
-export type ApiHealth = "reachable" | "unreachable" | "unknown";
-
-export interface ApiHealthProbeOutcome {
-  readonly api_health: ApiHealth;
-  /** HTTP status of the probe, `"network"` when it got none, null when no probe ran. */
-  readonly probe_status: number | "network" | null;
-  /** ISO-8601 time the probe finished. */
-  readonly checked_at: string;
-}
-
-export interface ApiHealthStatusEntry extends ApiHealthProbeOutcome {
+export interface AuthBrakeState {
   readonly server: string;
-}
-
-interface CacheEntry {
-  at: number;
-  outcome?: ApiHealthProbeOutcome;
-  pending?: Promise<ApiHealthProbeOutcome>;
-}
-
-const probeCache = new Map<string, CacheEntry>();
-
-function normalizeServer(baseUrl: string): string {
-  return baseUrl.trim().replace(/\/+$/, "");
-}
-
-async function runProbe(server: string): Promise<ApiHealthProbeOutcome> {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), API_HEALTH_PROBE.timeoutMs);
-  try {
-    // No auth headers, no credentials, no company data: a plain public GET.
-    const response = await fetch(`${server}${API_HEALTH_PROBE.path}`, {
-      method: "GET",
-      signal: controller.signal,
-      redirect: "manual",
-    });
-    // Only the status matters; never buffer the body.
-    try { await response.body?.cancel(); } catch { /* ignore */ }
-    const status = response.status;
-    return {
-      api_health: status >= 500 ? "unreachable" : "reachable",
-      probe_status: status,
-      checked_at: new Date().toISOString(),
-    };
-  } catch {
-    return { api_health: "unreachable", probe_status: "network", checked_at: new Date().toISOString() };
-  } finally {
-    clearTimeout(timeoutId);
-  }
+  /** ISO-8601 end of the local cooldown, null when requests may be sent. */
+  readonly cooldown_until: string | null;
+  /** Distinct connections with a 401 in the current window (or in the window that tripped the cooldown). */
+  readonly distinct_connections_401: number;
 }
 
 /**
- * Probe outcome for `baseUrl`, rate-limited to one probe per server per
- * `cacheWindowMs` (concurrent callers share one in-flight probe). Never throws.
+ * 401 brake for one API server, shared by every connection to it.
+ *
+ * Each connection keeps its own 401 history; a success resets only that
+ * connection's history, so a healthy connection cannot erase a stale one's
+ * failures. The brake trips when the server has `threshold` 401s within
+ * `windowMs`, counted across all connections' histories.
  */
-export async function probeApiHealth(baseUrl: string): Promise<ApiHealthProbeOutcome> {
-  try {
-    const server = normalizeServer(baseUrl);
-    const now = Date.now();
-    const cached = probeCache.get(server);
-    if (cached && now - cached.at < API_HEALTH_PROBE.cacheWindowMs) {
-      if (cached.outcome) return cached.outcome;
-      if (cached.pending) return await cached.pending;
-    }
-    const entry: CacheEntry = { at: now };
-    entry.pending = runProbe(server).then((outcome) => {
-      entry.outcome = outcome;
-      entry.pending = undefined;
-      return outcome;
-    });
-    probeCache.set(server, entry);
-    return await entry.pending;
-  } catch {
-    return { api_health: "unknown", probe_status: null, checked_at: new Date().toISOString() };
-  }
-}
-
-/** Most recent cached probe outcome per server (no network). */
-export function getLastApiHealthProbes(): ApiHealthStatusEntry[] {
-  const entries: ApiHealthStatusEntry[] = [];
-  for (const [server, entry] of probeCache) {
-    if (entry.outcome) entries.push({ server, ...entry.outcome });
-  }
-  return entries;
-}
-
-/** Test hook: forget every cached probe outcome. */
-export function resetApiHealthProbes(): void {
-  probeCache.clear();
-}
-
-/** Consecutive-401 brake for one connection + server (one instance per HttpClient). */
 export class AuthBrake {
-  private streak = 0;
-  private streakStartedAt = 0;
   private blockedUntil = 0;
+  /** Connection label (never a secret) → timestamps of its 401s since its last success. */
+  private histories = new Map<string, number[]>();
+  /** Distinct connections of the window that tripped the active cooldown. */
+  private trippedConnections = 0;
+
+  constructor(readonly server: string) {}
 
   /** Milliseconds of cooldown left, 0 when requests may be sent. */
   remainingMs(now = Date.now()): number {
     if (this.blockedUntil > now) return this.blockedUntil - now;
     if (this.blockedUntil !== 0) {
       this.blockedUntil = 0;
-      this.streak = 0;
+      this.trippedConnections = 0;
+      this.histories.clear();
     }
     return 0;
   }
 
-  recordUnauthorized(now = Date.now()): void {
-    if (this.streak === 0 || now - this.streakStartedAt > AUTH_BRAKE.windowMs) {
-      this.streak = 0;
-      this.streakStartedAt = now;
-    }
-    this.streak += 1;
-    if (this.streak >= AUTH_BRAKE.threshold) {
+  /** Distinct connections that got 401 in the window behind the active cooldown. */
+  get distinctConnections401(): number {
+    return this.trippedConnections;
+  }
+
+  recordUnauthorized(connection: string, now = Date.now()): void {
+    this.expire(now);
+    const history = this.histories.get(connection) ?? [];
+    history.push(now);
+    this.histories.set(connection, history);
+    let total = 0;
+    for (const timestamps of this.histories.values()) total += timestamps.length;
+    if (total >= AUTH_BRAKE.threshold) {
       this.blockedUntil = now + AUTH_BRAKE.cooldownMs;
-      this.streak = 0;
+      this.trippedConnections = this.histories.size;
+      this.histories.clear();
     }
   }
 
-  /** A successful (2xx) answer on this connection resets the streak. */
-  recordSuccess(): void {
-    this.streak = 0;
+  /** A successful (2xx) answer resets only that connection's 401 history. */
+  recordSuccess(connection: string): void {
+    this.histories.delete(connection);
   }
+
+  state(now = Date.now()): AuthBrakeState {
+    const blocked = this.remainingMs(now) > 0;
+    if (!blocked) this.expire(now);
+    return {
+      server: this.server,
+      cooldown_until: blocked ? new Date(this.blockedUntil).toISOString() : null,
+      distinct_connections_401: blocked ? this.trippedConnections : this.histories.size,
+    };
+  }
+
+  /** Drop 401s older than the window, and connections left with none. */
+  private expire(now: number): void {
+    for (const [connection, timestamps] of this.histories) {
+      const recent = timestamps.filter(at => now - at <= AUTH_BRAKE.windowMs);
+      if (recent.length > 0) this.histories.set(connection, recent);
+      else this.histories.delete(connection);
+    }
+  }
+}
+
+const brakes = new Map<string, AuthBrake>();
+
+function normalizeServer(baseUrl: string): string {
+  return baseUrl.trim().replace(/\/+$/, "");
+}
+
+/** The one brake shared by every connection to `baseUrl`'s server. */
+export function authBrakeFor(baseUrl: string): AuthBrake {
+  const server = normalizeServer(baseUrl);
+  let brake = brakes.get(server);
+  if (!brake) {
+    brake = new AuthBrake(server);
+    brakes.set(server, brake);
+  }
+  return brake;
+}
+
+/** Brakes that are cooling down or hold unexpired 401s (no network). */
+export function getAuthBrakeStates(now = Date.now()): AuthBrakeState[] {
+  return [...brakes.values()]
+    .map(brake => brake.state(now))
+    .filter(state => state.cooldown_until !== null || state.distinct_connections_401 > 0);
+}
+
+/** Test hook: forget every brake. */
+export function resetAuthBrakes(): void {
+  brakes.clear();
 }

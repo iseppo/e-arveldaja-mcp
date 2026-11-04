@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { HttpClient, HttpError, isNotFoundHttpError } from "./http-client.js";
-import { resetApiHealthProbes } from "./api-health.js";
+import { resetAuthBrakes } from "./api-health.js";
 
 const config = {
   apiKeyId: "test-key-id",
@@ -9,14 +9,13 @@ const config = {
   baseUrl: "https://rmp-api.rik.ee/v1",
 };
 
-/** fetch calls made for the API request itself (excludes the health probe). */
 function apiCalls(fetchMock: Mock): unknown[][] {
-  return fetchMock.mock.calls.filter(([url]) => !String(url).endsWith("/openapi.yaml"));
+  return fetchMock.mock.calls;
 }
 
 describe("HttpClient", () => {
   beforeEach(() => {
-    resetApiHealthProbes();
+    resetAuthBrakes();
   });
 
   afterEach(() => {
@@ -193,14 +192,13 @@ describe("HttpClient", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
-  it("keeps 401 troubleshooting local: the only extra request is the same-server health probe", async () => {
+  it("keeps 401 troubleshooting local: no request besides the failing one", async () => {
     vi.useFakeTimers();
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify({ messages: ["Unauthorized"] }), {
         status: 401,
         headers: { "content-type": "application/json" },
-      }))
-      .mockResolvedValueOnce(new Response("openapi: 3.0.0", { status: 200 }));
+      }));
     vi.stubGlobal("fetch", fetchMock);
 
     const client = new HttpClient(config);
@@ -212,7 +210,6 @@ describe("HttpClient", () => {
     await expectation;
     expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual([
       "https://rmp-api.rik.ee/v1/clients",
-      "https://rmp-api.rik.ee/v1/openapi.yaml",
     ]);
   });
 

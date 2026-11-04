@@ -2,7 +2,7 @@ import type { Config } from "./config.js";
 import { createAuthHeaders } from "./auth.js";
 import { wrapUntrustedOcr } from "./mcp-json.js";
 import { buildConnectionFingerprint } from "./connection-fingerprint.js";
-import { AUTH_BRAKE, AuthBrake, probeApiHealth, type ApiHealth } from "./api-health.js";
+import { AUTH_BRAKE, authBrakeFor, type AuthBrake } from "./api-health.js";
 
 export type HttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 
@@ -36,18 +36,11 @@ export class HttpError extends Error {
     args?: Record<string, unknown>;
     why: string;
   }>;
-  /**
-   * Set on 401 / 5xx / network failures from the unauthenticated health probe
-   * (`src/api-health.ts`): "reachable" = the server answered the probe (any
-   * non-5xx; 401 is normal), so a 401 points at this connection's credentials;
-   * "unreachable" = timeout, network/TLS error or 5xx (the API appears down).
-   */
-  readonly api_health?: ApiHealth;
-  readonly probe_status?: number | "network" | null;
-  readonly probe_checked_at?: string;
-  /** `"auth_cooldown"`: refused locally by the consecutive-401 brake, nothing sent. */
+  /** `"auth_cooldown"`: refused locally by the per-server consecutive-401 brake, nothing sent. */
   readonly code?: "auth_cooldown";
   readonly cooldown_seconds_remaining?: number;
+  /** On `auth_cooldown`: distinct connections to this server whose 401s tripped the brake. */
+  readonly distinct_connections_401?: number;
 
   constructor(
     message: string,
@@ -59,11 +52,9 @@ export class HttpError extends Error {
       recovery_hint?: string;
       upstream_not_found?: boolean;
       next_actions?: Array<{ tool: string; args?: Record<string, unknown>; why: string }>;
-      api_health?: ApiHealth;
-      probe_status?: number | "network" | null;
-      probe_checked_at?: string;
       code?: "auth_cooldown";
       cooldown_seconds_remaining?: number;
+      distinct_connections_401?: number;
     },
   ) {
     super(message);
@@ -80,12 +71,12 @@ export class HttpError extends Error {
     if (options?.next_actions !== undefined) {
       this.next_actions = options.next_actions;
     }
-    if (options?.api_health !== undefined) this.api_health = options.api_health;
-    if (options?.probe_status !== undefined) this.probe_status = options.probe_status;
-    if (options?.probe_checked_at !== undefined) this.probe_checked_at = options.probe_checked_at;
     if (options?.code !== undefined) this.code = options.code;
     if (options?.cooldown_seconds_remaining !== undefined) {
       this.cooldown_seconds_remaining = options.cooldown_seconds_remaining;
+    }
+    if (options?.distinct_connections_401 !== undefined) {
+      this.distinct_connections_401 = options.distinct_connections_401;
     }
   }
 }
@@ -123,22 +114,15 @@ const UNAUTHORIZED_TROUBLESHOOTING =
   `     Multiple IP addresses can be added, separated by ;\n` +
   `  3. Is this computer's clock correct? Requests are signed with the current time, so a wrong clock is refused.`;
 
-/**
- * 401 while the unauthenticated probe got an answer. The live API answers that
- * probe with 401 even when healthy, so this is no proof either way about an
- * outage — point at the connection's own credentials, never claim an outage.
- */
-const API_RESPONDING_401_ADVICE =
-  "The e-arveldaja API server is responding, so this 401 most likely concerns this connection: " +
-  "check the API key (expired, replaced, or for a different company), the allowed IP address list, " +
-  "and this computer's clock. Restart the MCP server after changing stored credentials. " +
-  "This check cannot rule out a server-side problem, but it does not indicate an outage.";
+/** Added to every 401: the failing request alone cannot tell a stale key from a server- or IP-side block. */
+const UNAUTHORIZED_BLOCK_ADVICE =
+  "If several connections fail at once, or this connection worked moments ago, suspect a server- or IP-side block: " +
+  "wait and retry, do not change API keys.";
 
-/** Timeout / network / TLS error / 5xx on the probe too. */
+/** Timeout / network / TLS error / 5xx on the request itself. */
 const API_DOWN_ADVICE =
-  "The e-arveldaja API server did not answer a health check either (timeout, network/TLS error or server error), " +
-  "so the API appears to be down or unreachable from this machine right now. " +
-  "This is probably not a credentials problem — do not change the API key; retry in a few minutes.";
+  "The e-arveldaja API did not answer (timeout, network/TLS error or server error); it may be down or unreachable " +
+  "from this machine. This is probably not a credentials problem — retry in a few minutes.";
 const INITIAL_RETRY_DELAY_MS = 1_000;
 
 export class HttpClient {
@@ -148,7 +132,8 @@ export class HttpClient {
   private lastRequest = Promise.resolve();
   private nextAllowedAt = 0;
   private readonly minIntervalMs = 100; // Max ~10 req/sec
-  private readonly authBrake = new AuthBrake();
+  /** Shared by every connection to the same API server. */
+  private readonly authBrake: AuthBrake;
 
   constructor(
     private config: Config,
@@ -157,6 +142,7 @@ export class HttpClient {
   ) {
     this.connectionFingerprint = buildConnectionFingerprint(config);
     this.apiBaseUrl = config.baseUrl.trim().replace(/\/+$/, "");
+    this.authBrake = authBrakeFor(this.apiBaseUrl);
   }
 
   private assertRequestAllowed(): void {
@@ -380,83 +366,76 @@ export class HttpClient {
   }
 
   /**
-   * Sends the request, guarded by the consecutive-401 brake. A 401, 5xx or
-   * network failure is enriched with one rate-limited health probe of the same
-   * server; the probe never changes whether or how the request failed.
+   * Sends the request, guarded by the per-server 401 brake. A 401, 5xx or
+   * network failure gets advice derived from that failure alone; no other
+   * request is ever sent.
    */
   async request<T = unknown>(path: string, options: RequestOptions = {}): Promise<T> {
-    const method = options.method ?? "GET";
-    const remainingMs = this.authBrake.remainingMs();
-    if (remainingMs > 0) {
-      const seconds = Math.ceil(remainingMs / 1000);
-      throw new HttpError(
-        `API request refused locally: ${method} ${path} → auth_cooldown (${seconds} s remaining). ` +
-          `This connection got ${AUTH_BRAKE.threshold} consecutive 401 Unauthorized answers; further requests are ` +
-          `paused because repeated failed authentications can trigger a server-side lockout. Nothing was sent.`,
-        401,
-        method,
-        path,
-        {
-          code: "auth_cooldown",
-          cooldown_seconds_remaining: seconds,
-          recovery_hint: `Wait ${seconds} s before retrying; do not loop over connections or retry in a tight loop.`,
-        },
-      );
-    }
+    this.assertAuthBrakeOpen(options.method ?? "GET", path);
     let result: T;
     try {
       result = await this.sendRequest<T>(path, options);
     } catch (error) {
       if (!(error instanceof HttpError)) throw error;
-      if (error.status === 401) this.authBrake.recordUnauthorized();
-      throw await this.withApiHealth(error);
+      // A local refusal is not an upstream 401: don't count it, keep its metadata.
+      if (error.code === "auth_cooldown") throw error;
+      if (error.status === 401) this.authBrake.recordUnauthorized(this.cacheNamespace);
+      throw HttpClient.enrichFailure(error);
     }
-    this.authBrake.recordSuccess();
+    this.authBrake.recordSuccess(this.cacheNamespace);
     return result;
   }
 
-  private async withApiHealth(error: HttpError): Promise<HttpError> {
+  /**
+   * Refuses locally while the server's 401 brake is cooling down. Checked when
+   * a request starts and again immediately before every fetch, so a request
+   * queued for its rate-limit turn or sleeping before a retry cannot slip past
+   * a cooldown another request tripped meanwhile.
+   */
+  private assertAuthBrakeOpen(method: HttpMethod, path: string): void {
+    const remainingMs = this.authBrake.remainingMs();
+    if (remainingMs <= 0) return;
+    const seconds = Math.ceil(remainingMs / 1000);
+    const connections = this.authBrake.distinctConnections401;
+    const scope = connections >= 2
+      ? `${connections} different connections got 401 Unauthorized from this API server within ` +
+        `${AUTH_BRAKE.windowMs / 1000} s, which points to a server- or IP-side problem, not one stale API key.`
+      : `${AUTH_BRAKE.threshold} consecutive 401 Unauthorized answers came from this API server on one connection.`;
+    throw new HttpError(
+      `API request refused locally: ${method} ${path} → auth_cooldown (${seconds} s remaining). ` +
+        `${scope} Further requests to this server are paused on every connection, because repeated failed ` +
+        `authentications can trigger a server-side lockout. Nothing was sent.`,
+      401,
+      method,
+      path,
+      {
+        code: "auth_cooldown",
+        cooldown_seconds_remaining: seconds,
+        distinct_connections_401: connections,
+        recovery_hint: `Wait ${seconds} s before retrying; do not loop over connections or retry in a tight loop.`,
+      },
+    );
+  }
+
+  /** Advice for a 401, 5xx or network failure, derived from the failure alone. */
+  private static enrichFailure(error: HttpError): HttpError {
     const status = error.status;
-    const probed = status === 401 || status === "network" || status >= 500;
-    if (!probed) return error;
-    let outcome: Awaited<ReturnType<typeof probeApiHealth>> | undefined;
-    try {
-      outcome = await probeApiHealth(this.apiBaseUrl);
-    } catch {
-      outcome = undefined;
-    }
-    const apiDown = outcome?.api_health === "unreachable";
-    const apiResponding = outcome?.api_health === "reachable";
     let message = error.message;
     let recovery_hint = error.recovery_hint;
-    let next_actions = error.next_actions;
     if (status === 401) {
-      if (apiDown) {
-        message += `\n\n${API_DOWN_ADVICE}`;
-      } else if (apiResponding) {
-        message += `\n\n${API_RESPONDING_401_ADVICE}${UNAUTHORIZED_TROUBLESHOOTING}`;
-        recovery_hint = API_RESPONDING_401_ADVICE;
-      } else {
-        message += UNAUTHORIZED_TROUBLESHOOTING;
-      }
-    }
-    if (apiDown) {
+      message += `${UNAUTHORIZED_TROUBLESHOOTING}\n\n${UNAUTHORIZED_BLOCK_ADVICE}`;
+      recovery_hint = recovery_hint ? `${recovery_hint} ${UNAUTHORIZED_BLOCK_ADVICE}` : UNAUTHORIZED_BLOCK_ADVICE;
+    } else if (status === "network" || status >= 500) {
       recovery_hint = API_DOWN_ADVICE;
-      next_actions = undefined;
-    }
-    try {
-      return new HttpError(message, status, error.method, error.path, {
-        upstream_detail: error.upstream_detail,
-        recovery_hint,
-        upstream_not_found: error.upstream_not_found === true,
-        next_actions,
-        api_health: outcome?.api_health ?? "unknown",
-        probe_status: outcome?.probe_status ?? null,
-        ...(outcome ? { probe_checked_at: outcome.checked_at } : {}),
-      });
-    } catch {
+    } else {
       return error;
     }
+    return new HttpError(message, status, error.method, error.path, {
+      upstream_detail: error.upstream_detail,
+      recovery_hint,
+      upstream_not_found: error.upstream_not_found === true,
+      next_actions: error.next_actions,
+    });
   }
 
   private async sendRequest<T>(path: string, options: RequestOptions): Promise<T> {
@@ -493,6 +472,7 @@ export class HttpClient {
 
       await this.waitForRateLimitTurn();
       this.assertRequestAllowed();
+      this.assertAuthBrakeOpen(method, path);
 
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 60_000);
@@ -563,8 +543,8 @@ export class HttpClient {
             // Non-JSON error body — don't expose raw text
           }
 
-          // 401 troubleshooting text is added by request() once the health
-          // probe says whether the API is up (credentials) or down (outage).
+          // 401 troubleshooting text and 5xx outage advice are added by
+          // request() from this failure alone.
           throw new HttpError(errorMessage, response.status, method, path, {
             upstream_detail: upstreamDetail,
             ...(upstreamNotFound ? { upstream_not_found: true } : {}),
