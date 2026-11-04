@@ -3603,6 +3603,29 @@ describe("receipt fields — invoice number, supplier and document type misreads
       expect(extractReceiptFieldsFromText(text, "x.pdf", options).supplier_name).toBe(expected);
     });
 
+    it("an indented label beside another column's heading takes its own column of the next row", () => {
+      const text = [
+        "    Müüja:       Kontakt",
+        "    Õige Tarnija OÜ       Jane Doe",
+        "Arve nr INV-42",
+        "Kuupäev 03.11.2026",
+        "Summa ilma KM-ta 10,00",
+        "Käibemaks 0% 0,00",
+        "Kokku 10,00 EUR",
+      ].join("\n");
+      expect(extractReceiptFieldsFromText(text, "receipt.pdf").supplier_name).toBe("Õige Tarnija OÜ");
+    });
+
+    it("a company heading ending in a colon stays a layout supplier candidate", () => {
+      const text = ["Müüja:", "ABC OÜ:", "Põhjaranniku Kommertspank AS", "Arve nr INV-42", "Kuupäev 03.11.2026", "Summa ilma KM-ta 10,00", "Käibemaks 0% 0,00", "Kokku 10,00 EUR"].join("\n");
+      const textItems = [
+        { text: "Müüja:", x: 50, y: 100, width: 30, height: 8, pageNum: 1 },
+        { text: "ABC OÜ:", x: 50, y: 120, width: 60, height: 20, pageNum: 1 },
+        { text: "Põhjaranniku Kommertspank AS", x: 50, y: 145, width: 150, height: 8, pageNum: 1 },
+      ];
+      expect(extractReceiptFieldsFromText(text, "receipt.pdf", { textItems: textItems as never }).supplier_name).toBe("ABC OÜ");
+    });
+
     it("an indented bare supplier label beside a buyer label takes its own column of the next row", () => {
       const text = "    Müüja:                  Ostja:\n    Tarnija OÜ              Proovi OÜ\nKokku 10,00 EUR";
       expect(extractReceiptFieldsFromText(text, "x.pdf").supplier_name).toBe("Tarnija OÜ");

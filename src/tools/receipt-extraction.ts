@@ -1044,6 +1044,10 @@ const ESTONIAN_NONPROFIT_FORM_RE =
 const NONPROFIT_EXCLUDED_ROLE_LABEL_RE =
   /^(?:maksja|ostja|arve\s+saaja|saaja|klient|buyer|bill\s+to|invoice\s+to|recipient|client|haldaja|haldur|haldus|valitseja|administrator|manager|property\s+manager)\b/iu;
 
+// A general legal form anywhere in a text ("OÜ Näidis", "Näidis AS"). A
+// trailing \b never matches after "Ü", hence the look-ahead.
+const GENERAL_LEGAL_FORM_RE = /\b(OÜ|OU|AS|MTÜ|FIE|UAB|SIA|LLC|LTD|GMBH|OY|AB|INC|LIMITED|TMI)(?![A-Za-zÀ-ž0-9])/i;
+
 function cleanSupplierCandidate(raw: string): string | undefined {
   let candidate = raw
     .replace(SUPPLIER_LABEL_RE, "")
@@ -2944,8 +2948,9 @@ function extractSupplierNameFromLayout(
   for (const marker of supplierMarkers) {
     for (const item of textItems) {
       if (!isLayoutItemInSupplierRegion(item, marker, markers)) continue;
-      // A field label ("Väljastamise kuupäev:") is never a supplier name.
-      if (/:\s*$/.test(item.text)) continue;
+      // A field label ("Väljastamise kuupäev:") is never a supplier name; a
+      // company heading ending in a colon ("ABC OÜ:") still is.
+      if (/:\s*$/.test(item.text) && !GENERAL_LEGAL_FORM_RE.test(item.text)) continue;
       const candidate = cleanSupplierCandidateExcludingOwn(item.text, ownCompanyName);
       if (!candidate) continue;
       candidates.push({
@@ -3022,12 +3027,15 @@ function extractSupplierNameFromText(
     // A supplier label in a RIGHT column with no value ("Buyer OÜ    Makse
     // saaja:"): the supplier is the same column of the next line.
     const columns = rows[index]!.raw.split(/\s{2,}/).map(clampTextLine);
-    // A label whose value follows it in the next column of the same row
-    // ("    Müüja:   OÜ Näidis Trade") is not a bare right-column label.
-    const labelColumn = columns.findIndex((segment, column) =>
-      column > 0 && isSupplierLabel(segment) && clean(segment) === undefined &&
-      !(columns[column + 1] !== undefined && columns[column + 1] !== "" && !columns[column + 1]!.includes(":") &&
-        !PURE_BUYER_LABEL_RE.test(columns[column + 1]!) && !NONPROFIT_EXCLUDED_ROLE_LABEL_RE.test(columns[column + 1]!)));
+    // A label whose company name follows it in the next column of the same row
+    // ("    Müüja:   OÜ Näidis Trade") is not a bare right-column label; any
+    // other neighbour ("Müüja:   Kontakt", "Müüja:   Ostja:") is another
+    // column's heading, so the supplier is still the next row's column.
+    const labelColumn = columns.findIndex((segment, column) => {
+      if (column <= 0 || !isSupplierLabel(segment) || clean(segment) !== undefined) return false;
+      const neighbour = columns[column + 1];
+      return !(neighbour !== undefined && !neighbour.includes(":") && GENERAL_LEGAL_FORM_RE.test(neighbour) && clean(neighbour) !== undefined);
+    });
     if (labelColumn > 0) {
       const nextColumns = rows[index + 1]?.raw.split(/\s{2,}/).map(clampTextLine) ?? [];
       const columnCandidate = clean(nextColumns[labelColumn] ?? "");
@@ -3076,7 +3084,7 @@ function extractSupplierNameFromText(
   // registry code's labelled occurrence, or the line directly above it, and
   // never inside a buyer or property-manager block. Several such lines, or no
   // selected code, leave today's choice.
-  const generalCompanyPattern = /\b(OÜ|OU|AS|MTÜ|FIE|UAB|SIA|LLC|LTD|GMBH|OY|AB|INC|LIMITED|TMI)(?![A-Za-zÀ-ž0-9])/i;
+  const generalCompanyPattern = GENERAL_LEGAL_FORM_RE;
   const inExcludedRole = (index: number) =>
     [index, index - 1, index - 2].some(at => at >= 0 && NONPROFIT_EXCLUDED_ROLE_LABEL_RE.test(rows[at]!.line));
   const anchoredNonprofitRows = new Set<number>();

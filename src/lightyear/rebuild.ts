@@ -206,12 +206,28 @@ export async function simulateLightyearYear(params: SimulateParams): Promise<Sim
   const warnings: string[] = [];
   const period = { from: params.from, to: params.to };
 
-  const apply = (source: ProposedJournal["source"], command: { reference: string; date: string; postings: Array<{ accounts_id: number; accounts_dimensions_id?: number; type: "D" | "C"; amount: number }>; poolEvent?: PendingPoolEvent }) => {
+  type Command = { reference: string; date: string; postings: Array<{ accounts_id: number; accounts_dimensions_id?: number; type: "D" | "C"; amount: number }>; poolEvent?: PendingPoolEvent };
+  // As the booking tools: every posting of the projection is validated against
+  // the chart first (a unique dimension is auto-filled); any error refuses the
+  // whole projection, so nothing of it is applied.
+  const applyProjection = (source: ProposedJournal["source"], commands: readonly Command[]) => {
     if (params.chart) {
-      for (const message of validatePostingDimensions(command.postings as Posting[], params.chart.accounts, params.chart.dimensions)) {
-        warnings.push(`${command.reference}: ${message}`);
+      const chart = params.chart;
+      const failures = commands.map(command => ({
+        command, errors: validatePostingDimensions(command.postings as Posting[], chart.accounts, chart.dimensions),
+      })).filter(entry => entry.errors.length > 0);
+      if (failures.length > 0) {
+        for (const { command, errors } of failures) {
+          reviews.push({ reference: command.reference, source, status: "account_validation_failed", reason: errors.join("; ") });
+        }
+        warnings.push(`${source}: account validation failed for ${failures.length} of ${commands.length} command(s); the booking tool refuses the whole run, so none is applied.`);
+        return;
       }
     }
+    for (const command of commands) apply(source, command);
+  };
+
+  const apply = (source: ProposedJournal["source"], command: Command) => {
     const postings = canonicalPoolPostings(command.postings);
     const event = command.poolEvent;
     if (event?.source_evidence) {
@@ -239,7 +255,7 @@ export async function simulateLightyearYear(params: SimulateParams): Promise<Sim
       reward_account: accounts.reward_account, tax_account: accounts.tax_account, fee_account: accounts.distribution_fee_account,
     },
   });
-  for (const command of distributions.commands) apply("distribution", command);
+  applyProjection("distribution", distributions.commands);
   for (const row of distributions.manualResults) {
     reviews.push({ reference: String(row.reference ?? ""), source: "distribution", status: String(row.status ?? "review"), ...(row.review_reason !== undefined ? { reason: JSON.stringify(row.review_reason) } : {}) });
   }
@@ -255,7 +271,7 @@ export async function simulateLightyearYear(params: SimulateParams): Promise<Sim
       gainAccount: accounts.gain_account, lossAccount: accounts.loss_account, feeAccount: accounts.trade_fee_account, fxAccount: accounts.fx_account,
     },
   });
-  for (const command of trades.commands) apply("trade", command);
+  applyProjection("trade", trades.commands);
   for (const row of trades.planned) {
     if (row.kind !== "result") continue;
     const result = row.row;

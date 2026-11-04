@@ -107,6 +107,18 @@ describe("simulateLightyearYear accounts as the booking tools", () => {
     expect(postingsOf(sim.journals, "IN-TESTFEE001")).toEqual(expect.arrayContaining([["D", 8610, 942302, 14]]));
     expect(postingsOf(sim.journals, "RW-TESTRWD001")).toEqual(expect.arrayContaining([["C", 8600, 942290, 1500]]));
   });
+
+  it("refuses the whole distribution run when a posting fails account validation, as the tool does", async () => {
+    // 8600 has two dimensions and none is chosen: book_lightyear_distributions answers
+    // "Account validation failed" and books nothing, so the simulation applies nothing either.
+    const ambiguous = {
+      ...CHART,
+      dimensions: [...CHART.dimensions, { id: 942291, accounts_id: 8600, title_est: "Teine", is_deleted: false }] as unknown as AccountDimension[],
+    };
+    const sim = await run(ambiguous);
+    expect(sim.journals.filter(journal => journal.source === "distribution")).toEqual([]);
+    expect(sim.reviews).toEqual([expect.objectContaining({ reference: "RW-TESTRWD001", source: "distribution", status: "account_validation_failed" })]);
+  });
 });
 
 describe("GetOnlyHttpClient", () => {
