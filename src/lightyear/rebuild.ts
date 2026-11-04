@@ -183,10 +183,12 @@ function memoryApi(ledger: Map<number, Journal>): ApiContext {
 /** Simulate one period of Lightyear bookings; see the module comment. */
 export async function simulateLightyearYear(params: SimulateParams): Promise<SimulationResult> {
   const { accounts, opening } = params;
+  // Every movement after the opening is replayed, also those between the opening and --from (astra review
+  // 2026-11-04 #6); only the output is limited to --from..--to.
   const rows = parseAccountStatement(params.statementCsv).filter(row => {
     const day = rowDay(row);
     // Rows without a valid timestamp stay in: the production checks refuse them (unplaceable).
-    return day === null || (day >= params.from && day <= params.to);
+    return day === null || (day > opening.as_of && day <= params.to);
   });
   const gainsRows = params.gainsCsv === null ? null : parseCapitalGains(params.gainsCsv);
   const key: PoolKey = {
@@ -204,7 +206,8 @@ export async function simulateLightyearYear(params: SimulateParams): Promise<Sim
   const journals: ProposedJournal[] = [];
   const reviews: RebuildReview[] = [];
   const warnings: string[] = [];
-  const period = { from: params.from, to: params.to };
+  const replayFrom = new Date(Date.parse(`${opening.as_of}T00:00:00Z`) + 86_400_000).toISOString().slice(0, 10);
+  const period = { from: replayFrom, to: params.to };
 
   type Command = { reference: string; date: string; postings: Array<{ accounts_id: number; accounts_dimensions_id?: number; type: "D" | "C"; amount: number }>; poolEvent?: PendingPoolEvent };
   // As the booking tools: every posting of the projection is validated against
@@ -307,11 +310,11 @@ export async function simulateLightyearYear(params: SimulateParams): Promise<Sim
   for (const row of rows) {
     if ((row.type !== "Deposit" && row.type !== "Withdrawal") || row.ccy.trim().toUpperCase() !== "EUR") continue;
     const day = rowDay(row);
-    if (day === null) continue;
+    if (day === null || day < params.from) continue;
     transfers.set(day.slice(0, 7), (transfers.get(day.slice(0, 7)) ?? 0) + cents(row.net_amount));
   }
   const statementTransfers = [...transfers].sort(([a], [b]) => a.localeCompare(b)).map(([month, value]) => ({ month, cents: value }));
-  return { journals, monthEnds, reviews, warnings, statementTransfers };
+  return { journals: journals.filter(journal => journal.date >= params.from), monthEnds, reviews, warnings, statementTransfers };
 }
 
 // ---- comparison with the books ---------------------------------------------------

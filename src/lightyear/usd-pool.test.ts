@@ -153,7 +153,7 @@ describe("USD pool identity and helpers", () => {
     ]);
   });
 
-  it("orders checkpoints before events at equal timestamps, deterministically by ref", () => {
+  it("orders events before end-of-day checkpoints at equal timestamps, deterministically by ref", () => {
     const records: UsdPoolRecord[] = [
       opening(100, 90),
       event("B-2", "2026-10-20", "buy_relief", -10, -9, 2),
@@ -161,7 +161,10 @@ describe("USD pool identity and helpers", () => {
       event("D-9", "2026-10-30", "distribution_in", 100, 80, 3),
     ];
     expect(poolFrontier(records)?.record).toMatchObject({ ref: "B-2" });
-    expect(checkpointOrder("revaluation", "2026-10-20").rank).toBe(0);
+    // A checkpoint closes its day: an event in the day's last second (23:59:59) orders before it.
+    const lastSecond = Date.parse("2026-10-20T23:59:59Z") / 1000;
+    expect(compareOrder(eventOrder("D-LAST", lastSecond), checkpointOrder("revaluation", "2026-10-20"))).toBeLessThan(0);
+    expect(compareOrder(eventOrder("D-NEXT", lastSecond + 1), checkpointOrder("revaluation", "2026-10-20"))).toBeGreaterThan(0);
   });
 
   it("a later committed sell_in (fixed-EUR inflow) does not move the frontier: an earlier revaluation is not backdated (plan Q3)", () => {

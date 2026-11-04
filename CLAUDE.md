@@ -620,7 +620,7 @@ conversion keeps its net in the pool at the ECB rate; `book_lightyear_trades` ne
 identity — exact statement date+time, ticker, quantity — else `pool_sell_gains_unmatched`, which stops later pool
 commands; gain/loss = ECB consideration − Lightyear FIFO cost basis), `buy_relief` events (`book_lightyear_trades`: a USD
 buy with no 1:1 conversion is paid N:1 — at most one remaining EUR→USD conversion in [buy − 60 s, buy] with a smaller
-gross, pool part = buy gross − conversion USD — or 100 % from the pool; a conversion missing a leg holds every
+gross, pool part = buy gross − conversion USD (a conversion with a fee on its USD leg is held, `conversion_fee_conflict`) — or 100 % from the pool; a conversion missing a leg holds every
 unpaired USD trade of its statement day as `invalid_conversion_pair`, never pool funding; only a `usd_pool_funded` trade
 is valued — an intrinsic pairing/conversion error is a projection barrier that stops later pool commands, and every
 state-independent bookability check (zero-rounded investment, unsafe cost basis, conflicts) runs before the projection; relief at average carrying value, realised FX
@@ -646,7 +646,7 @@ statement covering that day that lacks the row, moves it or changes its amounts 
 whose digest cannot be computed (an amount finer than a cent) is `usd_pool_source_unbound` — never logged, later
 pool commands stop — and a stored statement-derived event without `source_digest` breaks the chain. A
 duplicate found only at create time is read back and committed like a fresh journal, or stops the run.
-Same-second trade commands execute in the pool's (timestamp, reference) valuation order. `validateUsdPool` replays the whole
+Same-second trade commands execute in the pool's (timestamp, reference) valuation order; a checkpoint (stamped at 23:59:59 of its day) orders after every event of that second, so a last-second event belongs to the day it closes. `validateUsdPool` replays the whole
 chain from the opening against fresh journals; records ordered before the latest committed relief
 or checkpoint are refused (`usd_pool_backdated_event`). Order: opening once → distributions →
 trades → confirm drafts → period-end revaluation. FX amounts come only from the pool log and the
@@ -672,7 +672,7 @@ the same ownership rules.
 Read-only rebuild (`src/lightyear/rebuild.ts`, script `npm run lightyear:rebuild-compare`): `simulateLightyearYear`
 runs the production planners `extractLightyearDistributions` / `planLightyearDistributions` / `planLightyearTrades`
 (the code `book_lightyear_distributions` and `book_lightyear_trades` run after reading their files) over an
-in-memory ledger and pool store from an asserted opening, so it stops with production's review codes;
+in-memory ledger and pool store from an asserted opening (every statement row after the opening is replayed; output is limited to `--from..--to`), so it stops with production's review codes;
 `compareWithBooks` (pure) diffs the proposal with live journals over the run's inclusive `--from..--to` range per account/month, `LY:` reference (equal = one
 journal, same effective date, same posting multiset) and broker TRANSACTION transfers. The script's `GetOnlyHttpClient` throws on any non-GET before sending; nothing is written.
 
