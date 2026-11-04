@@ -9,12 +9,18 @@
 export const ACKNOWLEDGEABLE_CAMT_REVIEW_CODES = ["camt_journal_posting_review", "camt_journal_identity_stale"] as const;
 export type CamtAcknowledgeableReviewCode = typeof ACKNOWLEDGEABLE_CAMT_REVIEW_CODES[number];
 
-export type CamtAckRefusalCode =
-  | "camt_ack_nonunique_movement"
-  | "camt_ack_multiple_candidates"
-  | "camt_ack_journal_already_claimed"
-  | "camt_ack_journal_mismatch"
-  | "camt_ack_needs_inbox_scan";
+const CAMT_ACK_REFUSAL_CODES = [
+  "camt_ack_nonunique_movement",
+  "camt_ack_multiple_candidates",
+  "camt_ack_journal_already_claimed",
+  "camt_ack_journal_mismatch",
+  "camt_ack_needs_inbox_scan",
+] as const;
+export type CamtAckRefusalCode = typeof CAMT_ACK_REFUSAL_CODES[number];
+
+export function isCamtAckRefusalCode(code: unknown): code is CamtAckRefusalCode {
+  return (CAMT_ACK_REFUSAL_CODES as readonly unknown[]).includes(code);
+}
 
 export const CAMT_REVIEW_ACKNOWLEDGED = "camt_review_acknowledged";
 

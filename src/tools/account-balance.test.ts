@@ -6,6 +6,7 @@ import { parseMcpResponse, UNTRUSTED_OCR_START_PREFIX, UNTRUSTED_OCR_END_PREFIX 
 import type { Journal, Account } from "../types/api.js";
 import { clearRuntimeCaches } from "../cache-control.js";
 import { makeAccount } from "../__fixtures__/accounting.js";
+import { parseToolPayload } from "../__fixtures__/mcp-response.js";
 import type { AccountBalancePayload, AccountDimensionBalancesPayload, BalanceGroupRow } from "./account-balance.js";
 
 // API-only fixture: the values below become normalized rows returned by the mock server.
@@ -592,8 +593,8 @@ describe("compute_account_dimension_balances tool — unmapped opening-balance d
     registerAccountBalanceTools({} as Parameters<typeof registerAccountBalanceTools>[0], api);
     const handler = capturedHandlers["compute_account_balance"]!;
     const warningsOf = async (args: Record<string, unknown>) => {
-      const data = parseMcpResponse((await handler(args)).content[0]!.text) as Record<string, unknown>;
-      return { balance: data.balance, warnings: data.warnings as string[] };
+      const data = parseToolPayload<AccountBalancePayload>((await handler(args)).content[0]!.text);
+      return { balance: data.balance, opening: data.opening_balance_at_date_from, closing: data.closing_balance, warnings: data.warnings };
     };
 
     const scoped = await warningsOf({ account_id: ACCOUNT_ID, accounts_dimensions_id: DIM_B.id });
@@ -605,9 +606,18 @@ describe("compute_account_dimension_balances tool — unmapped opening-balance d
     expect(whole.balance).toBe(1040);
     expect(whole.warnings.some(w => w.includes("dimension-scoped"))).toBe(false);
 
-    // Range starting after the opening date: the opening balance is not in range at all.
+    // Range starting after the opening date: the INITIAL still feeds the opening figure,
+    // so its unattributed 1000 is still missing from this dimension's opening and closing.
     const later = await warningsOf({ account_id: ACCOUNT_ID, accounts_dimensions_id: DIM_B.id, date_from: "2025-01-01" });
-    expect(later.warnings.some(w => w.includes("dimension-scoped"))).toBe(false);
+    expect(later).toMatchObject({ balance: 40, opening: 0, closing: 40 });
+    expect(later.warnings.some(w => w.includes("1000.00 EUR") && w.includes("NOT in this dimension-scoped figure"))).toBe(true);
+    expect(later.warnings.some(w => w.includes("it is in opening_balance_at_date_from"))).toBe(false);
+    expect(later.warnings.some(w => w.includes("adds nothing to opening_balance_at_date_from"))).toBe(true);
+    // Whole account from the same date: the INITIAL is in opening and closing, and the warning says so.
+    const laterWhole = await warningsOf({ account_id: ACCOUNT_ID, date_from: "2025-01-01" });
+    expect(laterWhole).toMatchObject({ opening: 1000, closing: 1040 });
+    expect(laterWhole.warnings.some(w => w.includes("it is in opening_balance_at_date_from"))).toBe(true);
+    expect(laterWhole.warnings.some(w => w.includes("dimension-scoped"))).toBe(false);
   });
 });
 

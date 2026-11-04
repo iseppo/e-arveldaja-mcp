@@ -8894,3 +8894,50 @@ describe("wise card client from confirmed history (live Anthropic shape, 2026-10
     expectNoWiseMutations(setup.api);
   });
 });
+
+describe("wise fee client: only a live Wise client is selected", () => {
+  beforeEach(() => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/wise.csv" });
+    mockedReadFile.mockReset();
+    mockedLogAudit.mockClear();
+    mockedClearRuntimeCaches.mockClear();
+    mockedReportProgress.mockClear();
+  });
+
+  const args = { file_path: "/tmp/wise.csv", accounts_dimensions_id: 5, fee_account_dimensions_id: 9 };
+  const dimensions = [
+    { id: 5, accounts_id: 1010, title_est: "Wise", is_deleted: false },
+    { id: 9, accounts_id: 8610, title_est: "Muud finantskulud", is_deleted: false },
+  ];
+  const setupFee = (clients: unknown[]) => {
+    mockedReadFile.mockResolvedValue(buildCsvRows([buildM04Values({ id: "FEE-CLIENT-1", sourceFeeAmount: "2", sourceFeeCurrency: "EUR" })]));
+    return setupWiseTool([], undefined, { accountDimensions: dimensions, clients });
+  };
+  const inactiveWise = [
+    ["deactivated", { id: 77, name: "Wise", is_active: false }],
+    ["deactivated by date", { id: 77, name: "Wise", deactivated_date: "2026-05-01" }],
+    ["deleted", { id: 77, name: "Wise", is_deleted: true }],
+  ] as const;
+  type CreateCall = [Record<string, unknown>];
+
+  it.each(inactiveWise)("skips a %s Wise client listed before the live one", async (_label, inactive) => {
+    const setup = setupFee([inactive, { id: 78, name: "Wise", is_active: true }]);
+    const { dry, executed } = await runApprovedWiseImport(setup, args);
+    const fee = dry.execution.commands.find(command => command.action === "fee_create_and_confirm");
+    expect(fee).toMatchObject({ wise_client_id: 78, create_payload: { clients_id: 78 } });
+    const createCalls = setup.api.transactions.create.mock.calls as CreateCall[];
+    expect(createCalls.find(([payload]) => payload.amount === 2)?.[0]).toMatchObject({ clients_id: 78 });
+    expect(createCalls.every(([payload]) => payload.clients_id !== 77)).toBe(true);
+    expect(executed.execution.errors).toEqual([]);
+  });
+
+  it.each(inactiveWise)("refuses with wise_client_not_found before any write when the only Wise client is %s", async (_label, inactive) => {
+    const setup = setupFee([inactive, { id: 55, name: "Not Wise" }]);
+    const result = await setup.rawHandler({ ...args, execute: false });
+    expect(result.isError).toBe(true);
+    expect(parseWiseResponse<WiseFailurePayload>(result)).toEqual(expect.objectContaining({
+      error: expect.stringContaining("Wise client not found"), mutation_occurred: false,
+    }));
+    expectNoWiseMutations(setup.api);
+  });
+});

@@ -599,7 +599,7 @@ async function runWiseImport(
   if (projected.feeResolutionRequired) {
     feeAccountDimensionsId = resolveWiseFeeAccountDimensionId(accountDimensionsSnapshot, fee_account_dimensions_id, fee_account_relation_id);
     allClientsSnapshot = await api.clients.listAll();
-    const wiseClient = allClientsSnapshot.find(c => isWiseClientName(c.name));
+    const wiseClient = allClientsSnapshot.find(c => isWiseClientName(c.name) && isLiveClient(c));
     // Without a Wise client the fee rows can be created but never confirmed;
     // refuse the whole import up-front instead of leaving stray PROJECT rows.
     if (!wiseClient?.id) {
