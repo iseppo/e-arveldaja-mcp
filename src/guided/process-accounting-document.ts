@@ -3,7 +3,7 @@ import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
 import { isStrictDate } from "../strict-date.js";
 import { batch, create as createAnnotation } from "../annotations.js";
-import { toMcpJson, wrapUntrustedOcr } from "../mcp-json.js";
+import { capUntrustedText, MAX_UNTRUSTED_TEXT_CHARS, toMcpJson, wrapUntrustedOcr } from "../mcp-json.js";
 import { type ApiContext, coerceId, jsonObjectArrayInput } from "../tools/crud-tools.js";
 import { assertRuntimeSafetyContext, type RuntimeSafetyContext } from "../runtime-safety-context.js";
 import {
@@ -162,6 +162,15 @@ function renderPreview(preview: AccountingDocumentPreview) {
         total_gross: fields.total_gross,
         currency: fields.currency,
         ...(preview.orderReferenceNote !== undefined ? { order_reference_note: wrapUntrustedOcr(preview.orderReferenceNote) } : {}),
+        // Extraction notes (e.g. the business register naming another company
+        // for the printed registry code) can carry document or register text:
+        // capped and sandbox-wrapped, like every other output site.
+        ...(Array.isArray(fields.extraction_notes) && fields.extraction_notes.length > 0
+          ? {
+              extraction_notes: (fields.extraction_notes as string[]).map(note =>
+                wrapUntrustedOcr(capUntrustedText(note, MAX_UNTRUSTED_TEXT_CHARS).text) ?? ""),
+            }
+          : {}),
         warnings: preview.extraction.warnings,
         // Compact extraction-quality evidence only (no raw OCR text / no
         // raw-text field references). Full text is only on the advanced path.

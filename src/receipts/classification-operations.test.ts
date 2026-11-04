@@ -1155,14 +1155,14 @@ describe("classification operations — ledger context (F6)", () => {
   function ledgerOperations(options: {
     rows: unknown[]; journals?: unknown[]; bankAccounts?: unknown[]; companyName?: string;
     purchaseArticles?: unknown[]; accounts?: unknown[]; allowWrites?: boolean; saleInvoiceRows?: unknown[];
-    purchaseInvoiceRows?: unknown[];
+    purchaseInvoiceRows?: unknown[]; clientRows?: unknown[];
   }) {
     return makeOperations({
       ...(options.purchaseInvoiceRows ? { purchaseInvoiceRows: options.purchaseInvoiceRows } : {}),
       ...(options.allowWrites ? { allowWrites: true } : {}),
       ...(options.saleInvoiceRows ? { saleInvoiceRows: options.saleInvoiceRows } : {}),
       transactionRows: options.rows,
-      clientRows: [],
+      clientRows: options.clientRows ?? [],
       purchaseArticles: options.purchaseArticles ?? [],
       accounts: options.accounts ?? LOAN_ACCOUNTS,
       bankAccounts: options.bankAccounts ?? BANK_ACCOUNTS,
@@ -1423,6 +1423,11 @@ describe("classification operations — ledger context (F6)", () => {
     // cash account 1010 / dimension 391 under client 77, with no invoice.
     const PERSON_IBAN = "EE947700771000826270";
     const KASSA_ACCOUNTS = [...LOAN_ACCOUNTS, { id: 1010, name_est: "Sularaha kassas", account_type_est: "Varad" }];
+    // History books only under a live client (review 2026-11-04 MAJOR 2).
+    const liveClient = (id: number, name: string) => ({ id, name, is_deleted: false, is_active: true, deactivated_date: null });
+    const HISTORY_CLIENTS = [liveClient(77, "Mari Maasikas"), liveClient(88, "Maakler AS")];
+    const historyOperations = (options: Parameters<typeof ledgerOperations>[0]) =>
+      ledgerOperations({ clientRows: HISTORY_CLIENTS, ...options });
     const kassaHistory = (contras: Array<[number, number | null]>) => {
       const built = historyRows("Mari Maasikas", "C", [1010, 391], contras.map((_, index) => `2026-0${index + 5}-01`), 950);
       built.transactions.forEach((row, index) => Object.assign(row, {
@@ -1442,7 +1447,7 @@ describe("classification operations — ledger context (F6)", () => {
     it("proposes the account and dimension with its evidence and books it after one reviewed plan", async () => {
       const history = kassaHistory([[1010, 391], [1010, 391]]);
       const rows = payments();
-      const { api, operations, ctx } = ledgerOperations({
+      const { api, operations, ctx } = historyOperations({
         rows: [...rows, ...history.transactions], journals: history.journals, accounts: KASSA_ACCOUNTS, allowWrites: true,
       });
       api.transactions.update.mockImplementation(async (id: number, data: Record<string, unknown>) => {
@@ -1512,7 +1517,7 @@ describe("classification operations — ledger context (F6)", () => {
 
     it("a history change after the dry run drifts the plan with zero writes", async () => {
       const history = kassaHistory([[1010, 391], [1010, 391]]);
-      const { api, operations } = ledgerOperations({
+      const { api, operations } = historyOperations({
         rows: [...payments(), ...history.transactions], journals: history.journals, accounts: KASSA_ACCOUNTS, allowWrites: true,
       });
       const classificationsJson = { groups: (await analyze(operations)).groups };
@@ -1527,9 +1532,49 @@ describe("classification operations — ledger context (F6)", () => {
       expect(api.transactions.confirm).not.toHaveBeenCalled();
     });
 
+    it("a client deactivated after the dry run drifts the plan with zero writes", async () => {
+      const history = kassaHistory([[1010, 391], [1010, 391]]);
+      const clientRows = [liveClient(77, "Mari Maasikas")];
+      const { api, operations } = historyOperations({
+        rows: [payments()[1]!, ...history.transactions], journals: history.journals, accounts: KASSA_ACCOUNTS, allowWrites: true, clientRows,
+      });
+      const classificationsJson = { groups: (await analyze(operations)).groups };
+      expect(classificationsJson.groups[0]!.apply_mode).toBe("account_distribution");
+      const dry = await operations.applyClassifications({ classificationsJson });
+      if (!dry.ok) throw new Error("dry run failed");
+      expect(dry.value.results[0]!.status).toBe("dry_run_preview");
+      Object.assign(clientRows[0]!, { is_active: false, deactivated_date: "2026-11-01" });
+      const executed = await operations.applyClassifications({ classificationsJson, execute: true, planHandle: dry.value.planHandle });
+      expect(executed).toMatchObject({ ok: false, error: { code: "plan_drift" } });
+      expect(api.transactions.update).not.toHaveBeenCalled();
+      expect(api.transactions.confirm).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ["missing", [] as unknown[]],
+      ["deleted", [{ ...liveClient(77, "Mari Maasikas"), is_deleted: true }]],
+      ["deactivated", [{ ...liveClient(77, "Mari Maasikas"), is_active: false, deactivated_date: "2026-10-01" }]],
+    ])("a %s history client is never proposed or booked", async (_label, clientRows) => {
+      const history = kassaHistory([[1010, 391], [1010, 391]]);
+      const { api, operations } = historyOperations({
+        rows: [...payments(), ...history.transactions], journals: history.journals, accounts: KASSA_ACCOUNTS, allowWrites: true, clientRows,
+      });
+      const group = (await analyze(operations)).groups[0]!;
+      expect(group.apply_mode).toBe("review_only");
+      const forced = { groups: [{ ...group, apply_mode: "account_distribution" }] };
+      const dry = await operations.applyClassifications({ classificationsJson: forced });
+      if (!dry.ok) throw new Error("dry run failed");
+      expect(dry.value.results[0]!.status).toBe("skipped");
+      const executed = await operations.applyClassifications({ classificationsJson: forced, execute: true, planHandle: dry.value.planHandle });
+      if (!executed.ok) throw new Error("execute failed");
+      expect(executed.value.results[0]!.status).toBe("skipped");
+      expect(api.transactions.update).not.toHaveBeenCalled();
+      expect(api.transactions.confirm).not.toHaveBeenCalled();
+    });
+
     it("a mixed history stays review-only and shows the split; the apply path skips it", async () => {
       const history = kassaHistory([[2110, 900], [1010, 391], [1010, 391], [1010, 391]]);
-      const { api, operations } = ledgerOperations({
+      const { api, operations } = historyOperations({
         rows: [...payments(), ...history.transactions], journals: history.journals, accounts: KASSA_ACCOUNTS, allowWrites: true,
       });
       const result = await analyze(operations);
@@ -1551,7 +1596,7 @@ describe("classification operations — ledger context (F6)", () => {
       // Review r1 M1: same name, no IBAN, no legal form, history rows without a client.
       const byName = historyRows("Mari Maasikas", "C", [1010, 391], ["2026-05-01", "2026-06-01"], 980);
       const withClient = { ...camtRow({ id: 68, amount: 7, date: "2026-10-21", direction: "DBIT", name: "Mari Maasikas", description: "Kassasse" }), clients_id: 77 };
-      const first = ledgerOperations({ rows: [withClient, ...byName.transactions], journals: byName.journals, accounts: KASSA_ACCOUNTS });
+      const first = historyOperations({ rows: [withClient, ...byName.transactions], journals: byName.journals, accounts: KASSA_ACCOUNTS });
       const result = await analyze(first.operations);
       expect(result.groups).toHaveLength(1);
       expect(result.groups[0]!.apply_mode).toBe("review_only");
@@ -1559,7 +1604,7 @@ describe("classification operations — ledger context (F6)", () => {
       // The same rows linked to client 77 are client evidence: bookable.
       const linked = historyRows("Mari Maasikas", "C", [1010, 391], ["2026-05-01", "2026-06-01"], 980);
       linked.transactions.forEach(row => Object.assign(row, { clients_id: 77 }));
-      const second = ledgerOperations({ rows: [withClient, ...linked.transactions], journals: linked.journals, accounts: KASSA_ACCOUNTS });
+      const second = historyOperations({ rows: [withClient, ...linked.transactions], journals: linked.journals, accounts: KASSA_ACCOUNTS });
       const group = (await analyze(second.operations)).groups[0]!;
       expect(group.apply_mode).toBe("account_distribution");
       expect(group.suggested_booking.transaction_history).toMatchObject({ history_total: 2, consistent: true, clients_id: 77 });
@@ -1576,7 +1621,7 @@ describe("classification operations — ledger context (F6)", () => {
       try {
         const history = kassaHistory([[1010, 391], [1010, 391]]);
         const rows = payments();
-        const { api, operations } = ledgerOperations({
+        const { api, operations } = historyOperations({
           rows: [...rows, ...history.transactions], journals: history.journals, accounts: KASSA_ACCOUNTS, allowWrites: true,
         });
         const group = (await analyze(operations)).groups[0]!;
@@ -1605,7 +1650,7 @@ describe("classification operations — ledger context (F6)", () => {
       const nameOnly = historyRows("Mari Maasikas", "C", [1010, 391], ["2026-05-01", "2026-06-01", "2026-07-01"], 960);
       nameOnly.transactions.forEach(row => Object.assign(row, { clients_id: 77 }));
       const bare = { ...camtRow({ id: 66, amount: 7, date: "2026-10-21", direction: "DBIT", name: "Mari Maasikas", description: "Kassasse" }), clients_id: null };
-      const first = ledgerOperations({ rows: [bare, ...nameOnly.transactions], journals: nameOnly.journals, accounts: KASSA_ACCOUNTS });
+      const first = historyOperations({ rows: [bare, ...nameOnly.transactions], journals: nameOnly.journals, accounts: KASSA_ACCOUNTS });
       const nameGroup = (await analyze(first.operations)).groups[0]!;
       expect(nameGroup.suggested_booking.transaction_history).toMatchObject({ identity: "name_only", consistent: true, clients_id: 77 });
       expect(nameGroup.apply_mode).toBe("review_only");
@@ -1615,7 +1660,7 @@ describe("classification operations — ledger context (F6)", () => {
       const topUps = historyRows("Maakler AS", "C", [1020, 200], ["2026-06-01", "2026-07-01", "2026-08-01"], 970);
       topUps.transactions.forEach(row => Object.assign(row, { clients_id: 88 }));
       const topUp = { ...camtRow({ id: 67, amount: 300, date: "2026-09-10", direction: "DBIT", name: "Maakler AS", iban: POOLED, description: "top-up" }), clients_id: 88 };
-      const second = ledgerOperations({ rows: [topUp, ...topUps.transactions], journals: topUps.journals });
+      const second = historyOperations({ rows: [topUp, ...topUps.transactions], journals: topUps.journals });
       const bankGroup = (await analyze(second.operations)).groups[0]!;
       expect(bankGroup.suggested_booking.transaction_history).toMatchObject({ own_bank_account: true, consistent: true, clients_id: 88 });
       expect(bankGroup.apply_mode).toBe("review_only");
@@ -1625,7 +1670,7 @@ describe("classification operations — ledger context (F6)", () => {
       const history = kassaHistory([[1010, 391], [1010, 391]]);
       const paying = { ...camtRow({ id: 65, amount: 25.2, date: "2026-10-22", direction: "DBIT", name: "Mari Maasikas", iban: PERSON_IBAN, description: "Kassasse BL-990011701" }), clients_id: 77 };
       const invoice = { id: 701, status: "CONFIRMED", payment_status: "NOT_PAID", clients_id: 99, client_name: "Bussiliin OÜ", number: "BL-990011701", create_date: "2026-08-01", gross_price: 25.2, base_gross_price: 25.2, cl_currencies_id: "EUR" };
-      const { api, operations } = ledgerOperations({
+      const { api, operations } = historyOperations({
         rows: [paying, ...history.transactions], journals: history.journals, accounts: KASSA_ACCOUNTS, allowWrites: true,
         purchaseInvoiceRows: [invoice],
       });
@@ -1651,7 +1696,7 @@ describe("classification operations — ledger context (F6)", () => {
       const history = kassaHistory([[1010, 391], [1010, 391]]);
       const bare = { ...camtRow({ id: 63, amount: 7, date: "2026-10-21", direction: "DBIT", name: "Mari Maasikas", description: "Kassasse" }), clients_id: null };
       const usd = { ...camtRow({ id: 64, amount: 19, date: "2026-10-19", direction: "DBIT", name: "Mari Maasikas", iban: PERSON_IBAN, description: "Kassasse", currency: "USD" }), clients_id: 77 };
-      const { operations } = ledgerOperations({
+      const { operations } = historyOperations({
         rows: [bare, usd, ...history.transactions], journals: history.journals, accounts: KASSA_ACCOUNTS,
       });
       const result = await analyze(operations);
@@ -1664,7 +1709,7 @@ describe("classification operations — ledger context (F6)", () => {
       async function prepared() {
         const history = kassaHistory([[1010, 391], [1010, 391]]);
         const row = payments()[1]!;
-        const { api, operations, ctx } = ledgerOperations({
+        const { api, operations, ctx } = historyOperations({
           rows: [row, ...history.transactions], journals: history.journals, accounts: KASSA_ACCOUNTS, allowWrites: true,
         });
         // The server returns copies, and the importer's own update changes the server row.
@@ -1763,7 +1808,7 @@ describe("classification operations — ledger context (F6)", () => {
         }],
       ];
       it.each(cases)("%s: analysis offers no history distribution and a forced apply writes nothing", async (_label, scenario) => {
-        const { api, operations } = ledgerOperations({ ...scenario(), accounts: SETTLEMENT_ACCOUNTS, allowWrites: true });
+        const { api, operations } = historyOperations({ ...scenario(), accounts: SETTLEMENT_ACCOUNTS, allowWrites: true });
         const result = await analyze(operations);
         expect(result.groups).toHaveLength(1);
         const group = result.groups[0]!;
@@ -1783,7 +1828,7 @@ describe("classification operations — ledger context (F6)", () => {
       it("an invoice moved onto the previewed account after the dry run drifts the plan with zero writes", async () => {
         const history = kassaHistory([[1010, 391], [1010, 391]]);
         const invoice = paidPurchase(2310);
-        const { api, operations } = ledgerOperations({
+        const { api, operations } = historyOperations({
           rows: [...payments(), ...history.transactions], journals: history.journals, accounts: SETTLEMENT_ACCOUNTS,
           allowWrites: true, purchaseInvoiceRows: [invoice],
         });
@@ -1802,7 +1847,7 @@ describe("classification operations — ledger context (F6)", () => {
 
       it("an unreadable sale-invoice list at apply leaves distribution rows unbooked", async () => {
         const history = kassaHistory([[1010, 391], [1010, 391]]);
-        const { api, operations } = ledgerOperations({
+        const { api, operations } = historyOperations({
           rows: [...payments(), ...history.transactions], journals: history.journals, accounts: SETTLEMENT_ACCOUNTS, allowWrites: true,
         });
         const classificationsJson = { groups: (await analyze(operations)).groups };

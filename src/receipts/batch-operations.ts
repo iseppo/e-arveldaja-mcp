@@ -369,6 +369,23 @@ interface ProcessSingleReceiptOptions {
   findAttached?: (snapshot: ReceiptFileSnapshot, invoiceNumber: string | undefined) => Promise<AttachedInvoice | undefined>;
   /** Mutation pass: the create command the reviewed plan approved for this file. */
   approvedCreate?: ApprovedCreateCommand;
+  /** Mutation pass: the approved legal identity of a prospective (not yet existing) supplier. */
+  approvedSupplierIdentity?: string;
+  /** Mutation pass: supplier clients this execution created, by approved legal identity. */
+  createdSupplierClientIds?: ReadonlyMap<string, number>;
+}
+
+/**
+ * The legal identity a reviewed plan approved for a supplier it would create:
+ * the preview client's registry code and VAT number. Undefined for an existing
+ * supplier or a preview without either.
+ */
+function prospectiveSupplierIdentity(result: Pick<ReceiptBatchFileResult, "supplier_resolution">): string | undefined {
+  const resolution = result.supplier_resolution;
+  if (!resolution || resolution.client?.id !== undefined || !resolution.preview_client) return undefined;
+  const code = resolution.preview_client.code?.trim() || null;
+  const vat = resolution.preview_client.invoice_vat_no?.replace(/\s+/g, "").toUpperCase() || null;
+  return code || vat ? JSON.stringify([code, vat]) : undefined;
 }
 
 /** The create-command identity bound by the reviewed plan (B2 mutation binding). */
@@ -820,8 +837,20 @@ async function processSingleReceipt(
 
     // B2 mutation binding: the file is created only with the command the
     // reviewed plan approved; anything else stops before any supplier write.
+    // The one accepted change: a supplier the plan would create was created
+    // earlier in this execution (for another file) for the same approved legal
+    // identity, so this file now resolves to that client.
+    const liveCreate = createCommandOf({ extracted, supplier_resolution: supplierResolution });
+    if (
+      options.approvedCreate?.supplier_client_id === null &&
+      liveCreate.supplier_client_id !== null &&
+      options.approvedSupplierIdentity !== undefined &&
+      options.createdSupplierClientIds?.get(options.approvedSupplierIdentity) === liveCreate.supplier_client_id
+    ) {
+      liveCreate.supplier_client_id = null;
+    }
     if (options.approvedCreate !== undefined &&
-        canonicalPlanJson(createCommandOf({ extracted, supplier_resolution: supplierResolution }) as unknown as PlanData) !==
+        canonicalPlanJson(liveCreate as unknown as PlanData) !==
           canonicalPlanJson(options.approvedCreate as unknown as PlanData)) {
       return {
         file,
@@ -1033,6 +1062,7 @@ class ReceiptBatchOperationsImpl implements ReceiptBatchOperations {
         loopOptions: { backfill: boolean; approved?: ReadonlyMap<string, ReceiptBatchFileResult> },
       ): Promise<ReceiptBatchFileResult[]> => {
         const consumedTransactionIds = new Set<number>();
+        const createdSupplierClientIds = new Map<string, number>();
         const results: ReceiptBatchFileResult[] = [];
         const attachmentBudget = newAttachmentCheckBudget();
         const findAttached = (fileSnapshot: ReceiptFileSnapshot, invoiceNumber: string | undefined) =>
@@ -1084,7 +1114,8 @@ class ReceiptBatchOperationsImpl implements ReceiptBatchOperations {
             });
             continue;
           }
-          results.push(withAlreadyBookedCandidates(context, await processSingleReceipt(this.api, context, fileSnapshot, {
+          const approvedSupplierIdentity = approved?.status === "dry_run_preview" ? prospectiveSupplierIdentity(approved) : undefined;
+          const processed = withAlreadyBookedCandidates(context, await processSingleReceipt(this.api, context, fileSnapshot, {
             ownCompanyVat,
             ownCompanyRegistryCode,
             ownIbans,
@@ -1097,7 +1128,13 @@ class ReceiptBatchOperationsImpl implements ReceiptBatchOperations {
             previousResults: results,
             findAttached,
             ...(approved !== undefined && approved.status === "dry_run_preview" ? { approvedCreate: createCommandOf(approved) } : {}),
-          })));
+            ...(approvedSupplierIdentity !== undefined ? { approvedSupplierIdentity, createdSupplierClientIds } : {}),
+          }));
+          const createdClientId = processed.supplier_resolution?.created ? processed.supplier_resolution.client?.id : undefined;
+          if (approvedSupplierIdentity !== undefined && createdClientId !== undefined) {
+            createdSupplierClientIds.set(approvedSupplierIdentity, createdClientId);
+          }
+          results.push(processed);
         }
         return results.map((result, index) => {
           const keptIndex = fileCopies[index]!.duplicate_of;

@@ -132,6 +132,23 @@ export interface ApplyClassificationsFullInput {
   readonly classificationsJson: unknown;
 }
 
+/**
+ * The approval summary of an apply: purchase-invoice groups and direct GL
+ * confirmations (history-based account_distribution, no invoice) are counted
+ * separately, so the summary names the effect execute will have.
+ */
+function applyClassificationsMessage(result: ApplyClassificationsResult): string {
+  const { dryRun, summary } = result;
+  if (!dryRun) return `Applied ${summary.applied} classification group(s), skipped ${summary.skipped}, and failed ${summary.failed}.`;
+  const previewed = result.results.filter(group => group.status === "dry_run_preview");
+  const direct = previewed.filter(group => group.direct_confirmation === true).length;
+  const invoices = previewed.length - direct;
+  const directPart = direct > 0
+    ? `, confirm the bank transactions of ${direct} group(s) directly to an account (no purchase invoice)`
+    : "";
+  return `Classification dry run would create ${invoices} purchase invoice group(s)${directPart}, skip ${summary.skipped}, and fail ${summary.failed}.`;
+}
+
 export function renderApplyClassificationsFull(input: ApplyClassificationsFullInput): Record<string, unknown> {
   const { result, classificationsJson } = input;
   const { mode, dryRun, summary } = result;
@@ -158,9 +175,7 @@ export function renderApplyClassificationsFull(input: ApplyClassificationsFullIn
     execute: true,
     ...(result.planHandle !== undefined ? { plan_handle: result.planHandle } : {}),
   };
-  const workflowSummary = dryRun
-    ? `Classification dry run would create ${summary.dry_run_preview} purchase invoice group(s), skip ${summary.skipped}, and fail ${summary.failed}.`
-    : `Applied ${summary.applied} classification group(s), skipped ${summary.skipped}, and failed ${summary.failed}.`;
+  const workflowSummary = applyClassificationsMessage(result);
   const workflow = buildWorkflowEnvelope({
     summary: workflowSummary,
     dry_run_steps: dryRun
@@ -459,9 +474,7 @@ export function renderApplyClassificationsCompact(
     : (statusSummary.failed > 0 || partialMutationCount > 0)
       ? "partial"
       : "completed";
-  const message = dryRun
-    ? `Classification dry run would create ${statusSummary.dry_run_preview} purchase invoice group(s), skip ${statusSummary.skipped}, and fail ${statusSummary.failed}.`
-    : `Applied ${statusSummary.applied} classification group(s), skipped ${statusSummary.skipped}, and failed ${statusSummary.failed}.`;
+  const message = applyClassificationsMessage(result);
 
   const scope = {
     ...(input.connectionName ? { connection: input.connectionName } : {}),

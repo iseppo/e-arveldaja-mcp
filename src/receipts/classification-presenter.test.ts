@@ -275,6 +275,31 @@ describe("classification apply compact", () => {
     expect(results[0]!.notes[0]).not.toContain("UNTRUSTED_OCR_START");
   });
 
+  it.each([
+    ["direct-distribution only", [true], "Classification dry run would create 0 purchase invoice group(s), confirm the bank transactions of 1 group(s) directly to an account (no purchase invoice), skip 0, and fail 0."],
+    ["mixed", [true, false], "Classification dry run would create 1 purchase invoice group(s), confirm the bank transactions of 1 group(s) directly to an account (no purchase invoice), skip 0, and fail 0."],
+    ["purchase-invoice only", [false], "Classification dry run would create 1 purchase invoice group(s), skip 0, and fail 0."],
+  ])("the dry-run approval summary names the actual effects (%s; review 2026-11-04 MINOR 5)", (_label, kinds, expected) => {
+    const result: ApplyClassificationsResult = {
+      mode: "DRY_RUN",
+      dryRun: true,
+      summary: { applied: 0, skipped: 0, dry_run_preview: kinds.length, failed: 0 },
+      results: kinds.map((direct, index) => ({
+        category: "unknown" as const,
+        counterparty: `Party ${index}`,
+        status: "dry_run_preview" as const,
+        notes: [],
+        transactions: [60 + index],
+        ...(direct ? { direct_confirmation: true as const } : {}),
+      })),
+      planHandle: "plan-1",
+    };
+    const full = renderApplyClassificationsFull({ result, classificationsJson: { groups: [] } }) as { workflow: { summary: string } };
+    expect(full.workflow.summary).toBe(expected);
+    const compact = renderApplyClassificationsCompact({ result, classificationsJson: { groups: [] } });
+    expect(compact.summary.message).toBe(expected);
+  });
+
   it("surfaces partial mutations + failures as blockers, first", () => {
     const compact = renderApplyClassificationsCompact({
       result: baseApply(),

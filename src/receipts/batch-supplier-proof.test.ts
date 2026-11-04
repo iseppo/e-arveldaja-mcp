@@ -646,3 +646,51 @@ describe("P2 E2: a value lost under a dot leader holds the receipt in every mode
     expect(rec.invoicesCreate).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("two receipts of one new verified supplier (review 2026-11-04 MINOR 3)", () => {
+  function twoFiles() {
+    vi.mocked(readdir).mockResolvedValue([
+      { name: "one.pdf", isFile: () => true },
+      { name: "two.pdf", isFile: () => true },
+    ] as never);
+    vi.mocked(readFile).mockImplementation((async (path: unknown) =>
+      Buffer.from(String(path).includes("two") ? "receipt two" : "receipt one")) as never);
+    // Snapshots are written as <index>.pdf in listing order: 1.pdf is two.pdf.
+    vi.mocked(parseDocument).mockImplementation((async (path: string) => parsed(path.endsWith("1.pdf")
+      ? PRINT_RECEIPT.map(line => line === "Arve nr A-17" ? "Arve nr A-18" : line)
+      : PRINT_RECEIPT)) as never);
+  }
+
+  it("a supplier client created outside this execution after the review drifts the plan, with zero writes", async () => {
+    stubRegistry([true]);
+    twoFiles();
+    const { api, rec } = makeApi();
+    const ops = createReceiptBatchOperations(api, createTestRuntimeSafetyContext());
+    const dry = await ops.runBatch({ ...baseRun, executionMode: "dry_run", dryRun: true });
+    if (!dry.ok || !dry.value.planHandles) throw new Error("dry run failed");
+    expect(dry.value.results.map(result => result.status)).toEqual(["dry_run_preview", "dry_run_preview"]);
+    // Someone else creates the same supplier between the review and the execute.
+    await (api as unknown as { clients: { create(client: Record<string, unknown>): Promise<unknown> } }).clients
+      .create({ name: REGISTRY_NAME, code: REG_CODE, is_client: false, is_supplier: true, cl_code_country: "EST" });
+    const run = await ops.runBatch({
+      ...baseRun, executionMode: "create", dryRun: false, approvedManifest: dry.value.manifest, planHandle: dry.value.planHandles.create,
+    });
+    expect(run).toMatchObject({ ok: false, error: { code: "plan_drift" } });
+    expect(rec.clientsCreate).toHaveBeenCalledTimes(1);
+    expect(rec.invoicesCreate).not.toHaveBeenCalled();
+  });
+
+  it("create: both previews approve the creation; one client, two invoices", async () => {
+    stubRegistry([true]);
+    twoFiles();
+    const { api, rec } = makeApi();
+    const { dry, run } = await runMode(api, "create");
+    expect(dry.results.map(result => [result.file.name, result.status, result.extracted?.invoice_number, result.supplier_resolution?.client?.id ?? null]))
+      .toEqual([["one.pdf", "dry_run_preview", "A-17", null], ["two.pdf", "dry_run_preview", "A-18", null]]);
+    if (!run.ok) throw new Error("run failed");
+    expect(run.value.results.map(result => [result.file.name, result.status])).toEqual([["one.pdf", "created"], ["two.pdf", "created"]]);
+    expect(rec.clientsCreate).toHaveBeenCalledTimes(1);
+    expect(rec.invoicesCreate).toHaveBeenCalledTimes(2);
+    expect(rec.invoicesCreate.mock.calls.map(call => (call[0] as { number?: string }).number)).toEqual(["A-17", "A-18"]);
+  });
+});
