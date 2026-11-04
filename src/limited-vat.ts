@@ -471,7 +471,7 @@ export function limitedVatPointOfUseNote(
 ): string | undefined {
   if (status === "full" || !supplier || !isForeignSupplier(supplier)) return undefined;
   if (status === "unknown") {
-    return "Ettevõtte käibemaksustaatust (limited-vat.json) ei saa lugeda, seega ei saa otsustada, kas sisendkäibemaks või pöördmaksustamine kehtib. Käibemaksust sõltuv broneerimine keeldub (company_vat_status_unknown), kuni fail on parandatud.";
+    return "Ettevõtte käibemaksustaatus ei ole teada (limited-vat.json ei ole loetav või EMTA KMKR päring ei andnud KMKR numbri kohta vastust), seega ei saa otsustada, kas sisendkäibemaks või pöördmaksustamine kehtib. Käibemaksust sõltuv broneerimine keeldub, kuni staatus on teada; vaata limited_vat mode \"status\".";
   }
   if (hasExSuffix(supplier.invoice_vat_no) || hasEstonianRegistrationEvidence(supplier) || isFinancialServiceSupplier(supplier.name)) return undefined;
   return status === "limited"

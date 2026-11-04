@@ -1644,7 +1644,7 @@ export async function buildAnnualReportData(api: ApiContext, year: number): Prom
         presentation_currency: "EUR",
         income_statement_schema: "Schema 1 (kulude liigitus iseloomu järgi)",
         cash_flow_method: "Indirect",
-        vat_registered: companyVatStatusFromInfo(vatInfo).status === "full",
+        vat_registered: (await companyVatStatusFromInfo(vatInfo)).status === "full",
         assumptions: [
           "Line mapping follows the e-arveldaja standard chart-of-accounts ranges; accounts outside them are listed under kaardistamata_tulud_ja_kulud.",
           "Cash flows use the indirect method. Proven received interest and dividends follow the operating default unless an explicit account rule overrides it; an ambiguous financial-result account alone does not prove dividend or disposal proceeds and requires review.",

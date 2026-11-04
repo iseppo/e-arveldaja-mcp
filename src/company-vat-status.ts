@@ -1,35 +1,88 @@
 import { createConnectionScopedBundleStore } from "./connection-scoped-bundle-store.js";
+import { lookupEmtaKmkrCached, normalizeEstonianVatNumber, type EmtaKmkrDeps, type EmtaKmkrFailureCode, type EmtaKmkrRegistration } from "./emta-kmkr.js";
 import type { CompanyVatInfo } from "./types/api.js";
 
 /**
  * The company's VAT status for every VAT-treatment decision.
  *
- * `/vat_info` only carries `vat_number`, so a limited taxpayer (piiratud
- * maksukohustuslane, KMS § 21) whose number is entered in e-arveldaja would
- * otherwise read as fully VAT-registered (deductible reverse charge, VAT on
- * sales). The owner sets `limited` explicitly (`limited_vat` mode
- * `set_status`); without a setting: a number is `full` (unchanged behaviour),
- * no number is `none`. Only `full` is VAT-registered.
+ * `/vat_info` only carries `vat_number` (verified live 2026-11-04: no
+ * limited-taxpayer field), and e-arveldaja shows a limited taxpayer's
+ * (piiratud maksukohustuslane, KMS § 21) new number there at once, so a
+ * number alone does not say `full`. Resolution:
+ * 1. an owner decision (`limited_vat` mode `set_status`) made for the current
+ *    VAT number wins;
+ * 2. otherwise a number is looked up in EMTA's public KMKR query
+ *    (`src/emta-kmkr.ts`): the one active registration says `limited` or
+ *    `full` (source `emta_lookup`), cached per number for 7 days;
+ * 3. a failed or inconclusive lookup is `unknown` (fail closed) until EMTA
+ *    answers or the owner confirms the status;
+ * 4. no number is `none`.
+ * Only `full` is VAT-registered.
  */
 export type CompanyVatStatus = "none" | "limited" | "full";
 
 export const COMPANY_VAT_STATUSES = ["none", "limited", "full"] as const;
 
 /**
- * The resolved status: a stored or derived `CompanyVatStatus`, or `unknown`
- * when the status store exists but cannot be read (or holds an invalid
- * setting). `unknown` is never treated as `full` or `none`: VAT decisions
- * refuse (`company_vat_status_unknown`).
+ * The resolved status: a stored, looked-up or derived `CompanyVatStatus`, or
+ * `unknown` when the status store cannot be read (or holds an invalid
+ * setting), or when the VAT number's registration type cannot be established.
+ * `unknown` is never treated as `full` or `none`: VAT decisions refuse with
+ * the reason code.
  */
 export type ResolvedVatStatus = CompanyVatStatus | "unknown";
 
 export const COMPANY_VAT_STATUS_UNKNOWN = "company_vat_status_unknown";
+export const COMPANY_VAT_STATUS_LOOKUP_UNAVAILABLE = "company_vat_status_lookup_unavailable";
+export const COMPANY_VAT_STATUS_LOOKUP_AMBIGUOUS = "company_vat_status_lookup_ambiguous";
 
-/** Thrown at a VAT decision when the status is `unknown`. */
+/** Why the status is `unknown`: an unreadable store, an unavailable EMTA lookup, or an inconclusive one. */
+export type CompanyVatStatusUnknownReason =
+  | typeof COMPANY_VAT_STATUS_UNKNOWN
+  | typeof COMPANY_VAT_STATUS_LOOKUP_UNAVAILABLE
+  | typeof COMPANY_VAT_STATUS_LOOKUP_AMBIGUOUS;
+
+/** A stored successful lookup is reused for this long before EMTA is asked again. */
+export const EMTA_LOOKUP_MAX_AGE_MS = 7 * 86_400_000;
+
+const numberText = (vatNumber: string | null | undefined) => (vatNumber ? `VAT number ${vatNumber}` : "no VAT number");
+
+/** The explanation of an `unknown` status: English for the agent, then Estonian for the owner. */
+export function companyVatStatusUnknownMessage(
+  resolved: Pick<ResolvedCompanyVatStatus, "reason" | "store_error" | "vat_number" | "decision_status" | "decision_vat_number" | "lookup_error" | "store_available">,
+): string {
+  if (resolved.reason !== COMPANY_VAT_STATUS_LOOKUP_UNAVAILABLE && resolved.reason !== COMPANY_VAT_STATUS_LOOKUP_AMBIGUOUS) {
+    return `${COMPANY_VAT_STATUS_UNKNOWN}: the company VAT status cannot be read from limited-vat.json (${resolved.store_error ?? "invalid setting"}), so VAT treatment cannot be decided. Nothing was written. Repair or restore the file in the accounting-rules bundle, then retry.`;
+  }
+  const number = resolved.vat_number ?? "";
+  const why = resolved.reason === COMPANY_VAT_STATUS_LOOKUP_UNAVAILABLE
+    ? `could not be checked in EMTA's public KMKR query (${resolved.lookup_error ?? "no answer"})`
+    : `is not settled by EMTA's public KMKR query (${resolved.lookup_error ?? "no single active registration"})`;
+  const whyEt = resolved.reason === COMPANY_VAT_STATUS_LOOKUP_UNAVAILABLE
+    ? "EMTA avalikust KMKR päringust ei õnnestunud seda kontrollida"
+    : "EMTA avalik KMKR päring ei näita selle numbri kohta täpselt üht kehtivat registreeringut";
+  const earlier = resolved.decision_status
+    ? ` The earlier owner decision "${resolved.decision_status}" was made for ${numberText(resolved.decision_vat_number)}, so it no longer applies.`
+    : "";
+  const earlierEt = resolved.decision_status
+    ? ` Varasem omaniku otsus "${resolved.decision_status}" tehti, kui ${resolved.decision_vat_number ? `KMKR number oli ${resolved.decision_vat_number}` : "KMKR numbrit ei olnud"}, seega see enam ei kehti.`
+    : "";
+  const fix = resolved.store_available === false
+    ? `Retry when EMTA answers; single-file rules mode (EARVELDAJA_RULES_FILE) cannot store an owner decision, so use the bundle storage (EARVELDAJA_RULES_DIR) to confirm it with limited_vat mode "set_status".`
+    : `Retry later, or ask the owner and confirm once with limited_vat mode "set_status": status "full" (fully VAT-registered) or status "limited" with effective_from (limited taxpayer); mode "guide" explains the difference.`;
+  const fixEt = resolved.store_available === false
+    ? "Proovi hiljem uuesti."
+    : `Proovi hiljem uuesti või kinnita staatus üks kord: limited_vat mode "set_status" status "full" (täielik käibemaksukohustuslane) või status "limited" koos effective_from kuupäevaga (piiratud maksukohustuslane); vahet selgitab limited_vat mode "guide".`;
+  return `${resolved.reason}: e-arveldaja shows ${numberText(resolved.vat_number)} for the company, but whether it is a full VAT registration or a limited taxpayer (piiratud maksukohustuslane, KMS § 21) ${why}, so VAT treatment cannot be decided. Nothing was written.${earlier} ${fix} ` +
+    `Omanikule: e-arveldajas on ettevõttel KMKR number ${number}, kuid kas see on täielik käibemaksukohustuslase registreering või piiratud maksukohustuslane, ${whyEt}.${earlierEt} ${fixEt}`;
+}
+
+/** Thrown at a VAT decision when the status is `unknown`; `code` is the reason. */
 export class CompanyVatStatusUnknownError extends Error {
-  readonly code = COMPANY_VAT_STATUS_UNKNOWN;
-  constructor(detail: string | undefined) {
-    super(`${COMPANY_VAT_STATUS_UNKNOWN}: the company VAT status cannot be read from limited-vat.json (${detail ?? "invalid setting"}), so VAT treatment cannot be decided. Nothing was written. Repair or restore the file in the accounting-rules bundle, then retry.`);
+  readonly code: CompanyVatStatusUnknownReason;
+  constructor(resolved: ResolvedCompanyVatStatus) {
+    super(companyVatStatusUnknownMessage(resolved));
+    this.code = resolved.reason ?? COMPANY_VAT_STATUS_UNKNOWN;
     this.name = "CompanyVatStatusUnknownError";
   }
 }
@@ -42,6 +95,22 @@ export interface CompanyVatStatusRecord {
   /** First day the status applies (YYYY-MM-DD). */
   effective_from: string;
   set_at: string;
+  /**
+   * The VAT number (`/vat_info` `vat_number`) the decision was made for; null
+   * = the company had no number. Absent only in a record saved before numbers
+   * were bound: such a record is bound to the current number on first read.
+   */
+  vat_number?: string | null;
+}
+
+/** A successful EMTA KMKR lookup of one VAT number (the cache). */
+export interface CompanyVatLookupRecord {
+  kind: "emta_lookup";
+  /** `emta_lookup:<EE…>` */
+  key: string;
+  vat_number: string;
+  registration: EmtaKmkrRegistration;
+  looked_up_at: string;
 }
 
 /** An owner classification of a foreign supplier for the monthly limited-VAT run. */
@@ -68,7 +137,7 @@ export interface LimitedVatBookingRecord {
   booked_at: string;
 }
 
-export type LimitedVatStoreRecord = CompanyVatStatusRecord | LimitedVatSupplierRecord | LimitedVatBookingRecord;
+export type LimitedVatStoreRecord = CompanyVatStatusRecord | CompanyVatLookupRecord | LimitedVatSupplierRecord | LimitedVatBookingRecord;
 
 export const LIMITED_VAT_STORE_FILE = "limited-vat.json";
 
@@ -81,17 +150,43 @@ export const limitedVatStore = createConnectionScopedBundleStore<LimitedVatStore
 
 export const supplierRecordKey = (clientsId: number) => `supplier:${clientsId}`;
 export const bookingRecordKey = (documentNumber: string) => `booking:${documentNumber}`;
+export const lookupRecordKey = (vatNumber: string) => `emta_lookup:${vatNumber}`;
+
+/** The EMTA facts behind a status of source `emta_lookup`. */
+export interface CompanyVatLookupView {
+  registration: EmtaKmkrRegistration;
+  looked_up_at: string;
+  /** True when the cached lookup is older than 7 days and the re-lookup failed. */
+  stale: boolean;
+  /** Why the re-lookup of a stale result failed. */
+  refresh_error?: string;
+}
 
 export interface ResolvedCompanyVatStatus {
   status: ResolvedVatStatus;
-  /** `setting` = owner-approved record; `derived` = from `/vat_info`; `store_error` = status unknown. */
-  source: "setting" | "derived" | "store_error";
+  /**
+   * `setting` = owner decision; `emta_lookup` = EMTA's KMKR query; `derived` =
+   * no number (or single-file mode without an answer); `store_error` = store
+   * unreadable or invalid.
+   */
+  source: "setting" | "emta_lookup" | "derived" | "store_error";
   vat_number: string | null;
   effective_from: string | null;
-  /** False in single-file rules mode: no setting can be stored (so `limited` is unavailable). */
+  /** False in single-file rules mode: no setting can be stored (so set_status is unavailable). */
   store_available: boolean;
   /** The store exists but could not be read (status `unknown`). */
   store_error?: string;
+  /** Why the status is `unknown` (only then). */
+  reason?: CompanyVatStatusUnknownReason;
+  /** The owner's stored decision when a valid record exists (also when it no longer applies). */
+  decision_status?: CompanyVatStatus;
+  /** The VAT number that decision was made for (null = no number); present with `decision_status`. */
+  decision_vat_number?: string | null;
+  /** Source `emta_lookup`: the registration and when it was looked up. */
+  lookup?: CompanyVatLookupView;
+  /** Why the lookup failed (status `unknown` for a lookup reason). */
+  lookup_error?: string;
+  lookup_error_code?: EmtaKmkrFailureCode;
 }
 
 /**
@@ -103,24 +198,145 @@ export function readLimitedVatRecords(): LimitedVatStoreRecord[] | null {
   return limitedVatStore.read();
 }
 
+/** The `/vat_info` number as shown (trimmed), or null. */
+export function companyVatNumber(vatInfo: CompanyVatInfo | undefined): string | null {
+  return vatInfo?.vat_number?.trim() || null;
+}
+
+/** Two VAT numbers are the same registration when equal ignoring case and whitespace. */
+export function sameVatNumber(a: string | null | undefined, b: string | null | undefined): boolean {
+  const normalize = (value: string | null | undefined) => (value ?? "").replace(/\s+/g, "").toUpperCase();
+  return normalize(a) === normalize(b);
+}
+
+/** The lookup result the pure derivation gets: a usable registration, or the failure. */
+export type CompanyVatLookupInput =
+  | { ok: true; view: CompanyVatLookupView }
+  | { ok: false; code: EmtaKmkrFailureCode; detail: string };
+
+function lookupFailureReason(code: EmtaKmkrFailureCode): CompanyVatStatusUnknownReason {
+  return code === "emta_lookup_unavailable" || code === "emta_response_invalid"
+    ? COMPANY_VAT_STATUS_LOOKUP_UNAVAILABLE
+    : COMPANY_VAT_STATUS_LOOKUP_AMBIGUOUS;
+}
+
+/** The owner decision of these records, or an invalid-record marker. */
+function ownerSetting(records: readonly LimitedVatStoreRecord[] | null): CompanyVatStatusRecord | "invalid" | undefined {
+  const setting = records?.find((record): record is CompanyVatStatusRecord => record.kind === "status");
+  if (!setting) return undefined;
+  const storedNumber: unknown = setting.vat_number;
+  if (!(COMPANY_VAT_STATUSES as readonly string[]).includes(setting.status) || typeof setting.effective_from !== "string" ||
+      !(storedNumber === undefined || storedNumber === null || typeof storedNumber === "string")) {
+    return "invalid";
+  }
+  return setting;
+}
+
+/**
+ * Pure status derivation. `lookup` is the EMTA result for the current number
+ * (omitted when none was needed or made).
+ */
 export function deriveCompanyVatStatus(
   vatInfo: CompanyVatInfo | undefined,
   records: readonly LimitedVatStoreRecord[] | null,
   storeError?: string,
+  lookup?: CompanyVatLookupInput,
 ): ResolvedCompanyVatStatus {
-  const vatNumber = vatInfo?.vat_number?.trim() || null;
+  const vatNumber = companyVatNumber(vatInfo);
   const base = { vat_number: vatNumber, store_available: records !== null };
-  if (storeError !== undefined) {
-    return { ...base, status: "unknown", source: "store_error", effective_from: null, store_error: storeError };
-  }
-  const setting = records?.find((record): record is CompanyVatStatusRecord => record.kind === "status");
+  const storeFailure = (detail: string): ResolvedCompanyVatStatus =>
+    ({ ...base, status: "unknown", source: "store_error", effective_from: null, store_error: detail, reason: COMPANY_VAT_STATUS_UNKNOWN });
+  if (storeError !== undefined) return storeFailure(storeError);
+  const setting = ownerSetting(records);
+  if (setting === "invalid") return storeFailure("the stored status setting is invalid");
+  let decision: { decision_status: CompanyVatStatus; decision_vat_number: string | null } | undefined;
   if (setting) {
-    if (!(COMPANY_VAT_STATUSES as readonly string[]).includes(setting.status) || typeof setting.effective_from !== "string") {
-      return { ...base, status: "unknown", source: "store_error", effective_from: null, store_error: "the stored status setting is invalid" };
+    // A record saved before numbers were bound applies to the current number.
+    const decisionNumber = setting.vat_number === undefined ? vatNumber : (setting.vat_number?.trim() || null);
+    decision = { decision_status: setting.status, decision_vat_number: decisionNumber };
+    if (sameVatNumber(decisionNumber, vatNumber)) {
+      return { ...base, ...decision, status: setting.status, source: "setting", effective_from: setting.effective_from };
     }
-    return { ...base, status: setting.status, source: "setting", effective_from: setting.effective_from };
   }
-  return { ...base, status: vatNumber ? "full" : "none", source: "derived", effective_from: null };
+  if (!vatNumber) return { ...base, ...decision, status: "none", source: "derived", effective_from: null };
+  if (lookup?.ok) {
+    const { registration } = lookup.view;
+    return { ...base, ...decision, status: registration.limited ? "limited" : "full", source: "emta_lookup", effective_from: registration.registered_on, lookup: lookup.view };
+  }
+  const failure = lookup ?? { code: "emta_lookup_unavailable" as const, detail: "not looked up" };
+  return {
+    ...base,
+    ...decision,
+    status: "unknown",
+    source: "derived",
+    effective_from: null,
+    reason: lookupFailureReason(failure.code),
+    lookup_error: failure.detail,
+    lookup_error_code: failure.code,
+  };
+}
+
+/**
+ * Binds a status record saved before numbers were bound to the current
+ * number, once, under the store lock and only while that record is
+ * unchanged. Best effort: when the write fails the record stays as it was
+ * and still applies to the current number at the next read.
+ */
+function bindLegacyStatusRecord(records: readonly LimitedVatStoreRecord[], vatNumber: string | null): void {
+  const legacy = records.find((record): record is CompanyVatStatusRecord => record.kind === "status");
+  if (!legacy || legacy.vat_number !== undefined) return;
+  try {
+    limitedVatStore.upsertIf([{ ...legacy, vat_number: vatNumber }], own => {
+      const current = own.find((record): record is CompanyVatStatusRecord => record.kind === "status");
+      return current !== undefined && current.vat_number === undefined &&
+        current.status === legacy.status && current.effective_from === legacy.effective_from && current.set_at === legacy.set_at;
+    });
+  } catch {
+    // Best effort, see above.
+  }
+}
+
+export interface CompanyVatStatusDeps {
+  emta?: EmtaKmkrDeps;
+  now?: () => Date;
+}
+
+function storedLookup(records: readonly LimitedVatStoreRecord[] | null, vatNumber: string): CompanyVatLookupRecord | undefined {
+  const record = records?.find((entry): entry is CompanyVatLookupRecord => entry.kind === "emta_lookup" && entry.key === lookupRecordKey(vatNumber));
+  if (!record || record.vat_number !== vatNumber || typeof record.looked_up_at !== "string" || Number.isNaN(Date.parse(record.looked_up_at))) return undefined;
+  const registration = record.registration as Partial<EmtaKmkrRegistration> | undefined;
+  if (!registration || registration.vat_number !== vatNumber || typeof registration.limited !== "boolean" || typeof registration.registered_on !== "string") return undefined;
+  return record;
+}
+
+async function lookupFor(
+  vatNumber: string,
+  records: readonly LimitedVatStoreRecord[] | null,
+  deps: CompanyVatStatusDeps,
+): Promise<CompanyVatLookupInput> {
+  const normalized = normalizeEstonianVatNumber(vatNumber);
+  if (!normalized) return { ok: false, code: "emta_registration_not_found", detail: `${vatNumber} is not an Estonian VAT number (EE + 9 digits)` };
+  const now = (deps.now ?? (() => new Date()))().getTime();
+  const stored = storedLookup(records, normalized);
+  if (stored && now - Date.parse(stored.looked_up_at) < EMTA_LOOKUP_MAX_AGE_MS) {
+    return { ok: true, view: { registration: stored.registration, looked_up_at: stored.looked_up_at, stale: false } };
+  }
+  const { outcome, at } = await lookupEmtaKmkrCached(normalized, now, deps.emta);
+  if (outcome.ok) {
+    const lookedUpAt = new Date(at).toISOString();
+    if (records !== null && (!stored || Date.parse(stored.looked_up_at) < at)) {
+      try {
+        limitedVatStore.upsert([{ kind: "emta_lookup", key: lookupRecordKey(normalized), vat_number: normalized, registration: outcome.registration, looked_up_at: lookedUpAt }]);
+      } catch {
+        // The in-process cache still holds it; the record is only a cache.
+      }
+    }
+    return { ok: true, view: { registration: outcome.registration, looked_up_at: lookedUpAt, stale: false } };
+  }
+  if (stored) {
+    return { ok: true, view: { registration: stored.registration, looked_up_at: stored.looked_up_at, stale: true, refresh_error: outcome.detail } };
+  }
+  return outcome;
 }
 
 /**
@@ -130,34 +346,44 @@ export function deriveCompanyVatStatus(
  */
 export async function resolveCompanyVatStatus(
   api: { readonly: { getVatInfo(): Promise<CompanyVatInfo> } },
+  deps: CompanyVatStatusDeps = {},
 ): Promise<ResolvedCompanyVatStatus> {
-  return companyVatStatusFromInfo(await api.readonly.getVatInfo());
+  return companyVatStatusFromInfo(await api.readonly.getVatInfo(), deps);
 }
 
 /** The same decision for a caller that already read `/vat_info`. */
-export function companyVatStatusFromInfo(vatInfo: CompanyVatInfo | undefined): ResolvedCompanyVatStatus {
+export async function companyVatStatusFromInfo(
+  vatInfo: CompanyVatInfo | undefined,
+  deps: CompanyVatStatusDeps = {},
+): Promise<ResolvedCompanyVatStatus> {
   let records: LimitedVatStoreRecord[] | null;
   try {
     records = readLimitedVatRecords();
   } catch (error) {
     return deriveCompanyVatStatus(vatInfo, null, (error as Error).message);
   }
-  return deriveCompanyVatStatus(vatInfo, records);
+  const withoutLookup = deriveCompanyVatStatus(vatInfo, records);
+  if (records !== null && withoutLookup.source === "setting") bindLegacyStatusRecord(records, withoutLookup.vat_number);
+  if (withoutLookup.status !== "unknown" || withoutLookup.source === "store_error" || !withoutLookup.vat_number) return withoutLookup;
+  return deriveCompanyVatStatus(vatInfo, records, undefined, await lookupFor(withoutLookup.vat_number, records, deps));
 }
 
 /** The resolved status for a VAT decision; throws `CompanyVatStatusUnknownError` for `unknown`. */
 export function requireKnownCompanyVatStatus(resolved: ResolvedCompanyVatStatus): CompanyVatStatus {
-  if (resolved.status === "unknown") throw new CompanyVatStatusUnknownError(resolved.store_error);
+  if (resolved.status === "unknown") throw new CompanyVatStatusUnknownError(resolved);
   return resolved.status;
 }
 
 /**
  * True only for a fully VAT-registered company (`full`); `limited` and `none`
- * are not. Throws `CompanyVatStatusUnknownError` when the status is `unknown`,
- * so no VAT treatment is decided on a guess.
+ * are not. Throws `CompanyVatStatusUnknownError` when the status is `unknown`
+ * (unreadable store, or a VAT number whose registration type EMTA did not
+ * settle and the owner has not confirmed), so no VAT treatment is decided on
+ * a guess.
  */
 export async function isCompanyVatRegistered(
   api: { readonly: { getVatInfo(): Promise<CompanyVatInfo> } },
+  deps: CompanyVatStatusDeps = {},
 ): Promise<boolean> {
-  return requireKnownCompanyVatStatus(await resolveCompanyVatStatus(api)) === "full";
+  return requireKnownCompanyVatStatus(await resolveCompanyVatStatus(api, deps)) === "full";
 }

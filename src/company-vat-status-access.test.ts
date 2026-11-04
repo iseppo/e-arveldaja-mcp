@@ -42,14 +42,14 @@ afterEach(() => {
 });
 
 describe("company VAT status store access", () => {
-  it("keeps the derived default when the store file (and its directory) genuinely does not exist", () => {
-    expect(companyVatStatusFromInfo({ vat_number: "EE102345678" })).toMatchObject({ status: "full", source: "derived" });
-    expect(companyVatStatusFromInfo({})).toMatchObject({ status: "none", source: "derived" });
+  it("keeps the default resolution when the store file (and its directory) genuinely does not exist", async () => {
+    expect(await companyVatStatusFromInfo({ vat_number: "EE102345678" })).toMatchObject({ status: "full", source: "emta_lookup" });
+    expect(await companyVatStatusFromInfo({})).toMatchObject({ status: "none", source: "derived" });
   });
 
-  it("an inaccessible store (EACCES) is status unknown, never a derived full", () => {
+  it("an inaccessible store (EACCES) is status unknown, never a derived full", async () => {
     denied.path = resolveBundleStorePath(LIMITED_VAT_STORE_FILE)!;
-    const resolved = companyVatStatusFromInfo({ vat_number: "EE102345678" });
+    const resolved = await companyVatStatusFromInfo({ vat_number: "EE102345678" });
     expect(resolved.status).toBe("unknown");
     expect(resolved.store_error).toContain("EACCES");
   });

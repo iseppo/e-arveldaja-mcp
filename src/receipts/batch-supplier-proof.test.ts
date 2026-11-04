@@ -9,6 +9,7 @@ import { createReceiptBatchOperations } from "./batch-operations.js";
 import { createAndMaybeMatchPurchaseInvoice } from "../tools/receipt-inbox-booking.js";
 import { sha256Hex } from "../tools/receipt-inbox-files.js";
 import { renderReceiptBatchCompact } from "./presenter.js";
+import { EMTA_KMKR_ORIGIN } from "../emta-kmkr.js";
 
 // P2 E1 / E1b / E3 through the REAL receipt_batch path: real extraction, real
 // supplier resolution (registry lookup = stubbed fetch), real gating and booking.
@@ -97,11 +98,16 @@ function registryResponse(ok: boolean) {
     : { ok: false, headers: { get: () => "0" }, text: () => Promise.resolve("") };
 }
 
-/** fetch answers the registry lookups in order (true = the registry's entry, false = unavailable); the last one repeats. */
+/**
+ * fetch answers the registry lookups in order (true = the registry's entry, false = unavailable); the last one repeats.
+ * EMTA's KMKR query (company VAT status) keeps the setup file's fake and is not counted.
+ */
 function stubRegistry(sequence: boolean[]) {
   let call = 0;
   const fetchMock = vi.fn(async () => registryResponse(sequence[Math.min(call++, sequence.length - 1)]!));
-  vi.stubGlobal("fetch", fetchMock);
+  const setupFetch = globalThis.fetch;
+  vi.stubGlobal("fetch", (url: string, init?: RequestInit) =>
+    url.startsWith(EMTA_KMKR_ORIGIN) ? setupFetch(url, init) : fetchMock());
   return fetchMock;
 }
 

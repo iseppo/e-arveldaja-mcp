@@ -1,0 +1,184 @@
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { mkdtempSync, readFileSync, rmSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
+import {
+  COMPANY_VAT_STATUS_LOOKUP_AMBIGUOUS,
+  COMPANY_VAT_STATUS_LOOKUP_UNAVAILABLE,
+  CompanyVatStatusUnknownError,
+  LIMITED_VAT_STORE_FILE,
+  companyVatStatusFromInfo,
+  isCompanyVatRegistered,
+  limitedVatStore,
+  readLimitedVatRecords,
+  type CompanyVatStatusRecord,
+  type LimitedVatStoreRecord,
+} from "./company-vat-status.js";
+import { resetEmtaKmkrCache } from "./emta-kmkr.js";
+import { resolveBundleStorePath } from "./accounting-rules.js";
+import { FULL_ROW, LIMITED_ROW, emtaAnswerHtml, fakeEmtaFetch } from "./__fixtures__/emta-kmkr.js";
+
+const LIMITED_NUMBER = "EE103050067";
+const FULL_NUMBER = "EE102809963";
+const DAY = 86_400_000;
+
+let dir: string;
+beforeEach(() => {
+  dir = mkdtempSync(join(tmpdir(), "company-vat-status-"));
+  process.env.EARVELDAJA_RULES_DIR = join(dir, "rules");
+  process.env.EARVELDAJA_LOCK_DIR = join(dir, "locks");
+  limitedVatStore.reset();
+  resetEmtaKmkrCache();
+});
+afterEach(() => {
+  delete process.env.EARVELDAJA_RULES_DIR;
+  delete process.env.EARVELDAJA_RULES_FILE;
+  delete process.env.EARVELDAJA_LOCK_DIR;
+  limitedVatStore.reset();
+  rmSync(dir, { recursive: true, force: true });
+});
+
+const api = (vatNumber?: string) => ({ readonly: { getVatInfo: async () => (vatNumber ? { vat_number: vatNumber } : {}) } });
+const at = (ms: number) => () => new Date(Date.parse("2026-11-04T10:00:00Z") + ms);
+const ownerRecord = (status: CompanyVatStatusRecord["status"], vatNumber?: string | null): CompanyVatStatusRecord => ({
+  kind: "status", key: "company_vat_status", status, effective_from: "2026-01-01", set_at: "2026-11-01T00:00:00Z",
+  ...(vatNumber !== undefined ? { vat_number: vatNumber } : {}),
+});
+
+describe("company VAT status from EMTA's KMKR query", () => {
+  it("no VAT number is none, without asking EMTA", async () => {
+    const fake = fakeEmtaFetch(emtaAnswerHtml([FULL_ROW]));
+    expect(await companyVatStatusFromInfo({}, { emta: { fetch: fake.impl } })).toMatchObject({ status: "none", source: "derived" });
+    expect(fake.calls).toEqual([]);
+  });
+
+  it("a limited registration is limited from its registration date, never VAT-registered", async () => {
+    const fake = fakeEmtaFetch(emtaAnswerHtml([LIMITED_ROW]));
+    const resolved = await companyVatStatusFromInfo({ vat_number: LIMITED_NUMBER }, { emta: { fetch: fake.impl }, now: at(0) });
+    expect(resolved).toMatchObject({
+      status: "limited", source: "emta_lookup", effective_from: "2026-11-04",
+      lookup: { registration: { limited: true, registered_on: "2026-11-04", vat_number: LIMITED_NUMBER }, looked_up_at: "2026-11-04T10:00:00.000Z", stale: false },
+    });
+    expect(await isCompanyVatRegistered(api(LIMITED_NUMBER), { emta: { fetch: fake.impl } })).toBe(false);
+  });
+
+  it("a full registration is full", async () => {
+    const fake = fakeEmtaFetch(emtaAnswerHtml([FULL_ROW]));
+    expect(await companyVatStatusFromInfo({ vat_number: FULL_NUMBER }, { emta: { fetch: fake.impl } }))
+      .toMatchObject({ status: "full", source: "emta_lookup", effective_from: "2024-12-16" });
+    expect(await isCompanyVatRegistered(api(FULL_NUMBER), { emta: { fetch: fake.impl } })).toBe(true);
+  });
+
+  it("a network failure is unknown (lookup_unavailable) and a VAT decision refuses naming the reason and the fix", async () => {
+    const fake = fakeEmtaFetch("network");
+    const resolved = await companyVatStatusFromInfo({ vat_number: LIMITED_NUMBER }, { emta: { fetch: fake.impl } });
+    expect(resolved).toMatchObject({ status: "unknown", reason: COMPANY_VAT_STATUS_LOOKUP_UNAVAILABLE, lookup_error_code: "emta_lookup_unavailable" });
+    const refusal = await isCompanyVatRegistered(api(LIMITED_NUMBER), { emta: { fetch: fake.impl } }).catch((error: unknown) => error);
+    expect(refusal).toBeInstanceOf(CompanyVatStatusUnknownError);
+    expect((refusal as CompanyVatStatusUnknownError).code).toBe(COMPANY_VAT_STATUS_LOOKUP_UNAVAILABLE);
+    expect((refusal as Error).message).toMatch(/^company_vat_status_lookup_unavailable: /);
+    expect((refusal as Error).message).toContain("limited_vat mode \"set_status\"");
+    expect((refusal as Error).message).toContain("Omanikule:");
+  });
+
+  it("a deleted registration or two active rows are unknown (lookup_ambiguous)", async () => {
+    const deleted = fakeEmtaFetch(emtaAnswerHtml([{ ...LIMITED_ROW, deleted: "04.11.2026" }]));
+    expect(await companyVatStatusFromInfo({ vat_number: LIMITED_NUMBER }, { emta: { fetch: deleted.impl } }))
+      .toMatchObject({ status: "unknown", reason: COMPANY_VAT_STATUS_LOOKUP_AMBIGUOUS, lookup_error_code: "emta_registration_deleted" });
+    resetEmtaKmkrCache();
+    const two = fakeEmtaFetch(emtaAnswerHtml([LIMITED_ROW, LIMITED_ROW]));
+    expect(await companyVatStatusFromInfo({ vat_number: LIMITED_NUMBER }, { emta: { fetch: two.impl } }))
+      .toMatchObject({ status: "unknown", reason: COMPANY_VAT_STATUS_LOOKUP_AMBIGUOUS, lookup_error_code: "emta_registration_ambiguous" });
+  });
+
+  it("malformed HTML is unknown (lookup_unavailable)", async () => {
+    const fake = fakeEmtaFetch("<table class=\"grid\"><tr><td>?</td></tr></table>");
+    expect(await companyVatStatusFromInfo({ vat_number: LIMITED_NUMBER }, { emta: { fetch: fake.impl } }))
+      .toMatchObject({ status: "unknown", reason: COMPANY_VAT_STATUS_LOOKUP_UNAVAILABLE, lookup_error_code: "emta_response_invalid" });
+  });
+});
+
+describe("EMTA lookup cache", () => {
+  it("stores the lookup per VAT number and reuses it for 7 days without asking EMTA again", async () => {
+    const fake = fakeEmtaFetch(emtaAnswerHtml([LIMITED_ROW]));
+    await companyVatStatusFromInfo({ vat_number: LIMITED_NUMBER }, { emta: { fetch: fake.impl }, now: at(0) });
+    const stored = readLimitedVatRecords()!.find(record => record.kind === "emta_lookup");
+    expect(stored).toMatchObject({ key: `emta_lookup:${LIMITED_NUMBER}`, vat_number: LIMITED_NUMBER, looked_up_at: "2026-11-04T10:00:00.000Z" });
+    resetEmtaKmkrCache(); // a new process: only the store remains
+    expect(await companyVatStatusFromInfo({ vat_number: LIMITED_NUMBER }, { emta: { fetch: fake.impl }, now: at(6 * DAY) }))
+      .toMatchObject({ status: "limited", lookup: { stale: false, looked_up_at: "2026-11-04T10:00:00.000Z" } });
+    expect(fake.queries()).toHaveLength(1);
+  });
+
+  it("re-checks after 7 days; when the re-check fails the stored answer is used and reported stale", async () => {
+    await companyVatStatusFromInfo({ vat_number: LIMITED_NUMBER }, { emta: { fetch: fakeEmtaFetch(emtaAnswerHtml([LIMITED_ROW])).impl }, now: at(0) });
+    resetEmtaKmkrCache();
+    const failing = fakeEmtaFetch("network");
+    const resolved = await companyVatStatusFromInfo({ vat_number: LIMITED_NUMBER }, { emta: { fetch: failing.impl }, now: at(8 * DAY) });
+    expect(failing.queries()).toHaveLength(1);
+    expect(resolved).toMatchObject({ status: "limited", source: "emta_lookup", lookup: { stale: true, looked_up_at: "2026-11-04T10:00:00.000Z" } });
+    expect(resolved.lookup!.refresh_error).toBe("EMTA could not be reached");
+
+    resetEmtaKmkrCache();
+    const refreshed = fakeEmtaFetch(emtaAnswerHtml([{ ...LIMITED_ROW, limited: false }]));
+    expect(await companyVatStatusFromInfo({ vat_number: LIMITED_NUMBER }, { emta: { fetch: refreshed.impl }, now: at(9 * DAY) }))
+      .toMatchObject({ status: "full", lookup: { stale: false } });
+  });
+
+  it("a changed VAT number is looked up again", async () => {
+    const fake = fakeEmtaFetch(vatNumber => emtaAnswerHtml([vatNumber === LIMITED_NUMBER ? LIMITED_ROW : FULL_ROW]));
+    expect((await companyVatStatusFromInfo({ vat_number: FULL_NUMBER }, { emta: { fetch: fake.impl } })).status).toBe("full");
+    expect((await companyVatStatusFromInfo({ vat_number: LIMITED_NUMBER }, { emta: { fetch: fake.impl } })).status).toBe("limited");
+    expect(fake.queries().map(call => new URLSearchParams(call.body).get("personCode"))).toEqual([FULL_NUMBER, LIMITED_NUMBER]);
+  });
+
+  it("single-file rules mode (no store) still looks up, cached in-process", async () => {
+    delete process.env.EARVELDAJA_RULES_DIR;
+    process.env.EARVELDAJA_RULES_FILE = join(dir, "accounting-rules.md");
+    const fake = fakeEmtaFetch(emtaAnswerHtml([LIMITED_ROW]));
+    expect(await companyVatStatusFromInfo({ vat_number: LIMITED_NUMBER }, { emta: { fetch: fake.impl } })).toMatchObject({ status: "limited", store_available: false });
+    await companyVatStatusFromInfo({ vat_number: LIMITED_NUMBER }, { emta: { fetch: fake.impl } });
+    expect(fake.queries()).toHaveLength(1);
+    resetEmtaKmkrCache();
+    const failed = await companyVatStatusFromInfo({ vat_number: LIMITED_NUMBER }, { emta: { fetch: fakeEmtaFetch("network").impl } });
+    expect(failed).toMatchObject({ status: "unknown", reason: COMPANY_VAT_STATUS_LOOKUP_UNAVAILABLE });
+    expect(new CompanyVatStatusUnknownError(failed).message).toContain("single-file rules mode");
+  });
+});
+
+describe("owner decision precedence", () => {
+  it("an owner decision for the current number wins over EMTA, without a lookup", async () => {
+    limitedVatStore.upsert([ownerRecord("full", LIMITED_NUMBER)]);
+    const fake = fakeEmtaFetch(emtaAnswerHtml([LIMITED_ROW]));
+    expect(await companyVatStatusFromInfo({ vat_number: LIMITED_NUMBER }, { emta: { fetch: fake.impl } }))
+      .toMatchObject({ status: "full", source: "setting", decision_vat_number: LIMITED_NUMBER });
+    expect(fake.calls).toEqual([]);
+  });
+
+  it("a decision made for another number (or for no number) no longer applies: the new number is looked up", async () => {
+    limitedVatStore.upsert([ownerRecord("none", null)]);
+    const fake = fakeEmtaFetch(emtaAnswerHtml([LIMITED_ROW]));
+    expect(await companyVatStatusFromInfo({ vat_number: LIMITED_NUMBER }, { emta: { fetch: fake.impl } }))
+      .toMatchObject({ status: "limited", source: "emta_lookup", decision_status: "none", decision_vat_number: null });
+  });
+
+  it("a decision for another number with a failed lookup is unknown and the message names the earlier decision", async () => {
+    limitedVatStore.upsert([ownerRecord("full", FULL_NUMBER)]);
+    const resolved = await companyVatStatusFromInfo({ vat_number: LIMITED_NUMBER }, { emta: { fetch: fakeEmtaFetch("network").impl } });
+    expect(resolved).toMatchObject({ status: "unknown", reason: COMPANY_VAT_STATUS_LOOKUP_UNAVAILABLE, decision_status: "full", decision_vat_number: FULL_NUMBER });
+    expect(new CompanyVatStatusUnknownError(resolved).message).toContain(`The earlier owner decision "full" was made for VAT number ${FULL_NUMBER}`);
+  });
+
+  it("migration: a record saved without a number applies to the current number and is bound to it on first read", async () => {
+    limitedVatStore.upsert([ownerRecord("limited")]);
+    const fake = fakeEmtaFetch(emtaAnswerHtml([FULL_ROW]));
+    expect(await companyVatStatusFromInfo({ vat_number: LIMITED_NUMBER }, { emta: { fetch: fake.impl } }))
+      .toMatchObject({ status: "limited", source: "setting", decision_vat_number: LIMITED_NUMBER });
+    expect(fake.calls).toEqual([]);
+    const persisted = JSON.parse(readFileSync(resolveBundleStorePath(LIMITED_VAT_STORE_FILE)!, "utf8")) as LimitedVatStoreRecord[];
+    expect(persisted.find(record => record.kind === "status")).toMatchObject({ status: "limited", vat_number: LIMITED_NUMBER });
+    // Bound: a later number is no longer covered by it.
+    expect(await companyVatStatusFromInfo({ vat_number: FULL_NUMBER }, { emta: { fetch: fake.impl } }))
+      .toMatchObject({ status: "full", source: "emta_lookup", decision_status: "limited" });
+  });
+});

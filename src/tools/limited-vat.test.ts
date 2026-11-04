@@ -8,7 +8,8 @@ import { registerLimitedVatTool, type LimitedVatGuidePayload, type LimitedVatMon
 import { createTestRuntimeSafetyContext } from "../__fixtures__/runtime-safety.js";
 import { parseToolPayload } from "../__fixtures__/mcp-response.js";
 import { makeAccount } from "../__fixtures__/accounting.js";
-import { LIMITED_VAT_STORE_FILE, isCompanyVatRegistered, limitedVatStore, resolveCompanyVatStatus, type LimitedVatStoreRecord } from "../company-vat-status.js";
+import { LIMITED_VAT_STORE_FILE, isCompanyVatRegistered, limitedVatStore, readLimitedVatRecords, resolveCompanyVatStatus, type LimitedVatStoreRecord } from "../company-vat-status.js";
+import { LIMITED_ROW, emtaAnswerHtml, fakeEmtaFetch } from "../__fixtures__/emta-kmkr.js";
 import { createConnectionScopedBundleStore } from "../connection-scoped-bundle-store.js";
 import { resolveBundleStorePath } from "../accounting-rules.js";
 import { applyReverseChargeAutoDetection } from "./receipt-inbox.js";
@@ -470,5 +471,57 @@ describe("limited_vat review fixes (fail closed)", () => {
     const { call } = setup(baseState());
     const payload = parseToolPayload<LimitedVatGuidePayload>((await call({ mode: "guide" })).text);
     expect(JSON.stringify(payload.guidance)).not.toMatch(/maksab käibemaksu ainult/);
+  });
+});
+
+describe("limited_vat status from EMTA's KMKR query", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("status shows the EMTA lookup: source, lookup date and the registration row", async () => {
+    vi.stubGlobal("fetch", fakeEmtaFetch(emtaAnswerHtml([LIMITED_ROW])).impl);
+    const { call, api } = setup(baseState({ vatNumber: "EE103050067" }));
+    const status = parseToolPayload<LimitedVatStatusPayload>((await call({ mode: "status" })).text);
+    expect(status).toMatchObject({
+      status: "limited", source: "emta_lookup", vat_number: "EE103050067", effective_from: "2026-11-04",
+      decision_status: null, decision_vat_number: null,
+      emta_lookup: { registration: { limited: true, registered_on: "2026-11-04", decision_on: "2026-11-04", vat_number: "EE103050067" }, stale: false },
+    });
+    expect(status.emta_lookup!.looked_up_at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect(status.explanation).toContain("Piiratud käibemaksukohustuslane");
+    expect(await isCompanyVatRegistered(api)).toBe(false);
+  });
+
+  it("a failed lookup: status (read-only) reports unknown without throwing; VAT decisions refuse; set_status confirms once", async () => {
+    vi.stubGlobal("fetch", fakeEmtaFetch("network").impl);
+    const { call, api } = setup(baseState({ vatNumber: "EE103050067" }));
+    const status = parseToolPayload<LimitedVatStatusPayload>((await call({ mode: "status" })).text);
+    expect(status).toMatchObject({ status: "unknown", reason: "company_vat_status_lookup_unavailable", vat_number: "EE103050067", lookup_error: "EMTA could not be reached" });
+    expect(status.explanation).toContain("set_status");
+    await expect(isCompanyVatRegistered(api)).rejects.toThrow(/^company_vat_status_lookup_unavailable: .*limited_vat mode "set_status"/s);
+
+    const preview = parseToolPayload<LimitedVatSetStatusPreviewPayload>((await call({ mode: "set_status", status: "full" })).text);
+    expect(preview).toMatchObject({ status: "ready_for_approval", current: { status: "unknown", reason: "company_vat_status_lookup_unavailable" }, proposed: { status: "full", vat_number: "EE103050067" } });
+    const saved = parseToolPayload<LimitedVatSetStatusSavedPayload>((await call({ mode: "set_status", status: "full", execute: true, plan_handle: preview.plan_handle })).text);
+    expect(saved.saved).toMatchObject({ status: "full", vat_number: "EE103050067" });
+    expect(await isCompanyVatRegistered(api)).toBe(true);
+    const after = parseToolPayload<LimitedVatStatusPayload>((await call({ mode: "status" })).text);
+    expect(after).toMatchObject({ status: "full", source: "setting", decision_status: "full", decision_vat_number: "EE103050067" });
+  });
+
+  it("set_status binds the VAT number: a number that changes between preview and execute is plan_drift", async () => {
+    const state = baseState({ vatNumber: "EE102809963" });
+    const { call, api } = setup(state);
+    const preview = parseToolPayload<LimitedVatSetStatusPreviewPayload>((await call({ mode: "set_status", status: "full" })).text);
+    expect(preview.proposed.vat_number).toBe("EE102809963");
+    state.vatNumber = "EE103050067";
+    const drift = await call({ mode: "set_status", status: "full", execute: true, plan_handle: preview.plan_handle });
+    expect(drift.result.isError).toBe(true);
+    expect(drift.text).toContain("plan_drift");
+    expect(drift.text).toContain("VAT number");
+    expect(readLimitedVatRecords()!.some(record => record.kind === "status")).toBe(false);
+    // The setup fake answers full for the new number.
+    expect(await isCompanyVatRegistered(api)).toBe(true);
   });
 });

@@ -30,6 +30,15 @@ export interface ConnectionScopedBundleStore<T> {
   reset(): void;
 }
 
+/** The file-backed store, which can also write conditionally under the bundle lock. */
+export interface ConditionalConnectionScopedBundleStore<T> extends ConnectionScopedBundleStore<T> {
+  /**
+   * `upsert`, but only when `precondition` holds for this connection's
+   * records as read under the bundle lock; returns whether it wrote.
+   */
+  upsertIf(records: readonly T[], precondition: (own: readonly T[]) => boolean): boolean;
+}
+
 type Persisted<T> = T & { connectionIdentity?: string };
 
 /**
@@ -52,7 +61,7 @@ export function createConnectionScopedBundleStore<T extends object>(options: {
   label: string;
   maxEntries: number;
   keyOf: (record: T) => string;
-}): ConnectionScopedBundleStore<T> {
+}): ConditionalConnectionScopedBundleStore<T> {
   let cache: { key: string; value: T[] } | undefined;
 
   function readPersisted(path: string): Array<Persisted<T>> {
@@ -65,20 +74,35 @@ export function createConnectionScopedBundleStore<T extends object>(options: {
     return checkBundleRecordIdentity(record.connectionIdentity, options.label).accept;
   }
 
-  function write(mutate: (existing: Array<Persisted<T>>) => Array<Persisted<T>>): void {
+  function write(mutate: (existing: Array<Persisted<T>>) => Array<Persisted<T>> | null): boolean {
     const path = resolveBundleStorePath(options.fileName);
     if (!path) {
       throw new Error(`${options.label} require bundle storage; single-file EARVELDAJA_RULES_FILE mode is not supported.`);
     }
-    withBundleLock(dirname(path), () => {
+    const written = withBundleLock(dirname(path), () => {
       const next = mutate(storeFileExists(path) ? readPersisted(path) : []);
+      if (next === null) return false;
       const serialized = JSON.stringify(next, null, 2);
       if (Buffer.byteLength(serialized, "utf8") > MAX_JSON_INPUT_SIZE) {
         throw new Error(`${options.fileName} would exceed the maximum size of ${MAX_JSON_INPUT_SIZE} bytes; not written.`);
       }
       writePrivateFile(path, serialized);
+      return true;
     });
     cache = undefined;
+    return written;
+  }
+
+  function merge(existing: Array<Persisted<T>>, records: readonly T[]): Array<Persisted<T>> {
+    const identity = getBundleRecordIdentity().stableIdentity;
+    const incoming = new Map(records.map(record => [options.keyOf(record), record]));
+    const kept = existing.filter(record => !(ownRecord(record) && incoming.has(options.keyOf(record))));
+    const merged = [...kept, ...[...incoming.values()].map(record => ({ ...record, connectionIdentity: identity }))];
+    return merged.slice(Math.max(0, merged.length - options.maxEntries));
+  }
+
+  function strip(existing: Array<Persisted<T>>): T[] {
+    return existing.filter(ownRecord).map(({ connectionIdentity: _identity, ...record }) => record as T);
   }
 
   return {
@@ -87,20 +111,15 @@ export function createConnectionScopedBundleStore<T extends object>(options: {
       if (!path) return null;
       const key = `${path}\n${getBundleRecordIdentity().stableIdentity}`;
       if (cache && cache.key === key) return cache.value;
-      const value = storeFileExists(path)
-        ? readPersisted(path).filter(ownRecord).map(({ connectionIdentity: _identity, ...record }) => record as T)
-        : [];
+      const value = storeFileExists(path) ? strip(readPersisted(path)) : [];
       cache = { key, value };
       return value;
     },
     upsert(records) {
-      const identity = getBundleRecordIdentity().stableIdentity;
-      const incoming = new Map(records.map(record => [options.keyOf(record), record]));
-      write(existing => {
-        const kept = existing.filter(record => !(ownRecord(record) && incoming.has(options.keyOf(record))));
-        const merged = [...kept, ...[...incoming.values()].map(record => ({ ...record, connectionIdentity: identity }))];
-        return merged.slice(Math.max(0, merged.length - options.maxEntries));
-      });
+      write(existing => merge(existing, records));
+    },
+    upsertIf(records, precondition) {
+      return write(existing => (precondition(strip(existing)) ? merge(existing, records) : null));
     },
     remove(keys) {
       const drop = new Set(keys);
