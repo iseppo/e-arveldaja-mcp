@@ -4,6 +4,7 @@ import {
   classifySupplier,
   computeLimitedVatMonth,
   fxKeysFor,
+  isMonthCandidate,
   kmdFigures,
   limitedVatPointOfUseNote,
   paymentDeadline,
@@ -198,5 +199,56 @@ describe("limited VAT point-of-use note", () => {
     expect(limitedVatPointOfUseNote("full", aws)).toBeUndefined();
     expect(limitedVatPointOfUseNote("none", telia)).toBeUndefined();
     expect(limitedVatPointOfUseNote("none", client(30, "PayPal Europe", "LUX"))).toBeUndefined();
+  });
+});
+
+describe("limited VAT review fixes (fail closed)", () => {
+  const month = "2026-03";
+  const eur = input(invoice(2, aws.id!, "2026-03-05", [item(50)]), aws);
+  const computeWith = (...rows: LimitedVatInvoiceInput[]) => computeLimitedVatMonth(month, rows, counts(aws.id!), {});
+  const postings: Array<[number, "D" | "C", number]> = [[5000, "D", 12], [LIABILITY, "C", 12]];
+  const signature = postingSignature(postings.map(([accounts_id, type, amount]) => ({ accounts_id, type, amount })));
+  const journal = (extra: Partial<Journal>): Journal => ({
+    id: 900, effective_date: "2026-03-31", document_number: "PKM-2026-03", registered: true,
+    postings: postings.map(([account, type, amount]) => ({ accounts_id: account, type, amount, accounts_dimensions_id: null })),
+    ...extra,
+  });
+  const record: LimitedVatStoreRecord = {
+    kind: "booking", key: "booking:PKM-2026-03", month, document_number: "PKM-2026-03", journal_id: 900, invoice_ids: [2], postings: signature, booked_at: "x",
+  };
+
+  it("F4: a draft PKM journal is never already_booked (recorded or adopted)", () => {
+    expect(resolveLimitedVatMonthState(month, computeWith(eur), [journal({ registered: false })], [record], LIABILITY).kind).toBe("conflict");
+    expect(resolveLimitedVatMonthState(month, computeWith(eur), [journal({ registered: false })], [], LIABILITY).kind).toBe("conflict");
+  });
+
+  it("F4: a PKM journal dated outside the month end is never already_booked (recorded or adopted)", () => {
+    expect(resolveLimitedVatMonthState(month, computeWith(eur), [journal({ effective_date: "2025-03-31" })], [record], LIABILITY).kind).toBe("conflict");
+    expect(resolveLimitedVatMonthState(month, computeWith(eur), [journal({ effective_date: "2025-03-31" })], [], LIABILITY).kind).toBe("conflict");
+  });
+
+  it("F5: an invoice dated more than 92 days after the month is still a candidate (prepayment)", () => {
+    expect(isMonthCandidate(invoice(5, aws.id!, "2026-07-15", [item(10)]), aws, month)).toBe(true);
+    expect(isMonthCandidate(invoice(6, aws.id!, "2026-02-28", [item(10)]), aws, month)).toBe(false);
+  });
+
+  it("F6: a credit note on which the supplier charged VAT is held for the OSS review, never a negative self-assessment", () => {
+    const credit = invoice(7, aws.id!, "2026-03-05", [item(-100, 5000, null, { vat_amount: -24 })], { net_price: -100, vat_price: -24, gross_price: -124 });
+    const result = computeLimitedVatMonth(month, [input(credit, aws)], counts(aws.id!), {});
+    expect(result.included).toEqual([]);
+    expect(result.reviews.map(review => review.code)).toEqual(["limited_vat_supplier_charged_vat"]);
+    const itemOnly = invoice(8, aws.id!, "2026-03-05", [item(-100, 5000, null, { vat_amount: -24 })]);
+    expect(computeLimitedVatMonth(month, [input(itemOnly, aws)], counts(aws.id!), {}).reviews.map(review => review.code)).toEqual(["limited_vat_supplier_charged_vat"]);
+  });
+
+  it("F7: a foreign supplier with an Estonian VAT number or Estonian invoice country is a review item even when classified counts", () => {
+    const eeVat = client(20, "Example GmbH", "DEU", "EE101234567");
+    const eeInvoiceCountry = { ...client(21, "Example Ltd", "GBR"), cl_invoice_country: "EST" };
+    for (const supplier of [eeVat, eeInvoiceCountry]) {
+      const row = invoice(9, supplier.id!, "2026-03-05", [item(100)]);
+      const result = computeLimitedVatMonth(month, [input(row, supplier)], counts(supplier.id!), {});
+      expect(result.included).toEqual([]);
+      expect(result.reviews.map(review => review.code)).toEqual(["limited_vat_supplier_estonian_registration"]);
+    }
   });
 });

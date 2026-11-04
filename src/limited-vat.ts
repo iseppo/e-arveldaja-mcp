@@ -32,12 +32,14 @@ export interface SupplierFacts {
   name?: string | null;
   cl_code_country?: string | null;
   invoice_vat_no?: string | null;
+  cl_invoice_country?: string | null;
 }
 
 export type SupplierDecision =
   | { decision: "not_foreign" }
   | { decision: "counts"; source: "owner" }
   | { decision: "excluded"; source: "owner" | "ex_small_business" | "financial_service" }
+  | { decision: "estonian_registration" }
   | { decision: "unclassified" };
 
 export function isForeignSupplier(client: SupplierFacts | null | undefined): boolean {
@@ -48,6 +50,16 @@ export function isForeignSupplier(client: SupplierFacts | null | undefined): boo
 /** EU small-business special scheme: registration number ends with "EX". */
 export function hasExSuffix(vatNumber: string | null | undefined): boolean {
   return /EX$/i.test((vatNumber ?? "").replace(/\s+/g, ""));
+}
+
+/**
+ * Evidence that the foreign supplier is registered in Estonia (KMS § 21 lg 1
+ * covers only businesses not registered here): an Estonian VAT number (EE…)
+ * or an Estonian invoice country on the client.
+ */
+export function hasEstonianRegistrationEvidence(client: SupplierFacts | null | undefined): boolean {
+  if (/^EE/i.test((client?.invoice_vat_no ?? "").replace(/\s+/g, ""))) return true;
+  return client?.cl_invoice_country?.trim().toUpperCase() === "EST";
 }
 
 export function isFinancialServiceSupplier(name: string | null | undefined): boolean {
@@ -66,6 +78,7 @@ export function classifySupplier(
 ): SupplierDecision {
   if (!isForeignSupplier(client)) return { decision: "not_foreign" };
   if (hasExSuffix(client?.invoice_vat_no)) return { decision: "excluded", source: "ex_small_business" };
+  if (hasEstonianRegistrationEvidence(client)) return { decision: "estonian_registration" };
   if (ownerClassification === "counts") return { decision: "counts", source: "owner" };
   if (ownerClassification === "excluded") return { decision: "excluded", source: "owner" };
   if (isFinancialServiceSupplier(client?.name)) return { decision: "excluded", source: "financial_service" };
@@ -104,13 +117,16 @@ export const limitedVatDocumentNumber = (month: string, delta?: number) =>
 
 const TOLERANCE = 0.005;
 
-/** The foreign supplier already charged VAT (OSS / B2C treatment) — a review item. */
+/**
+ * The foreign supplier already charged VAT (OSS / B2C treatment) — a review
+ * item. Absolute values: a credit note with supplier VAT is held the same way.
+ */
 export function supplierChargedVat(invoice: PurchaseInvoice): boolean {
-  if ((invoice.vat_price ?? 0) > TOLERANCE) return true;
-  if (invoice.gross_price !== undefined && invoice.net_price !== undefined && invoice.gross_price - invoice.net_price > TOLERANCE) return true;
+  if (Math.abs(invoice.vat_price ?? 0) > TOLERANCE) return true;
+  if (invoice.gross_price !== undefined && invoice.net_price !== undefined && Math.abs(invoice.gross_price - invoice.net_price) > TOLERANCE) return true;
   return (invoice.items ?? []).some(item =>
-    (item.vat_amount ?? 0) > TOLERANCE ||
-    (item.project_no_vat_gross_price != null && item.project_no_vat_gross_price - (item.total_net_price ?? 0) > TOLERANCE));
+    Math.abs(item.vat_amount ?? 0) > TOLERANCE ||
+    (item.project_no_vat_gross_price != null && Math.abs(item.project_no_vat_gross_price - (item.total_net_price ?? 0)) > TOLERANCE));
 }
 
 export interface LimitedVatInvoiceInput {
@@ -148,6 +164,8 @@ export interface LimitedVatIncludedInvoice {
 export type LimitedVatReviewCode =
   | "limited_vat_supplier_unclassified"
   | "limited_vat_supplier_charged_vat"
+  | "limited_vat_supplier_estonian_registration"
+  | "limited_vat_coverage_incomplete"
   | "limited_vat_fx_unavailable"
   | "limited_vat_item_account_missing"
   | "limited_vat_rate_unknown";
@@ -177,14 +195,17 @@ export interface LimitedVatMonthComputation {
   reviews: LimitedVatReview[];
 }
 
-/** Candidate invoices whose create_date may put the § 11 date in `month` (paid before or invoiced in it). */
-export function isMonthCandidate(invoice: PurchaseInvoice, client: Client | undefined, month: string, lookaheadDays = 92): boolean {
+/**
+ * Candidate invoices whose § 11 date may be in `month`: confirmed, foreign,
+ * dated on or after the month start (an invoice dated before it has an
+ * earlier § 11 date). No upper bound — a prepayment in the month can precede
+ * an invoice dated any time later; the caller reads them within a budget and
+ * reports any it could not read (`limited_vat_coverage_incomplete`).
+ */
+export function isMonthCandidate(invoice: PurchaseInvoice, client: Client | undefined, month: string): boolean {
   if (invoice.status !== "CONFIRMED" || isInvalidatedPurchaseInvoice(invoice)) return false;
   if (!isForeignSupplier(client)) return false;
-  const { from, to } = monthBounds(month);
-  const ahead = new Date(`${to}T00:00:00Z`);
-  ahead.setUTCDate(ahead.getUTCDate() + lookaheadDays);
-  return invoice.create_date >= from && invoice.create_date <= ahead.toISOString().slice(0, 10);
+  return invoice.create_date >= monthBounds(month).from;
 }
 
 /** ECB keys a dry run must resolve: one per foreign-currency invoice and § 11 date. */
@@ -226,6 +247,10 @@ export function computeLimitedVatMonth(
     }
     const review = (code: LimitedVatReviewCode, message: string) =>
       result.reviews.push({ ...base, code, service_date: serviceDate, message });
+    if (decision.decision === "estonian_registration") {
+      review("limited_vat_supplier_estonian_registration", "The supplier has an Estonian VAT number or Estonian invoice country, so it may be registered in Estonia (KMS § 21 lg 1 covers only businesses not registered here). Not included, even when classified: check the supplier's registration and correct the client data.");
+      continue;
+    }
     if (decision.decision === "unclassified") {
       review("limited_vat_supplier_unclassified", "Is this a KMS § 10 lg 5 service (e.g. cloud/SaaS/API, consulting, advertising)? Ask the owner: supplier_classifications [{clients_id, classification: \"counts\" | \"excluded\"}]; the choice is saved for later months on approval.");
       continue;
@@ -335,6 +360,18 @@ function sameNet(left: Map<string, number>, right: Map<string, number>): boolean
   return left.size === right.size && [...left].every(([key, value]) => right.get(key) === value);
 }
 
+/**
+ * Why an existing PKM journal cannot count as booked: it must be registered
+ * (confirmed), not deleted and dated on its approved effective date.
+ * Undefined = acceptable.
+ */
+export function limitedVatJournalProblem(journal: Journal, effectiveDate: string): string | undefined {
+  if (journal.is_deleted === true) return "is deleted";
+  if (journal.registered !== true) return "is not registered (a draft books no VAT liability)";
+  if ((journal.effective_date ?? "").slice(0, 10) !== effectiveDate) return `is dated ${journal.effective_date}, not the approved ${effectiveDate}`;
+  return undefined;
+}
+
 export type LimitedVatMonthState =
   | { kind: "new"; document_number: string; invoices: LimitedVatIncludedInvoice[] }
   | { kind: "delta"; document_number: string; invoices: LimitedVatIncludedInvoice[]; booked_journal_ids: number[] }
@@ -356,6 +393,7 @@ export function resolveLimitedVatMonthState(
   liabilityAccount: number,
 ): LimitedVatMonthState {
   const main = limitedVatDocumentNumber(month);
+  const { to } = monthBounds(month);
   const family = journals.filter(journal =>
     journal.is_deleted !== true && typeof journal.document_number === "string" &&
     (journal.document_number === main || new RegExp(`^${main}-P\\d+$`).test(journal.document_number)));
@@ -368,6 +406,10 @@ export function resolveLimitedVatMonthState(
   for (const journal of family) {
     const record = bookings.find(booking => booking.journal_id === journal.id);
     const signature = postingSignature(journal.postings ?? []);
+    const unacceptable = limitedVatJournalProblem(journal, record?.effective_date ?? to);
+    if (unacceptable) {
+      return { kind: "conflict", journal_ids: journalIds, reason: `Journal ${journal.id} (${journal.document_number}) ${unacceptable}.` };
+    }
     if (!record) {
       if (family.length === 1 && journal.document_number === main && signature.join() === full.join()) {
         return { kind: "already_booked", journal_ids: journalIds };
@@ -424,11 +466,14 @@ export function kmdFigures(invoices: readonly LimitedVatIncludedInvoice[]): Limi
  * fully VAT-registered. Never holds or blocks a booking.
  */
 export function limitedVatPointOfUseNote(
-  status: "none" | "limited" | "full",
+  status: "none" | "limited" | "full" | "unknown",
   supplier: SupplierFacts | undefined | null,
 ): string | undefined {
   if (status === "full" || !supplier || !isForeignSupplier(supplier)) return undefined;
-  if (hasExSuffix(supplier.invoice_vat_no) || isFinancialServiceSupplier(supplier.name)) return undefined;
+  if (status === "unknown") {
+    return "Ettevõtte käibemaksustaatust (limited-vat.json) ei saa lugeda, seega ei saa otsustada, kas sisendkäibemaks või pöördmaksustamine kehtib. Käibemaksust sõltuv broneerimine keeldub (company_vat_status_unknown), kuni fail on parandatud.";
+  }
+  if (hasExSuffix(supplier.invoice_vat_no) || hasEstonianRegistrationEvidence(supplier) || isFinancialServiceSupplier(supplier.name)) return undefined;
   return status === "limited"
     ? "Piiratud maksukohustuslane: kui see on KMS § 10 lg 5 teenus (nt pilv/SaaS/API), arvestab selle käibemaksu igakuine limited_vat mode \"month\" (standard-profiil). Arvel ise sisendkäibemaksu ega pöördmaksustamist ei ole."
     : "Välismaa teenus: kui see on KMS § 10 lg 5 teenus (nt pilv/SaaS/API) ja ettevõte ei ole käibemaksukohustuslane, tekib kohustus registreerida end piiratud maksukohustuslaseks alates teenuse saamise päevast (KMS § 21 lg 1, piirmäära ei ole). Vaata limited_vat mode \"guide\" (standard-profiil). Broneerimist see ei peata.";

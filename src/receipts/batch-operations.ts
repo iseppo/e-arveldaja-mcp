@@ -59,7 +59,7 @@ import { loadOwnIbans } from "../tools/own-company-identity.js";
 import { createAndMaybeMatchPurchaseInvoice, prepareReceiptInvoiceItems } from "../tools/receipt-inbox-booking.js";
 import { ALREADY_BOOKED_STATUSES, buildReceiptBatchSummary } from "../tools/receipt-inbox-summary.js";
 import { checkCurrencyEquivalent } from "../currency-equivalent-check.js";
-import { companyVatStatusFromInfo } from "../company-vat-status.js";
+import { companyVatStatusFromInfo, requireKnownCompanyVatStatus } from "../company-vat-status.js";
 import { limitedVatPointOfUseNote } from "../limited-vat.js";
 import { textHazardSignals } from "../tools/document-text-hazards.js";
 import { groupByDigest } from "../file-digest-groups.js";
@@ -1030,14 +1030,14 @@ class ReceiptBatchOperationsImpl implements ReceiptBatchOperations {
       }
       const vatInfo = await this.api.readonly.getVatInfo();
       const ownCompanyVat = vatInfo.vat_number?.trim() || undefined;
-      const companyVatStatus = companyVatStatusFromInfo(vatInfo);
+      const companyVatStatus = requireKnownCompanyVatStatus(companyVatStatusFromInfo(vatInfo));
       const context: ReceiptProcessingContext = {
         clients: await this.api.clients.listAll(),
         purchaseInvoices: await this.api.purchaseInvoices.listAll(),
         purchaseArticlesWithVat: await getPurchaseArticlesWithVat(this.api),
         accounts: await this.api.readonly.getAccounts(),
-        isVatRegistered: companyVatStatus.status === "full",
-        companyVatStatus: companyVatStatus.status,
+        isVatRegistered: companyVatStatus === "full",
+        companyVatStatus,
       };
       const ownCompanyRegistryCode = deriveOwnCompanyRegistryCode(
         context.clients,

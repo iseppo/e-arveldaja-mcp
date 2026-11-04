@@ -15,6 +15,25 @@ export type CompanyVatStatus = "none" | "limited" | "full";
 
 export const COMPANY_VAT_STATUSES = ["none", "limited", "full"] as const;
 
+/**
+ * The resolved status: a stored or derived `CompanyVatStatus`, or `unknown`
+ * when the status store exists but cannot be read (or holds an invalid
+ * setting). `unknown` is never treated as `full` or `none`: VAT decisions
+ * refuse (`company_vat_status_unknown`).
+ */
+export type ResolvedVatStatus = CompanyVatStatus | "unknown";
+
+export const COMPANY_VAT_STATUS_UNKNOWN = "company_vat_status_unknown";
+
+/** Thrown at a VAT decision when the status is `unknown`. */
+export class CompanyVatStatusUnknownError extends Error {
+  readonly code = COMPANY_VAT_STATUS_UNKNOWN;
+  constructor(detail: string | undefined) {
+    super(`${COMPANY_VAT_STATUS_UNKNOWN}: the company VAT status cannot be read from limited-vat.json (${detail ?? "invalid setting"}), so VAT treatment cannot be decided. Nothing was written. Repair or restore the file in the accounting-rules bundle, then retry.`);
+    this.name = "CompanyVatStatusUnknownError";
+  }
+}
+
 /** One owner-approved status setting. */
 export interface CompanyVatStatusRecord {
   kind: "status";
@@ -41,6 +60,8 @@ export interface LimitedVatBookingRecord {
   month: string;
   document_number: string;
   journal_id: number;
+  /** The approved effective date (YYYY-MM-DD); absent in older records = the month's last day. */
+  effective_date?: string;
   invoice_ids: number[];
   /** Canonical postings "account|dimension|side|cents", sorted. */
   postings: string[];
@@ -62,19 +83,23 @@ export const supplierRecordKey = (clientsId: number) => `supplier:${clientsId}`;
 export const bookingRecordKey = (documentNumber: string) => `booking:${documentNumber}`;
 
 export interface ResolvedCompanyVatStatus {
-  status: CompanyVatStatus;
-  /** `setting` = owner-approved record; `derived` = from `/vat_info`. */
-  source: "setting" | "derived";
+  status: ResolvedVatStatus;
+  /** `setting` = owner-approved record; `derived` = from `/vat_info`; `store_error` = status unknown. */
+  source: "setting" | "derived" | "store_error";
   vat_number: string | null;
   effective_from: string | null;
   /** False in single-file rules mode: no setting can be stored (so `limited` is unavailable). */
   store_available: boolean;
-  /** The store exists but could not be read; the status was derived. */
+  /** The store exists but could not be read (status `unknown`). */
   store_error?: string;
 }
 
-/** The stored records of this connection; null = store unavailable (single-file mode). */
+/**
+ * The stored records of this connection, re-read from disk (another process
+ * may have written since); null = store unavailable (single-file mode).
+ */
 export function readLimitedVatRecords(): LimitedVatStoreRecord[] | null {
+  limitedVatStore.reset();
   return limitedVatStore.read();
 }
 
@@ -84,18 +109,24 @@ export function deriveCompanyVatStatus(
   storeError?: string,
 ): ResolvedCompanyVatStatus {
   const vatNumber = vatInfo?.vat_number?.trim() || null;
+  const base = { vat_number: vatNumber, store_available: records !== null };
+  if (storeError !== undefined) {
+    return { ...base, status: "unknown", source: "store_error", effective_from: null, store_error: storeError };
+  }
   const setting = records?.find((record): record is CompanyVatStatusRecord => record.kind === "status");
-  const base = { vat_number: vatNumber, store_available: records !== null, ...(storeError ? { store_error: storeError } : {}) };
-  if (setting && (COMPANY_VAT_STATUSES as readonly string[]).includes(setting.status)) {
+  if (setting) {
+    if (!(COMPANY_VAT_STATUSES as readonly string[]).includes(setting.status) || typeof setting.effective_from !== "string") {
+      return { ...base, status: "unknown", source: "store_error", effective_from: null, store_error: "the stored status setting is invalid" };
+    }
     return { ...base, status: setting.status, source: "setting", effective_from: setting.effective_from };
   }
   return { ...base, status: vatNumber ? "full" : "none", source: "derived", effective_from: null };
 }
 
 /**
- * The single VAT-status decision used by every VAT-treatment site. An
- * unreadable store falls back to the derived status (today's behaviour) and
- * says so in `store_error`.
+ * The single VAT-status decision used by every VAT-treatment site, read
+ * fresh from the store each time. An unreadable store gives `unknown`
+ * (never a derived `full`).
  */
 export async function resolveCompanyVatStatus(
   api: { readonly: { getVatInfo(): Promise<CompanyVatInfo> } },
@@ -109,14 +140,24 @@ export function companyVatStatusFromInfo(vatInfo: CompanyVatInfo | undefined): R
   try {
     records = readLimitedVatRecords();
   } catch (error) {
-    return deriveCompanyVatStatus(vatInfo, [], (error as Error).message);
+    return deriveCompanyVatStatus(vatInfo, null, (error as Error).message);
   }
   return deriveCompanyVatStatus(vatInfo, records);
 }
 
-/** True only for a fully VAT-registered company (`full`); `limited` and `none` are not. */
+/** The resolved status for a VAT decision; throws `CompanyVatStatusUnknownError` for `unknown`. */
+export function requireKnownCompanyVatStatus(resolved: ResolvedCompanyVatStatus): CompanyVatStatus {
+  if (resolved.status === "unknown") throw new CompanyVatStatusUnknownError(resolved.store_error);
+  return resolved.status;
+}
+
+/**
+ * True only for a fully VAT-registered company (`full`); `limited` and `none`
+ * are not. Throws `CompanyVatStatusUnknownError` when the status is `unknown`,
+ * so no VAT treatment is decided on a guess.
+ */
 export async function isCompanyVatRegistered(
   api: { readonly: { getVatInfo(): Promise<CompanyVatInfo> } },
 ): Promise<boolean> {
-  return (await resolveCompanyVatStatus(api)).status === "full";
+  return requireKnownCompanyVatStatus(await resolveCompanyVatStatus(api)) === "full";
 }

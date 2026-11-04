@@ -1,14 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, rmSync } from "fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
-import { join } from "path";
+import { dirname, join } from "path";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { registerLimitedVatTool, type LimitedVatGuidePayload, type LimitedVatMonthPayload, type LimitedVatSetStatusPreviewPayload, type LimitedVatSetStatusSavedPayload, type LimitedVatStatusPayload } from "./limited-vat.js";
 import { createTestRuntimeSafetyContext } from "../__fixtures__/runtime-safety.js";
 import { parseToolPayload } from "../__fixtures__/mcp-response.js";
 import { makeAccount } from "../__fixtures__/accounting.js";
-import { isCompanyVatRegistered, limitedVatStore, resolveCompanyVatStatus } from "../company-vat-status.js";
+import { LIMITED_VAT_STORE_FILE, isCompanyVatRegistered, limitedVatStore, resolveCompanyVatStatus, type LimitedVatStoreRecord } from "../company-vat-status.js";
+import { createConnectionScopedBundleStore } from "../connection-scoped-bundle-store.js";
+import { resolveBundleStorePath } from "../accounting-rules.js";
 import { applyReverseChargeAutoDetection } from "./receipt-inbox.js";
 import type { ApiContext } from "./crud-tools.js";
 import type { Account, Client, Journal, PurchaseInvoice, Transaction } from "../types/api.js";
@@ -322,5 +324,132 @@ describe("limited_vat mode month", () => {
     const dry = parseToolPayload<LimitedVatMonthPayload>((await call({ mode: "month", month: "2026-03", supplier_classifications: [{ clients_id: 11, classification: "counts" }] })).text);
     expect(dry.review_items.map(review => review.code)).toEqual(["limited_vat_fx_unavailable"]);
     expect(dry.proposed_journal).toBeUndefined();
+  });
+});
+
+describe("limited_vat review fixes (fail closed)", () => {
+  const writeStoreFile = (content: string) => {
+    const path = resolveBundleStorePath(LIMITED_VAT_STORE_FILE)!;
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, content);
+  };
+
+  it("F1: an unreadable status store makes the status unknown and refuses VAT decisions, never full", async () => {
+    const state = baseState();
+    const { call, api } = setup(state);
+    writeStoreFile("{ not json");
+    expect((await resolveCompanyVatStatus(api)).status).toBe("unknown");
+    await expect(isCompanyVatRegistered(api)).rejects.toThrow(/company_vat_status_unknown/);
+    const status = parseToolPayload<LimitedVatStatusPayload>((await call({ mode: "status" })).text);
+    expect(status.status).toBe("unknown");
+    const refused = await call({ mode: "set_status", status: "limited", effective_from: "2026-01-01" });
+    expect(refused.result.isError).toBe(true);
+    expect(refused.text).toContain("company_vat_status_unknown");
+  });
+
+  it("F2: sees a status saved by another process at the next VAT decision", async () => {
+    const { api } = setup(baseState());
+    expect(await isCompanyVatRegistered(api)).toBe(true);
+    const otherProcess = createConnectionScopedBundleStore<LimitedVatStoreRecord>({
+      fileName: LIMITED_VAT_STORE_FILE, label: "other process", maxEntries: 10, keyOf: record => record.key,
+    });
+    otherProcess.upsert([{ kind: "status", key: "company_vat_status", status: "limited", effective_from: "2026-01-01", set_at: "x" }]);
+    expect(await isCompanyVatRegistered(api)).toBe(false);
+  });
+
+  it("F3: refuses a future effective_from", async () => {
+    const state = baseState();
+    const { call } = setup(state);
+    const refused = await call({ mode: "set_status", status: "limited", effective_from: "2099-01-01" });
+    expect(refused.result.isError).toBe(true);
+    expect(refused.text).toContain("limited_vat_effective_from_in_future");
+  });
+
+  it("F4: execute refuses an existing draft PKM journal found at create time instead of recording it", async () => {
+    const state = baseState();
+    const { call, api } = setup(state);
+    await setLimited(call);
+    const args = { mode: "month", month: "2026-03", supplier_classifications: [{ clients_id: 10, classification: "counts" }] };
+    const dry = parseToolPayload<LimitedVatMonthPayload>((await call(args)).text);
+    const journals = api.journals as unknown as { listAll: () => Promise<Journal[]> };
+    const realListAll = journals.listAll;
+    let calls = 0;
+    journals.listAll = async () => {
+      calls += 1;
+      if (calls === 2) {
+        state.journals.push({
+          id: 777, document_number: "PKM-2026-03", effective_date: "2026-03-31", registered: false,
+          postings: [{ accounts_id: 5000, type: "D", amount: 12, accounts_dimensions_id: null }, { accounts_id: 2410, type: "C", amount: 12, accounts_dimensions_id: null }],
+        });
+      }
+      return realListAll();
+    };
+    const executed = await call({ ...args, execute: true, plan_handle: dry.plan_handle });
+    expect(executed.result.isError).toBe(true);
+    expect(executed.text).toContain("limited_vat_journal_conflict");
+    limitedVatStore.reset();
+    expect(limitedVatStore.read()!.some(record => record.kind === "booking")).toBe(false);
+  });
+
+  it("F5: includes an invoice dated months later but prepaid in the month", async () => {
+    const state = baseState({
+      invoices: [invoice(1, 10, "2026-07-15", 50, { transactions: [70] })],
+      transactions: [{ id: 70, date: "2026-03-15", status: "CONFIRMED" } as Transaction],
+    });
+    const { call } = setup(state);
+    await setLimited(call);
+    const dry = parseToolPayload<LimitedVatMonthPayload>((await call({ mode: "month", month: "2026-03", supplier_classifications: [{ clients_id: 10, classification: "counts" }] })).text);
+    expect(dry.included_invoices.map(row => [row.invoice_id, row.service_date])).toEqual([[1, "2026-03-15"]]);
+  });
+
+  it("F5: reports later invoices beyond the read budget as limited_vat_coverage_incomplete, never a silent omission", async () => {
+    const later = Array.from({ length: 300 }, (_, index) => invoice(100 + index, 10, "2026-05-10", 1));
+    const state = baseState({ invoices: [invoice(1, 10, "2026-03-05", 50), ...later] });
+    const { call } = setup(state);
+    await setLimited(call);
+    const dry = parseToolPayload<LimitedVatMonthPayload>((await call({ mode: "month", month: "2026-03", supplier_classifications: [{ clients_id: 10, classification: "counts" }] })).text);
+    expect(dry.review_items.filter(review => review.code === "limited_vat_coverage_incomplete").map(review => review.invoice_id)).toEqual([399]);
+  });
+
+  it("F8: execute refuses when per-invoice amounts are swapped with equal totals", async () => {
+    const state = baseState({ invoices: [invoice(1, 10, "2026-03-05", 50), invoice(2, 10, "2026-03-06", 100)] });
+    const { call } = setup(state);
+    await setLimited(call);
+    const args = { mode: "month", month: "2026-03", supplier_classifications: [{ clients_id: 10, classification: "counts" }] };
+    const dry = parseToolPayload<LimitedVatMonthPayload>((await call(args)).text);
+    state.invoices = [invoice(1, 10, "2026-03-05", 100), invoice(2, 10, "2026-03-06", 50)];
+    const drift = await call({ ...args, execute: true, plan_handle: dry.plan_handle });
+    expect(drift.text).toContain("plan_drift");
+    expect(state.writes).toEqual([]);
+  });
+
+  it("F8: execute refuses when a supplier moves from EU to non-EU (KMD split changes, postings do not)", async () => {
+    const state = baseState();
+    const { call } = setup(state);
+    await setLimited(call);
+    const args = { mode: "month", month: "2026-03", supplier_classifications: [{ clients_id: 10, classification: "counts" }] };
+    const dry = parseToolPayload<LimitedVatMonthPayload>((await call(args)).text);
+    state.clients[0] = supplier(10, "Amazon Web Services EMEA SARL", "USA");
+    const drift = await call({ ...args, execute: true, plan_handle: dry.plan_handle });
+    expect(drift.text).toContain("plan_drift");
+    expect(state.writes).toEqual([]);
+  });
+
+  it("F9: an older status plan cannot overwrite a newer owner decision", async () => {
+    const { call } = setup(baseState());
+    const older = parseToolPayload<LimitedVatSetStatusPreviewPayload>((await call({ mode: "set_status", status: "limited", effective_from: "2026-01-01" })).text);
+    const newer = parseToolPayload<LimitedVatSetStatusPreviewPayload>((await call({ mode: "set_status", status: "limited", effective_from: "2026-02-01" })).text);
+    await call({ mode: "set_status", status: "limited", effective_from: "2026-02-01", execute: true, plan_handle: newer.plan_handle });
+    const stale = await call({ mode: "set_status", status: "limited", effective_from: "2026-01-01", execute: true, plan_handle: older.plan_handle });
+    expect(stale.result.isError).toBe(true);
+    expect(stale.text).toContain("plan_drift");
+    const status = parseToolPayload<LimitedVatStatusPayload>((await call({ mode: "status" })).text);
+    expect(status.effective_from).toBe("2026-02-01");
+  });
+
+  it("F10: the guidance does not claim foreign services are the only taxable transactions", async () => {
+    const { call } = setup(baseState());
+    const payload = parseToolPayload<LimitedVatGuidePayload>((await call({ mode: "guide" })).text);
+    expect(JSON.stringify(payload.guidance)).not.toMatch(/maksab käibemaksu ainult/);
   });
 });

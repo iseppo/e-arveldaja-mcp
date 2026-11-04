@@ -15,14 +15,18 @@ import { BookingGuard } from "../booking-guard.js";
 import { standardVatRateOn, LIMITED_TAXPAYER_RULES, type TaxRuleReference } from "../estonian-tax-rules.js";
 import { buildLimitedVatGuidance, type LimitedVatGuidance } from "../limited-vat-guidance.js";
 import {
+  COMPANY_VAT_STATUS_UNKNOWN,
+  CompanyVatStatusUnknownError,
   LIMITED_VAT_STORE_FILE,
   bookingRecordKey,
   limitedVatStore,
+  readLimitedVatRecords,
   resolveCompanyVatStatus,
   supplierRecordKey,
   type CompanyVatStatus,
   type LimitedVatStoreRecord,
   type ResolvedCompanyVatStatus,
+  type ResolvedVatStatus,
 } from "../company-vat-status.js";
 import {
   buildLimitedVatPostings,
@@ -31,6 +35,7 @@ import {
   fxKeysFor,
   isMonthCandidate,
   kmdFigures,
+  limitedVatJournalProblem,
   monthBounds,
   paymentDeadline,
   postingSignature,
@@ -89,7 +94,7 @@ export interface LimitedVatCandidateMonth {
 
 export interface LimitedVatStatusPayload {
   mode: "status";
-  status: CompanyVatStatus;
+  status: ResolvedVatStatus;
   source: ResolvedCompanyVatStatus["source"];
   vat_number: string | null;
   effective_from: string | null;
@@ -109,7 +114,7 @@ export interface LimitedVatSetStatusPreviewPayload {
   mode: "set_status";
   status: "ready_for_approval";
   plan_handle: string;
-  current: { status: CompanyVatStatus; source: ResolvedCompanyVatStatus["source"]; effective_from: string | null };
+  current: { status: ResolvedVatStatus; source: ResolvedCompanyVatStatus["source"]; effective_from: string | null };
   proposed: { status: CompanyVatStatus; effective_from: string };
   effect: string;
   next_step_summary: string;
@@ -156,8 +161,16 @@ function storeUnavailableMessage(): string {
 }
 
 function readRecords(): LimitedVatStoreRecord[] | null {
-  limitedVatStore.reset(); // another process may have written since
-  return limitedVatStore.read();
+  return readLimitedVatRecords(); // fresh: another process may have written since
+}
+
+function statusUnknownRefusal(resolved: ResolvedCompanyVatStatus): CallToolResult {
+  return refuse(COMPANY_VAT_STATUS_UNKNOWN, new CompanyVatStatusUnknownError(resolved.store_error).message);
+}
+
+/** The stored status setting as canonical JSON ("null" when unset): the version a set_status plan binds. */
+function statusRecordVersion(records: readonly LimitedVatStoreRecord[] | null): string {
+  return canonicalPlanJson((records ?? []).find(record => record.kind === "status") as unknown as PlanRecord ?? null);
 }
 
 function wrapView<T extends { supplier: string; number: string }>(row: T): T {
@@ -179,6 +192,12 @@ async function buildStatus(api: ApiContext): Promise<LimitedVatStatusPayload> {
     store_available: resolved.store_available,
     ...(resolved.store_error ? { store_error: resolved.store_error } : {}),
   };
+  if (resolved.status === "unknown") {
+    return {
+      ...base,
+      explanation: `The company VAT status cannot be read (${resolved.store_error}). Every VAT-dependent booking refuses (${COMPANY_VAT_STATUS_UNKNOWN}) until ${LIMITED_VAT_STORE_FILE} in the accounting-rules bundle is repaired or restored.`,
+    };
+  }
   if (resolved.status === "full") {
     return {
       ...base,
@@ -261,7 +280,11 @@ async function handleSetStatus(api: ApiContext, ctx: RuntimeSafetyContext, args:
   if (!effectiveFrom || !isStrictDate(effectiveFrom)) {
     return refuse("limited_vat_effective_from_required", "status \"limited\" needs effective_from (YYYY-MM-DD): the day the registration obligation arose (KMS § 21 lg 1/lg 3).");
   }
+  if (effectiveFrom > todayInTallinn()) {
+    return refuse("limited_vat_effective_from_in_future", `effective_from ${effectiveFrom} is in the future; a status is stored only from today (${todayInTallinn()}, Europe/Tallinn) or earlier. Set it again when the change takes effect.`);
+  }
   const current = await resolveCompanyVatStatus(api);
+  if (current.status === "unknown") return statusUnknownRefusal(current);
   if (args.status === "full" && !current.vat_number) {
     return refuse("limited_vat_full_requires_vat_number", "status \"full\" needs a VAT number in e-arveldaja (get_vat_info shows none).");
   }
@@ -276,7 +299,7 @@ async function handleSetStatus(api: ApiContext, ctx: RuntimeSafetyContext, args:
       totals: {},
       exclusions: [],
       reviews: [],
-      privatePayload: normalizedArgs,
+      privatePayload: { ...normalizedArgs, previous_status_record: statusRecordVersion(readRecords()) },
     };
     const planHandle = ctx.planStore.issue(LIMITED_VAT_STATUS_DOMAIN, planInput);
     const payload: LimitedVatSetStatusPreviewPayload = {
@@ -303,6 +326,10 @@ async function handleSetStatus(api: ApiContext, ctx: RuntimeSafetyContext, args:
   }
   if (canonicalPlanJson(plan.normalizedArgs) !== canonicalPlanJson(normalizedArgs)) {
     return refuse("plan_drift", "status or effective_from differ from the approved preview.");
+  }
+  const previous = (plan.privatePayload as { previous_status_record?: unknown } | null)?.previous_status_record;
+  if (typeof previous !== "string" || previous !== statusRecordVersion(readRecords())) {
+    return refuse("plan_drift", "The stored company VAT status changed after this preview (another approval saved a newer setting). Run the set_status preview again.");
   }
   try {
     limitedVatStore.upsert([{ kind: "status", key: "company_vat_status", status: args.status, effective_from: effectiveFrom, set_at: new Date().toISOString() }]);
@@ -368,7 +395,7 @@ interface MonthBuild {
   notes: string[];
 }
 
-async function loadMonthInputs(api: ApiContext, month: string, fresh: boolean): Promise<{ inputs: LimitedVatInvoiceInput[]; clients: Client[] } | { error: CallToolResult }> {
+async function loadMonthInputs(api: ApiContext, month: string, fresh: boolean): Promise<{ inputs: LimitedVatInvoiceInput[]; clients: Client[]; unread: PurchaseInvoice[] } | { error: CallToolResult }> {
   if (fresh) {
     api.clients.invalidateListCache();
     api.purchaseInvoices.invalidateListCache();
@@ -377,12 +404,20 @@ async function loadMonthInputs(api: ApiContext, month: string, fresh: boolean): 
   }
   const [clients, invoices] = await Promise.all([api.clients.listAll(), api.purchaseInvoices.listAll()]);
   const byId = new Map(clients.map(client => [client.id, client]));
-  const candidates = invoices.filter(invoice => isMonthCandidate(invoice, byId.get(invoice.clients_id), month));
-  if (candidates.length > MAX_MONTH_CANDIDATES) {
-    return { error: refuse("limited_vat_too_many_candidates", `${candidates.length} foreign-supplier invoices could fall into ${month}; at most ${MAX_MONTH_CANDIDATES} are read per run.`) };
+  const { to } = monthBounds(month);
+  const candidates = invoices
+    .filter(invoice => isMonthCandidate(invoice, byId.get(invoice.clients_id), month))
+    .sort((a, b) => a.create_date.localeCompare(b.create_date) || (a.id ?? 0) - (b.id ?? 0));
+  // Invoices dated in the month are always read; later ones (a prepayment in
+  // the month may precede them) fill the remaining budget, earliest first.
+  const inMonth = candidates.filter(invoice => invoice.create_date <= to);
+  if (inMonth.length > MAX_MONTH_CANDIDATES) {
+    return { error: refuse("limited_vat_too_many_candidates", `${inMonth.length} foreign-supplier invoices are dated in ${month}; at most ${MAX_MONTH_CANDIDATES} are read per run.`) };
   }
+  const read = candidates.slice(0, MAX_MONTH_CANDIDATES);
+  const unread = candidates.slice(MAX_MONTH_CANDIDATES);
   const inputs: LimitedVatInvoiceInput[] = [];
-  for (const candidate of candidates) {
+  for (const candidate of read) {
     const invoice: PurchaseInvoice = await api.purchaseInvoices.get(candidate.id!);
     if (invoice.status !== "CONFIRMED") continue;
     const paymentDates: string[] = [];
@@ -393,7 +428,7 @@ async function loadMonthInputs(api: ApiContext, month: string, fresh: boolean): 
     if (invoice.paid_in_cash && typeof invoice.cash_payment_date === "string") paymentDates.push(invoice.cash_payment_date);
     inputs.push({ invoice, client: byId.get(invoice.clients_id), payment_dates: paymentDates.sort() });
   }
-  return { inputs, clients };
+  return { inputs, clients, unread };
 }
 
 async function buildMonth(
@@ -405,6 +440,7 @@ async function buildMonth(
   if (!parsed) return { error: refuse("limited_vat_month_required", "mode \"month\" needs month (YYYY-MM).") };
   const month = parsed.canonical;
   const status = await resolveCompanyVatStatus(api);
+  if (status.status === "unknown") return { error: statusUnknownRefusal(status) };
   if (status.status !== "limited") {
     return { error: refuse("limited_vat_status_not_limited", `The company VAT status is "${status.status}" (${status.source}); the monthly run is only for a limited taxpayer. Set it with mode "set_status" (owner approval) — see mode "guide".`) };
   }
@@ -433,6 +469,21 @@ async function buildMonth(
   for (const entry of proposed) classifications.set(entry.clients_id, entry.classification);
   const fx = options.fx === "resolve" ? await resolveFrozenFxOutcomes(fxKeysFor(loaded.inputs, month), options.ecb) : options.fx;
   const computation = computeLimitedVatMonth(month, loaded.inputs, classifications, fx);
+  const byClient = new Map(loaded.clients.map(client => [client.id, client]));
+  for (const invoice of loaded.unread) {
+    const client = byClient.get(invoice.clients_id);
+    const decision = classifySupplier(client, classifications.get(invoice.clients_id));
+    if (decision.decision === "not_foreign" || decision.decision === "excluded") continue;
+    computation.reviews.push({
+      code: "limited_vat_coverage_incomplete",
+      invoice_id: invoice.id!,
+      number: invoice.number,
+      clients_id: invoice.clients_id,
+      supplier: client?.name ?? invoice.client_name,
+      service_date: invoice.create_date,
+      message: `Not read in this run (read budget ${MAX_MONTH_CANDIDATES} invoices): a payment of this invoice in ${month} would put its service date (KMS § 11) in this month. Check its payment dates; it is not included.`,
+    });
+  }
   const journals = await api.journals.listAll();
   const familyIds = journals
     .filter(journal => journal.is_deleted !== true && typeof journal.document_number === "string" && journal.document_number.startsWith(`PKM-${month}`))
@@ -449,7 +500,25 @@ async function buildMonth(
 
 function monthFingerprint(build: MonthBuild): string {
   const state = build.state;
+  const computation = build.computation;
+  const touched = new Set([
+    ...computation.included.map(row => row.invoice_id),
+    ...computation.excluded.map(row => row.invoice_id),
+    ...computation.reviews.map(row => row.invoice_id),
+  ]);
+  const suppliers = [...new Map(build.inputs
+    .filter(input => touched.has(input.invoice.id!))
+    .map(input => [input.invoice.clients_id, {
+      clients_id: input.invoice.clients_id,
+      country: input.client?.cl_code_country ?? null,
+      invoice_country: input.client?.cl_invoice_country ?? null,
+      vat_no: input.client?.invoice_vat_no ?? null,
+    }])).values()].sort((a, b) => a.clients_id - b.clients_id);
   return canonicalPlanJson({
+    included: computation.included as unknown as PlanData,
+    suppliers,
+    kmd: kmdFigures(computation.included) as unknown as PlanData,
+    review_details: computation.reviews.map(review => `${review.code}:${review.invoice_id}:${review.clients_id}:${review.service_date}`),
     month: build.month,
     liability_account: build.liabilityAccount,
     state: state.kind,
@@ -585,9 +654,11 @@ async function handleMonth(api: ApiContext, ctx: RuntimeSafetyContext, args: Mon
   const journalId = booking.journal_id;
   const expected = postingSignature(build.postings);
   if (booking.status === "duplicate" || booking.recovered === true) {
+    api.journals.invalidateListCache();
     const existing = await api.journals.get(journalId);
-    if (postingSignature(existing.postings ?? []).join() !== expected.join()) {
-      return refuse("limited_vat_journal_conflict", `Journal ${journalId} already carries ${state.document_number} with different postings; nothing was recorded.`, { journal_ids: [journalId] });
+    const problem = limitedVatJournalProblem(existing, to);
+    if (problem || postingSignature(existing.postings ?? []).join() !== expected.join()) {
+      return refuse("limited_vat_journal_conflict", `Journal ${journalId} already carries ${state.document_number} but ${problem ?? "has different postings"}; nothing was recorded.`, { journal_ids: [journalId] });
     }
   }
   const bookingRecord: LimitedVatStoreRecord = {
@@ -596,6 +667,7 @@ async function handleMonth(api: ApiContext, ctx: RuntimeSafetyContext, args: Mon
     month: build.month,
     document_number: state.document_number,
     journal_id: journalId,
+    effective_date: to,
     invoice_ids: state.invoices.map(invoice => invoice.invoice_id),
     postings: expected,
     booked_at: now,

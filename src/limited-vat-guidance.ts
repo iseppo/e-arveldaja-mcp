@@ -44,7 +44,7 @@ const SECTIONS: readonly LimitedVatGuidanceSection[] = [
     id: "what_it_means",
     title: "Mida piiratud maksukohustuslane tähendab",
     paragraphs: [
-      "Piiratud maksukohustuslane maksab käibemaksu ainult välismaa ettevõtetelt (kes ei ole Eestis registreeritud) saadud teenustelt (KMS § 3 lg 5, § 29 lg 12).",
+      "Piiratud maksukohustuslane maksab käibemaksu välismaa ettevõtetelt (kes ei ole Eestis registreeritud) saadud teenustelt (KMS § 3 lg 5, § 29 lg 12). See tööriist käsitleb ainult neid teenuseid; kaupade ühendusesisene soetamine on eraldi teema.",
       "Sisendkäibemaksu maha arvata ei saa ja oma müügiarvetele käibemaksu ei lisata (KMS § 25 lg 1). Arvestatud käibemaks on seega ettevõtte kulu.",
       "Käibedeklaratsioon (KMD) esitatakse ainult nende kuude kohta, kus selliseid tehinguid oli (KMS § 27 lg 2 p 2), ja maks tasutakse järgmise kuu 20. kuupäevaks (KMS § 38 lg 1).",
       "Teenus loetakse saaduks kõige varasemal kuupäeval järgmistest: teenuse osutamine või (osaline) tasumine (KMS § 11 lg 1). Välisvaluuta arvestatakse eurodesse Euroopa Keskpanga selle päeva kursiga (KMS § 29 lg 13).",

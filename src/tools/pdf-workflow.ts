@@ -1157,10 +1157,12 @@ export async function limitedVatTaxNote(
   if (!detail) return undefined;
   return {
     code: "KMS § 21 lg 1",
-    severity: status === "none" ? "warning" : "info",
+    severity: status === "limited" ? "info" : "warning",
     title: status === "none"
       ? "Välismaa teenus — võimalik piiratud maksukohustuslase registreerimiskohustus"
-      : "Välismaa teenus — kuulub igakuisesse piiratud maksukohustuslase arvestusse",
+      : status === "unknown"
+        ? "Ettevõtte käibemaksustaatust ei saa lugeda"
+        : "Välismaa teenus — kuulub igakuisesse piiratud maksukohustuslase arvestusse",
     detail,
     basis: "KMS § 21 lg 1; KMS § 10 lg 5; KMS § 25 lg 1",
     rules_version: ESTONIAN_VAT_METADATA.rules_version,
