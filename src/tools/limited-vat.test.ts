@@ -16,6 +16,8 @@ import { applyReverseChargeAutoDetection } from "./receipt-inbox.js";
 import type { ApiContext } from "./crud-tools.js";
 import type { Account, Client, Journal, PurchaseInvoice, Transaction } from "../types/api.js";
 import type { EcbFetch } from "../fx/ecb-rates.js";
+import { ReferenceDataApi, readonlyCache } from "../api/readonly.api.js";
+import type { HttpClient } from "../http-client.js";
 
 vi.mock("../audit-log.js", () => ({ logAudit: vi.fn() }));
 
@@ -523,5 +525,28 @@ describe("limited_vat status from EMTA's KMKR query", () => {
     expect(readLimitedVatRecords()!.some(record => record.kind === "status")).toBe(false);
     // The setup fake answers full for the new number.
     expect(await isCompanyVatRegistered(api)).toBe(true);
+  });
+
+  it("with the real 10-minute /vat_info cache, a number changed upstream after the preview is still plan_drift", async () => {
+    readonlyCache.invalidate();
+    const upstream = { vatNumber: "EE102809963" };
+    const get = vi.fn(async (path: string) => {
+      if (path !== "/vat_info") throw new Error(`unexpected GET ${path}`);
+      return { vat_number: upstream.vatNumber };
+    });
+    const client = { cacheNamespace: "connection:limited-vat", connectionFingerprint: "fp", get, post: vi.fn(), patch: vi.fn(), delete: vi.fn(), request: vi.fn() } as unknown as HttpClient;
+    const { call, api } = setup(baseState());
+    (api as { readonly: unknown }).readonly = new ReferenceDataApi(client);
+    // A VAT decision reads /vat_info first and caches it (number A).
+    expect(await isCompanyVatRegistered(api)).toBe(true);
+    const preview = parseToolPayload<LimitedVatSetStatusPreviewPayload>((await call({ mode: "set_status", status: "full" })).text);
+    expect(preview.proposed.vat_number).toBe("EE102809963");
+    upstream.vatNumber = "EE103050067";
+    const drift = await call({ mode: "set_status", status: "full", execute: true, plan_handle: preview.plan_handle });
+    expect(drift.result.isError).toBe(true);
+    expect(drift.text).toContain("plan_drift");
+    expect(drift.text).toContain("EE103050067");
+    expect(readLimitedVatRecords()!.some(record => record.kind === "status")).toBe(false);
+    readonlyCache.invalidate();
   });
 });

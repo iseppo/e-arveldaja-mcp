@@ -32,6 +32,7 @@ import {
 import { buildCamtDescriptionWithMetadata, buildDuplicateLookup, findDuplicateTransactionIds } from "../camt/duplicate-identity.js";
 import type { Transaction } from "../types/api.js";
 import { toolMetadataText } from "../__fixtures__/tool-metadata.js";
+import { fakeEmtaFetch } from "../__fixtures__/emta-kmkr.js";
 
 vi.mock("../audit-log.js", () => ({ logAudit: vi.fn() }));
 
@@ -326,6 +327,29 @@ describe("M21 create_purchase_invoice non-VAT boundary", () => {
       expect.objectContaining(deductibleItem),
     ]);
     expect(createAndSetTotals).toHaveBeenCalledWith(expect.any(Object), 0, 100, true, expect.any(Array));
+  });
+
+  it.each([
+    ["EMTA unreachable", 503, "company_vat_status_lookup_unavailable"],
+    ["EMTA shows no active registration", "<html><body>Andmeid ei leitud</body></html>", "company_vat_status_lookup_ambiguous"],
+  ])("refuses with zero writes when the VAT status is unknown (%s)", async (_label, answer, code) => {
+    vi.stubGlobal("fetch", fakeEmtaFetch(answer).impl);
+    try {
+      const getPurchaseArticles = vi.fn().mockResolvedValue([]);
+      const createAndSetTotals = vi.fn().mockResolvedValue({ id: 73 });
+      const { handler } = getCrudToolHarness("create_purchase_invoice", {
+        readonly: { getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }), getPurchaseArticles },
+        purchaseInvoices: { createAndSetTotals },
+      });
+      const outcome = await Promise.resolve(handler(purchaseInvoiceCreateParams([{ cl_purchase_articles_id: 45, custom_title: "Internet", total_net_price: 100 }])))
+        .then(result => JSON.stringify(result), (error: unknown) => String(error));
+      expect(outcome).toContain(code);
+      expect(createAndSetTotals).not.toHaveBeenCalled();
+      expect(getPurchaseArticles).not.toHaveBeenCalled();
+      expect(logAudit).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
 

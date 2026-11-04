@@ -1,5 +1,5 @@
 import { createConnectionScopedBundleStore } from "./connection-scoped-bundle-store.js";
-import { lookupEmtaKmkrCached, normalizeEstonianVatNumber, type EmtaKmkrDeps, type EmtaKmkrFailureCode, type EmtaKmkrRegistration } from "./emta-kmkr.js";
+import { emtaContradictedAt, isContradictingEmtaFailure, lookupEmtaKmkrCached, normalizeEstonianVatNumber, type EmtaKmkrDeps, type EmtaKmkrFailureCode, type EmtaKmkrRegistration } from "./emta-kmkr.js";
 import type { CompanyVatInfo } from "./types/api.js";
 
 /**
@@ -15,7 +15,10 @@ import type { CompanyVatInfo } from "./types/api.js";
  *    (`src/emta-kmkr.ts`): the one active registration says `limited` or
  *    `full` (source `emta_lookup`), cached per number for 7 days;
  * 3. a failed or inconclusive lookup is `unknown` (fail closed) until EMTA
- *    answers or the owner confirms the status;
+ *    answers or the owner confirms the status; only an unavailable lookup
+ *    (network, timeout, HTTP, unexpected page) falls back to an expired
+ *    stored answer, never one EMTA has since disproved (no row, deleted
+ *    only, several active);
  * 4. no number is `none`.
  * Only `full` is VAT-registered.
  */
@@ -156,7 +159,7 @@ export const lookupRecordKey = (vatNumber: string) => `emta_lookup:${vatNumber}`
 export interface CompanyVatLookupView {
   registration: EmtaKmkrRegistration;
   looked_up_at: string;
-  /** True when the cached lookup is older than 7 days and the re-lookup failed. */
+  /** True when the cached lookup is older than 7 days and EMTA could not be asked again. */
   stale: boolean;
   /** Why the re-lookup of a stale result failed. */
   refresh_error?: string;
@@ -276,29 +279,33 @@ export function deriveCompanyVatStatus(
   };
 }
 
+/** The status record saved before numbers were bound, if that is the stored one. */
+function legacyStatusRecord(records: readonly LimitedVatStoreRecord[]): CompanyVatStatusRecord | undefined {
+  const setting = records.find((record): record is CompanyVatStatusRecord => record.kind === "status");
+  return setting && setting.vat_number === undefined ? setting : undefined;
+}
+
 /**
  * Binds a status record saved before numbers were bound to the current
- * number, once, under the store lock and only while that record is
- * unchanged. Best effort: when the write fails the record stays as it was
- * and still applies to the current number at the next read.
+ * number, under the store lock and only while that record is unchanged.
+ * Returns false when another writer changed it first; throws when the store
+ * cannot be written.
  */
-function bindLegacyStatusRecord(records: readonly LimitedVatStoreRecord[], vatNumber: string | null): void {
-  const legacy = records.find((record): record is CompanyVatStatusRecord => record.kind === "status");
-  if (!legacy || legacy.vat_number !== undefined) return;
-  try {
-    limitedVatStore.upsertIf([{ ...legacy, vat_number: vatNumber }], own => {
-      const current = own.find((record): record is CompanyVatStatusRecord => record.kind === "status");
-      return current !== undefined && current.vat_number === undefined &&
-        current.status === legacy.status && current.effective_from === legacy.effective_from && current.set_at === legacy.set_at;
-    });
-  } catch {
-    // Best effort, see above.
-  }
+function bindLegacyStatusRecord(legacy: CompanyVatStatusRecord, vatNumber: string | null): boolean {
+  return limitedVatStore.upsertIf([{ ...legacy, vat_number: vatNumber }], own => {
+    const current = legacyStatusRecord(own);
+    return current !== undefined && current.status === legacy.status && current.effective_from === legacy.effective_from && current.set_at === legacy.set_at;
+  });
 }
 
 export interface CompanyVatStatusDeps {
   emta?: EmtaKmkrDeps;
   now?: () => Date;
+  /**
+   * Read `/vat_info` past its 10-minute cache: for a decision that is saved
+   * against the current number (set_status, the monthly limited-VAT journal).
+   */
+  freshVatInfo?: boolean;
 }
 
 function storedLookup(records: readonly LimitedVatStoreRecord[] | null, vatNumber: string): CompanyVatLookupRecord | undefined {
@@ -322,21 +329,80 @@ async function lookupFor(
     return { ok: true, view: { registration: stored.registration, looked_up_at: stored.looked_up_at, stale: false } };
   }
   const { outcome, at } = await lookupEmtaKmkrCached(normalized, now, deps.emta);
+  const key = lookupRecordKey(normalized);
   if (outcome.ok) {
     const lookedUpAt = new Date(at).toISOString();
-    if (records !== null && (!stored || Date.parse(stored.looked_up_at) < at)) {
+    if (records !== null) {
       try {
-        limitedVatStore.upsert([{ kind: "emta_lookup", key: lookupRecordKey(normalized), vat_number: normalized, registration: outcome.registration, looked_up_at: lookedUpAt }]);
+        // Under the lock: never replace a lookup made later (by another call or process).
+        const wrote = limitedVatStore.upsertIf(
+          [{ kind: "emta_lookup", key, vat_number: normalized, registration: outcome.registration, looked_up_at: lookedUpAt }],
+          own => {
+            const current = storedLookup(own, normalized);
+            return !current || Date.parse(current.looked_up_at) < at;
+          },
+        );
+        const winner = wrote ? undefined : storedLookup(readLimitedVatRecords(), normalized);
+        if (winner) return { ok: true, view: { registration: winner.registration, looked_up_at: winner.looked_up_at, stale: false } };
       } catch {
         // The in-process cache still holds it; the record is only a cache.
       }
     }
     return { ok: true, view: { registration: outcome.registration, looked_up_at: lookedUpAt, stale: false } };
   }
-  if (stored) {
+  if (isContradictingEmtaFailure(outcome.code)) {
+    // EMTA disproved the stored answer: drop it (unless it is newer), so no
+    // later unavailable lookup falls back to it.
+    if (records !== null && stored) {
+      try {
+        limitedVatStore.removeIf([key], own => {
+          const current = storedLookup(own, normalized);
+          return current !== undefined && Date.parse(current.looked_up_at) < at;
+        });
+      } catch {
+        // This process still remembers the contradiction (emtaContradictedAt).
+      }
+    }
+    return outcome;
+  }
+  const contradicted = emtaContradictedAt(normalized);
+  if (stored && (contradicted === undefined || contradicted < Date.parse(stored.looked_up_at))) {
     return { ok: true, view: { registration: stored.registration, looked_up_at: stored.looked_up_at, stale: true, refresh_error: outcome.detail } };
   }
   return outcome;
+}
+
+/**
+ * Reads the store and derives the status. An applicable owner decision saved
+ * before numbers were bound is first bound to the current number under the
+ * store lock; when that cannot be established durably the status is
+ * `unknown`, so the decision cannot silently follow a later number.
+ */
+function readAndDerive(
+  vatInfo: CompanyVatInfo | undefined,
+  lookup?: CompanyVatLookupInput,
+): { resolved: ResolvedCompanyVatStatus; records: LimitedVatStoreRecord[] | null } {
+  let records: LimitedVatStoreRecord[] | null = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      records = readLimitedVatRecords();
+    } catch (error) {
+      return { resolved: deriveCompanyVatStatus(vatInfo, null, (error as Error).message), records: null };
+    }
+    const resolved = deriveCompanyVatStatus(vatInfo, records, undefined, lookup);
+    const legacy = records !== null && resolved.source === "setting" ? legacyStatusRecord(records) : undefined;
+    if (!legacy) return { resolved, records };
+    try {
+      if (bindLegacyStatusRecord(legacy, resolved.vat_number)) return { resolved, records };
+    } catch (error) {
+      return {
+        resolved: deriveCompanyVatStatus(vatInfo, records, `the stored status setting could not be bound to ${numberText(resolved.vat_number)}: ${(error as Error).message}`),
+        records,
+      };
+    }
+    // Another writer changed the record first: derive again from what it wrote.
+  }
+  return { resolved: deriveCompanyVatStatus(vatInfo, records, "the stored status setting kept changing while it was bound to the current VAT number"), records };
 }
 
 /**
@@ -345,10 +411,11 @@ async function lookupFor(
  * (never a derived `full`).
  */
 export async function resolveCompanyVatStatus(
-  api: { readonly: { getVatInfo(): Promise<CompanyVatInfo> } },
+  api: { readonly: { getVatInfo(options?: { fresh?: boolean }): Promise<CompanyVatInfo> } },
   deps: CompanyVatStatusDeps = {},
 ): Promise<ResolvedCompanyVatStatus> {
-  return companyVatStatusFromInfo(await api.readonly.getVatInfo(), deps);
+  const vatInfo = deps.freshVatInfo ? await api.readonly.getVatInfo({ fresh: true }) : await api.readonly.getVatInfo();
+  return companyVatStatusFromInfo(vatInfo, deps);
 }
 
 /** The same decision for a caller that already read `/vat_info`. */
@@ -356,16 +423,13 @@ export async function companyVatStatusFromInfo(
   vatInfo: CompanyVatInfo | undefined,
   deps: CompanyVatStatusDeps = {},
 ): Promise<ResolvedCompanyVatStatus> {
-  let records: LimitedVatStoreRecord[] | null;
-  try {
-    records = readLimitedVatRecords();
-  } catch (error) {
-    return deriveCompanyVatStatus(vatInfo, null, (error as Error).message);
-  }
-  const withoutLookup = deriveCompanyVatStatus(vatInfo, records);
-  if (records !== null && withoutLookup.source === "setting") bindLegacyStatusRecord(records, withoutLookup.vat_number);
+  const first = readAndDerive(vatInfo);
+  const withoutLookup = first.resolved;
   if (withoutLookup.status !== "unknown" || withoutLookup.source === "store_error" || !withoutLookup.vat_number) return withoutLookup;
-  return deriveCompanyVatStatus(vatInfo, records, undefined, await lookupFor(withoutLookup.vat_number, records, deps));
+  const lookup = await lookupFor(withoutLookup.vat_number, first.records, deps);
+  // The owner may have decided while EMTA was asked: the store as it is now
+  // wins, and a store that can no longer be read is `unknown`.
+  return readAndDerive(vatInfo, lookup).resolved;
 }
 
 /** The resolved status for a VAT decision; throws `CompanyVatStatusUnknownError` for `unknown`. */
@@ -382,7 +446,7 @@ export function requireKnownCompanyVatStatus(resolved: ResolvedCompanyVatStatus)
  * a guess.
  */
 export async function isCompanyVatRegistered(
-  api: { readonly: { getVatInfo(): Promise<CompanyVatInfo> } },
+  api: { readonly: { getVatInfo(options?: { fresh?: boolean }): Promise<CompanyVatInfo> } },
   deps: CompanyVatStatusDeps = {},
 ): Promise<boolean> {
   return requireKnownCompanyVatStatus(await resolveCompanyVatStatus(api, deps)) === "full";

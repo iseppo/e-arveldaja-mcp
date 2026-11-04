@@ -37,6 +37,8 @@ export interface ConditionalConnectionScopedBundleStore<T> extends ConnectionSco
    * records as read under the bundle lock; returns whether it wrote.
    */
   upsertIf(records: readonly T[], precondition: (own: readonly T[]) => boolean): boolean;
+  /** `remove`, but only when `precondition` holds, as for `upsertIf`; returns whether it wrote. */
+  removeIf(keys: readonly string[], precondition: (own: readonly T[]) => boolean): boolean;
 }
 
 type Persisted<T> = T & { connectionIdentity?: string };
@@ -124,6 +126,10 @@ export function createConnectionScopedBundleStore<T extends object>(options: {
     remove(keys) {
       const drop = new Set(keys);
       write(existing => existing.filter(record => !(ownRecord(record) && drop.has(options.keyOf(record)))));
+    },
+    removeIf(keys, precondition) {
+      const drop = new Set(keys);
+      return write(existing => (precondition(strip(existing)) ? existing.filter(record => !(ownRecord(record) && drop.has(options.keyOf(record)))) : null));
     },
     reset() {
       cache = undefined;

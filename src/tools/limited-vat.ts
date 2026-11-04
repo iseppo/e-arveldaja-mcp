@@ -312,7 +312,8 @@ async function handleSetStatus(api: ApiContext, ctx: RuntimeSafetyContext, args:
   if (effectiveFrom > todayInTallinn()) {
     return refuse("limited_vat_effective_from_in_future", `effective_from ${effectiveFrom} is in the future; a status is stored only from today (${todayInTallinn()}, Europe/Tallinn) or earlier. Set it again when the change takes effect.`);
   }
-  const current = await resolveCompanyVatStatus(api);
+  // The number the decision is bound to (and compared at execute) is read past the 10-minute /vat_info cache.
+  const current = await resolveCompanyVatStatus(api, { freshVatInfo: true });
   // A VAT number EMTA did not settle is exactly what set_status resolves; only an unreadable store refuses.
   if (current.status === "unknown" && current.reason !== COMPANY_VAT_STATUS_LOOKUP_UNAVAILABLE && current.reason !== COMPANY_VAT_STATUS_LOOKUP_AMBIGUOUS) {
     return statusUnknownRefusal(current);
@@ -476,7 +477,7 @@ async function buildMonth(
   const parsed = args.month ? parseStrictMonth(args.month) : undefined;
   if (!parsed) return { error: refuse("limited_vat_month_required", "mode \"month\" needs month (YYYY-MM).") };
   const month = parsed.canonical;
-  const status = await resolveCompanyVatStatus(api);
+  const status = await resolveCompanyVatStatus(api, { freshVatInfo: options.fresh });
   if (status.status === "unknown") return { error: statusUnknownRefusal(status) };
   if (status.status !== "limited") {
     return { error: refuse("limited_vat_status_not_limited", `The company VAT status is "${status.status}" (${status.source}); the monthly run is only for a limited taxpayer. Set it with mode "set_status" (owner approval) — see mode "guide".`) };

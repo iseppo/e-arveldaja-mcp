@@ -1,16 +1,18 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdtempSync, readFileSync, rmSync } from "fs";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import {
   COMPANY_VAT_STATUS_LOOKUP_AMBIGUOUS,
   COMPANY_VAT_STATUS_LOOKUP_UNAVAILABLE,
+  COMPANY_VAT_STATUS_UNKNOWN,
   CompanyVatStatusUnknownError,
   LIMITED_VAT_STORE_FILE,
   companyVatStatusFromInfo,
   isCompanyVatRegistered,
   limitedVatStore,
   readLimitedVatRecords,
+  resolveCompanyVatStatus,
   type CompanyVatStatusRecord,
   type LimitedVatStoreRecord,
 } from "./company-vat-status.js";
@@ -31,6 +33,7 @@ beforeEach(() => {
   resetEmtaKmkrCache();
 });
 afterEach(() => {
+  vi.restoreAllMocks();
   delete process.env.EARVELDAJA_RULES_DIR;
   delete process.env.EARVELDAJA_RULES_FILE;
   delete process.env.EARVELDAJA_LOCK_DIR;
@@ -180,5 +183,136 @@ describe("owner decision precedence", () => {
     // Bound: a later number is no longer covered by it.
     expect(await companyVatStatusFromInfo({ vat_number: FULL_NUMBER }, { emta: { fetch: fake.impl } }))
       .toMatchObject({ status: "full", source: "emta_lookup", decision_status: "limited" });
+  });
+});
+
+const storePath = () => resolveBundleStorePath(LIMITED_VAT_STORE_FILE)!;
+const lookupRecord = (vatNumber: string, limited: boolean, lookedUpAt: string): LimitedVatStoreRecord => ({
+  kind: "emta_lookup", key: `emta_lookup:${vatNumber}`, vat_number: vatNumber, looked_up_at: lookedUpAt,
+  registration: { vat_number: vatNumber, limited, registered_on: "2024-12-16", decision_on: "2024-12-14" },
+});
+/** A fetch that runs `during` while EMTA's answer is pending, then answers `html`. */
+const answerAfter = (html: string, during: () => void) =>
+  fakeEmtaFetch(() => {
+    during();
+    return html;
+  });
+
+describe("review fixes: contradicting EMTA evidence (finding 2)", () => {
+  it.each([
+    ["deleted", emtaAnswerHtml([{ ...FULL_ROW, deleted: "01.11.2026" }]), "emta_registration_deleted"],
+    ["not found", emtaAnswerHtml([LIMITED_ROW]), "emta_registration_not_found"],
+    ["ambiguous", emtaAnswerHtml([FULL_ROW, FULL_ROW]), "emta_registration_ambiguous"],
+  ])("an expired full answer is not used when EMTA now says %s, and no later failure falls back to it", async (_label, html, code) => {
+    limitedVatStore.upsert([lookupRecord(FULL_NUMBER, false, "2026-11-04T10:00:00.000Z")]);
+    const resolved = await companyVatStatusFromInfo({ vat_number: FULL_NUMBER }, { emta: { fetch: fakeEmtaFetch(html).impl }, now: at(8 * DAY) });
+    expect(resolved).toMatchObject({ status: "unknown", reason: COMPANY_VAT_STATUS_LOOKUP_AMBIGUOUS, lookup_error_code: code });
+    expect(readLimitedVatRecords()!.some(record => record.kind === "emta_lookup")).toBe(false);
+    // Same process after the retry window, and a new process: EMTA unreachable → still unknown.
+    expect(await companyVatStatusFromInfo({ vat_number: FULL_NUMBER }, { emta: { fetch: fakeEmtaFetch("network").impl }, now: at(8 * DAY + 120_000) }))
+      .toMatchObject({ status: "unknown", reason: COMPANY_VAT_STATUS_LOOKUP_UNAVAILABLE });
+    resetEmtaKmkrCache();
+    expect(await companyVatStatusFromInfo({ vat_number: FULL_NUMBER }, { emta: { fetch: fakeEmtaFetch("network").impl }, now: at(8 * DAY + 240_000) }))
+      .toMatchObject({ status: "unknown", reason: COMPANY_VAT_STATUS_LOOKUP_UNAVAILABLE });
+  });
+
+  it("when the disproved record cannot be removed, this process still never falls back to it", async () => {
+    limitedVatStore.upsert([lookupRecord(FULL_NUMBER, false, "2026-11-04T10:00:00.000Z")]);
+    vi.spyOn(limitedVatStore, "removeIf").mockImplementation(() => { throw new Error("EACCES"); });
+    const deleted = fakeEmtaFetch(emtaAnswerHtml([{ ...FULL_ROW, deleted: "01.11.2026" }]));
+    expect((await companyVatStatusFromInfo({ vat_number: FULL_NUMBER }, { emta: { fetch: deleted.impl }, now: at(8 * DAY) })).status).toBe("unknown");
+    expect(await companyVatStatusFromInfo({ vat_number: FULL_NUMBER }, { emta: { fetch: fakeEmtaFetch("network").impl }, now: at(8 * DAY + 120_000) }))
+      .toMatchObject({ status: "unknown", reason: COMPANY_VAT_STATUS_LOOKUP_UNAVAILABLE });
+  });
+
+  it("an unavailable or invalid answer still falls back to the expired stored answer (stale)", async () => {
+    limitedVatStore.upsert([lookupRecord(FULL_NUMBER, false, "2026-11-04T10:00:00.000Z")]);
+    expect(await companyVatStatusFromInfo({ vat_number: FULL_NUMBER }, { emta: { fetch: fakeEmtaFetch("<table class=\"grid\"></table>").impl }, now: at(8 * DAY) }))
+      .toMatchObject({ status: "full", lookup: { stale: true } });
+  });
+});
+
+describe("review fixes: the store as it is after the lookup (finding 3)", () => {
+  it("an owner decision saved while EMTA was asked wins over EMTA's answer", async () => {
+    const fake = answerAfter(emtaAnswerHtml([FULL_ROW]), () => {
+      limitedVatStore.upsert([ownerRecord("limited", FULL_NUMBER)]);
+    });
+    expect(await companyVatStatusFromInfo({ vat_number: FULL_NUMBER }, { emta: { fetch: fake.impl }, now: at(0) }))
+      .toMatchObject({ status: "limited", source: "setting", decision_vat_number: FULL_NUMBER });
+    expect(fake.queries()).toHaveLength(1);
+  });
+
+  it("a store that cannot be re-read after the lookup is unknown, never EMTA's full", async () => {
+    const fake = answerAfter(emtaAnswerHtml([FULL_ROW]), () => {
+      limitedVatStore.upsert([ownerRecord("none", null)]);
+      writeFileSync(storePath(), "{ not json");
+    });
+    expect(await companyVatStatusFromInfo({ vat_number: FULL_NUMBER }, { emta: { fetch: fake.impl }, now: at(0) }))
+      .toMatchObject({ status: "unknown", source: "store_error", reason: COMPANY_VAT_STATUS_UNKNOWN });
+  });
+});
+
+describe("review fixes: newer lookup evidence wins (finding 4)", () => {
+  it("an older full answer finishing after a newer limited one does not replace it; the winner is returned", async () => {
+    const fake = answerAfter(emtaAnswerHtml([FULL_ROW]), () => {
+      // Another process stored a later lookup (10:00:01, limited) meanwhile.
+      limitedVatStore.upsert([lookupRecord(FULL_NUMBER, true, "2026-11-04T10:00:01.000Z")]);
+    });
+    expect(await companyVatStatusFromInfo({ vat_number: FULL_NUMBER }, { emta: { fetch: fake.impl }, now: at(0) }))
+      .toMatchObject({ status: "limited", source: "emta_lookup", lookup: { looked_up_at: "2026-11-04T10:00:01.000Z" } });
+    const persisted = readLimitedVatRecords()!.find(record => record.kind === "emta_lookup");
+    expect(persisted).toMatchObject({ looked_up_at: "2026-11-04T10:00:01.000Z", registration: { limited: true } });
+    expect(await companyVatStatusFromInfo({ vat_number: FULL_NUMBER }, { emta: { fetch: fake.impl }, now: at(2_000) }))
+      .toMatchObject({ status: "limited" });
+  });
+
+  it("a newer answer replaces an older stored one", async () => {
+    limitedVatStore.upsert([lookupRecord(FULL_NUMBER, true, "2026-10-01T10:00:00.000Z")]);
+    expect(await companyVatStatusFromInfo({ vat_number: FULL_NUMBER }, { emta: { fetch: fakeEmtaFetch(emtaAnswerHtml([FULL_ROW])).impl }, now: at(0) }))
+      .toMatchObject({ status: "full", lookup: { looked_up_at: "2026-11-04T10:00:00.000Z" } });
+    expect(readLimitedVatRecords()!.find(record => record.kind === "emta_lookup")).toMatchObject({ registration: { limited: false } });
+  });
+});
+
+describe("review fixes: legacy decision binding must hold (finding 5)", () => {
+  it("a legacy decision that cannot be bound (store not writable) is unknown, for this number and the next", async () => {
+    limitedVatStore.upsert([ownerRecord("full")]);
+    vi.spyOn(limitedVatStore, "upsertIf").mockImplementation(() => { throw new Error("EACCES: permission denied"); });
+    const fake = fakeEmtaFetch(emtaAnswerHtml([LIMITED_ROW]));
+    for (const vatNumber of [FULL_NUMBER, LIMITED_NUMBER]) {
+      const resolved = await companyVatStatusFromInfo({ vat_number: vatNumber }, { emta: { fetch: fake.impl } });
+      expect(resolved).toMatchObject({ status: "unknown", source: "store_error", reason: COMPANY_VAT_STATUS_UNKNOWN });
+      expect(resolved.store_error).toContain("EACCES");
+    }
+    expect(fake.calls).toEqual([]);
+  });
+
+  it("a rejected binding (another writer was first) derives from the winning record", async () => {
+    limitedVatStore.upsert([ownerRecord("full")]);
+    const real = limitedVatStore.upsertIf.bind(limitedVatStore);
+    vi.spyOn(limitedVatStore, "upsertIf").mockImplementationOnce(() => {
+      limitedVatStore.upsert([ownerRecord("full", FULL_NUMBER)]);
+      return false;
+    }).mockImplementation(real);
+    const fake = fakeEmtaFetch(emtaAnswerHtml([LIMITED_ROW]));
+    expect(await companyVatStatusFromInfo({ vat_number: LIMITED_NUMBER }, { emta: { fetch: fake.impl } }))
+      .toMatchObject({ status: "limited", source: "emta_lookup", decision_status: "full", decision_vat_number: FULL_NUMBER });
+  });
+
+  it("a binding that keeps being rejected is unknown", async () => {
+    limitedVatStore.upsert([ownerRecord("full")]);
+    vi.spyOn(limitedVatStore, "upsertIf").mockReturnValue(false);
+    expect(await companyVatStatusFromInfo({ vat_number: FULL_NUMBER }, {}))
+      .toMatchObject({ status: "unknown", source: "store_error", reason: COMPANY_VAT_STATUS_UNKNOWN });
+  });
+});
+
+describe("review fixes: fresh /vat_info for a decision bound to the number (finding 6)", () => {
+  it("freshVatInfo reads /vat_info past its cache", async () => {
+    const getVatInfo = vi.fn(async (_options?: { fresh?: boolean }) => ({ vat_number: FULL_NUMBER }));
+    await isCompanyVatRegistered({ readonly: { getVatInfo } });
+    expect(getVatInfo).toHaveBeenLastCalledWith();
+    await resolveCompanyVatStatus({ readonly: { getVatInfo } }, { freshVatInfo: true });
+    expect(getVatInfo).toHaveBeenLastCalledWith({ fresh: true });
   });
 });
