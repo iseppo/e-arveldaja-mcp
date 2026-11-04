@@ -28,12 +28,6 @@ export interface ApiContext {
   readonly: ReferenceDataApi;
 }
 
-/** Check if company is VAT-registered via /vat_info */
-export async function isCompanyVatRegistered(api: ApiContext): Promise<boolean> {
-  const vatInfo = await api.readonly.getVatInfo();
-  return !!vatInfo.vat_number;
-}
-
 export const MAX_JSON_INPUT_SIZE = 1024 * 1024; // 1 MB
 
 export function safeJsonParse(input: string, label: string): unknown {

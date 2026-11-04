@@ -307,7 +307,7 @@ export async function computeCamtImportProjection(input: CamtProjectionInput): P
         amount: entry.amount,
         bank_reference: entry.bank_reference,
         duplicate_transaction_ids: [],
-        reason: "A stored row with a shortened description or a left-out IBAN cannot be told apart from another statement entry; " +
+        reason: "A stored row with a shortened description, a left-out IBAN or a left-out counterparty name cannot be told apart from another statement entry; " +
           "not created and not skipped as a duplicate. Compare the ledger with the bank statement and create the row manually only if it is missing.",
         skip_code: CAMT_LOSSY_IDENTITY_AMBIGUOUS,
       });

@@ -53,7 +53,8 @@ import {
   hasVatAccountFields,
   nonVatRegisterRefusal,
 } from "../tools/purchase-vat-defaults.js";
-import { isCompanyVatRegistered, parsePurchaseInvoiceItems, tagNotes } from "../tools/crud-tools.js";
+import { parsePurchaseInvoiceItems, tagNotes } from "../tools/crud-tools.js";
+import { isCompanyVatRegistered } from "../company-vat-status.js";
 import { InvoiceCreationError, previewPurchaseInvoiceTotals } from "../api/purchase-invoices.api.js";
 import { DEFAULT_LIABILITY_ACCOUNT } from "../accounting-defaults.js";
 import { logAudit } from "../audit-log.js";

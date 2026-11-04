@@ -555,8 +555,8 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
 
       const dimensionWarnings = drafts.warning ? [drafts.warning] : [];
       if (opening) {
-        // No lower bound: an INITIAL before date_from still feeds every row's
-        // opening_balance_at_date_from and closing_balance.
+        // No lower bound: an INITIAL before date_from still feeds the account's
+        // and the "(määramata)" row's opening_balance_at_date_from and closing_balance.
         const unattributedWarning = unattributedOpeningBalanceWarning(opening, account_id, undefined, date_to);
         if (unattributedWarning) {
           let unattributedRaw = 0;
@@ -564,7 +564,10 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
             if (p.is_deleted || p.accounts_id !== account_id || p.accounts_dimensions_id != null) continue;
             unattributedRaw += (p.type === "D" ? 1 : -1) * (p.base_amount ?? p.amount);
           }
-          dimensionWarnings.push(`Partial dimension attribution: API INITIAL includes ${roundMoney(unattributedRaw).toFixed(2)} EUR (debit minus credit) without a dimension. This amount is included in the total and the "(määramata)" row; named dimension balances may be incomplete. Correct the INITIAL posting dimensions in e-arveldaja.`);
+          const includedIn = date_from && opening.openingDate < date_from
+            ? `the account's and the "(määramata)" row's opening_balance_at_date_from and closing_balance (not in total or the row's balance)`
+            : `the total and the "(määramata)" row`;
+          dimensionWarnings.push(`Partial dimension attribution: API INITIAL includes ${roundMoney(unattributedRaw).toFixed(2)} EUR (debit minus credit) without a dimension. This amount is included in ${includedIn}; named dimension balances may be incomplete. Correct the INITIAL posting dimensions in e-arveldaja.`);
         }
       }
 

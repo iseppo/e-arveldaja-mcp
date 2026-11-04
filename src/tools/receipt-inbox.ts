@@ -880,6 +880,15 @@ export function applyReverseChargeAutoDetection(
   // Case 1: history / local rule already decided.
   if (bookingSuggestion.item.reversed_vat_id !== undefined &&
       bookingSuggestion.item.reversed_vat_id !== null) {
+    if (!isVatRegistered) {
+      // A company that is not fully VAT-registered (none / limited taxpayer)
+      // never books a reverse-charge input leg, even when older bookings of
+      // this supplier carried one.
+      bookingSuggestion.item.reversed_vat_id = null;
+      bookingSuggestion.reverse_charge_reason = "none";
+      notes.push("Reverse charge from supplier history was not applied: the company is not fully VAT-registered (no input-VAT deduction).");
+      return;
+    }
     bookingSuggestion.reverse_charge_reason = "supplier_history";
     return;
   }

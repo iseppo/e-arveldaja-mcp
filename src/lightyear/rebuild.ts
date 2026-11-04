@@ -131,6 +131,12 @@ export interface SimulateParams {
    * same, so the comparison sees the dimensions the tools would book.
    */
   chart?: { accounts: Account[]; dimensions: AccountDimension[] };
+  /**
+   * The statement export's own coverage (the file name's `-YYYY-MM-DD_YYYY-MM-DD`). Without it the rows
+   * prove coverage only from the opening when one is dated at or before it, and never its end: no
+   * month-end holding is reported without it.
+   */
+  statementPeriod?: { from: string; to: string } | null;
 }
 
 const CONNECTION = "lightyear-rebuild";
@@ -207,7 +213,17 @@ export async function simulateLightyearYear(params: SimulateParams): Promise<Sim
   const reviews: RebuildReview[] = [];
   const warnings: string[] = [];
   const replayFrom = new Date(Date.parse(`${opening.as_of}T00:00:00Z`) + 86_400_000).toISOString().slice(0, 10);
-  const period = { from: replayFrom, to: params.to };
+  // The export's own coverage, never the replay/report bounds (rr-lightyear #1): the declared period, else
+  // what its rows prove — a row at or before the opening (as book_lightyear_trades without a file-name
+  // period), otherwise coverage starts at its first row. The production gap check reads this period.
+  const allDays = parseAccountStatement(params.statementCsv).map(rowDay).filter((day): day is string => day !== null).sort();
+  const coverageFrom = params.statementPeriod
+    ? params.statementPeriod.from
+    : allDays.length > 0 && allDays[0]! <= opening.as_of ? replayFrom : allDays.find(day => day > opening.as_of) ?? "9999-12-31";
+  const coverageTo = params.statementPeriod && params.statementPeriod.to < params.to ? params.statementPeriod.to : params.to;
+  const period = { from: coverageFrom, to: coverageTo };
+  // Rows never prove where the export ends: without a declared period the end is unknown, so a gap.
+  const coversReplay = Boolean(params.statementPeriod) && coverageFrom <= replayFrom && coverageTo >= params.to;
 
   type Command = { reference: string; date: string; postings: Array<{ accounts_id: number; accounts_dimensions_id?: number; type: "D" | "C"; amount: number }>; poolEvent?: PendingPoolEvent };
   // As the booking tools: every posting of the projection is validated against
@@ -293,7 +309,10 @@ export async function simulateLightyearYear(params: SimulateParams): Promise<Sim
   }
   const rates = await resolveFrozenFxOutcomes(monthEndDays.map(day => fxOutcomeKey("USD", day)), params.ecb);
   const events = store.records().filter((record): record is UsdPoolEvent => record.record === "event" && record.state === "committed");
-  const monthEnds = monthEndDays.map((day): RebuildMonthEnd => {
+  if (!coversReplay) {
+    warnings.push(`USD pool [usd_pool_statement_gap]: the statement covers ${params.statementPeriod ? `${coverageFrom}..${coverageTo}` : `${coverageFrom}.. with no declared end`}, not every day from ${replayFrom} through ${params.to}; no month-end USD holding is reported.`);
+  }
+  const monthEnds = !coversReplay ? [] : monthEndDays.map((day): RebuildMonthEnd => {
     const until = endOfDaySeconds(day);
     const state = events.filter(event => event.ts <= until)
       .reduce((sum, event) => ({ usd: sum.usd + event.usd_cents, eur: sum.eur + event.eur_cents }), { usd: opening.usd_cents, eur: opening.eur_cents });

@@ -726,7 +726,7 @@ export function renderCamtImportCompact(input: CamtCompactInput): CamtImportComp
   const holdWarning: Record<string, string> = {
     [CAMT_MARKER_IDENTITY_UNFIT]: "row(s) not created: the bank reference and counterparty account are too long for a verifiable import marker. Next: book them by hand from the bank statement.",
     [CAMT_MARKER_CONFLICT_REVIEW]: "row(s) not created: an existing transaction with a contradictory import marker may be the same payment. Next: check that transaction against the bank statement, correct or delete it, then re-run the preview.",
-    [CAMT_LOSSY_IDENTITY_AMBIGUOUS]: "row(s) not created: a stored row with a shortened description or a left-out IBAN matches more than one statement entry. Next: compare the ledger with the bank statement and create only the missing rows manually.",
+    [CAMT_LOSSY_IDENTITY_AMBIGUOUS]: "row(s) not created: a stored row with a shortened description, a left-out IBAN or a left-out counterparty name matches more than one statement entry. Next: compare the ledger with the bank statement and create only the missing rows manually.",
   };
   for (const code of CAMT_HOLD_SKIP_CODES) {
     const count = heldRows.filter(row => row.skip_code === code).length;

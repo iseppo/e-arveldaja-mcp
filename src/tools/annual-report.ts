@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
+import { companyVatStatusFromInfo } from "../company-vat-status.js";
 import { toMcpJson, wrapUntrustedOcr } from "../mcp-json.js";
 import type { ApiContext } from "./crud-tools.js";
 import { logAudit } from "../audit-log.js";
@@ -1643,7 +1644,7 @@ export async function buildAnnualReportData(api: ApiContext, year: number): Prom
         presentation_currency: "EUR",
         income_statement_schema: "Schema 1 (kulude liigitus iseloomu järgi)",
         cash_flow_method: "Indirect",
-        vat_registered: Boolean(vatInfo.vat_number),
+        vat_registered: companyVatStatusFromInfo(vatInfo).status === "full",
         assumptions: [
           "Line mapping follows the e-arveldaja standard chart-of-accounts ranges; accounts outside them are listed under kaardistamata_tulud_ja_kulud.",
           "Cash flows use the indirect method. Proven received interest and dividends follow the operating default unless an explicit account rule overrides it; an ambiguous financial-result account alone does not prove dividend or disposal proceeds and requires review.",

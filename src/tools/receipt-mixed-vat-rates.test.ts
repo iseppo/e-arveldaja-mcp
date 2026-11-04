@@ -100,6 +100,37 @@ describe("mixed VAT rates are read as a breakdown (#5c)", () => {
     expect(extracted.amount_consistency_issues).toBeUndefined();
   });
 
+  it.each([
+    ["Netosumma 162,45      Käibemaks 30,02", 12],
+    ["Netosumma 162,45      Käibemaks 30,02", 8],
+    ["Käibemaks 30,02      Netosumma 162,45", 12],
+  ])("a VAT amount sharing the explained net's row (%s) is no net candidate: the valid invoice passes (row %#)", (row, at) => {
+    const lines = breakdownText().split("\n");
+    const extracted = extractedOf([...lines.slice(0, at), row, ...lines.slice(at)].join("\n"));
+    expect(extracted).toMatchObject({ total_net: 162.45, total_vat: 30.02, total_gross: 192.47 });
+    expect(extracted.mixed_vat_rates?.proven).toBe(true);
+    expect(extracted.amount_consistency_issues).toBeUndefined();
+    const prepared = prepareReceiptInvoiceItems(vatContext, extracted, suggestion, "Haldus");
+    if (!prepared.ok) throw new Error(prepared.notes.join(" "));
+    expect(prepared.items.map(item => [item.total_net_price, item.vat_rate_dropdown])).toEqual([[37.32, "-"], [125.13, "24"]]);
+  });
+
+  it("a contradicting net next to a VAT label (Netosumma 100,00 Käibemaks 30,02) still holds", () => {
+    const lines = breakdownText().split("\n");
+    const extracted = extractedOf([...lines, "Netosumma 100,00      Käibemaks 30,02"].join("\n"));
+    expect(extracted.amount_consistency_issues).toEqual(expect.arrayContaining(["vat_rate_implausible"]));
+    expect(prepareReceiptInvoiceItems(vatContext, extracted, suggestion, "Haldus").ok).toBe(false);
+  });
+
+  it.each(["Netosumma (KM 24%) 100,00", "Netosumma (VAT 24%) 100,00"])(
+    "a VAT-rate annotation on a net row (%s) keeps its contradicting net: still held",
+    row => {
+      const extracted = extractedOf([...breakdownText().split("\n"), row].join("\n"));
+      expect(extracted.amount_consistency_issues?.length ?? 0).toBeGreaterThan(0);
+      expect(prepareReceiptInvoiceItems(vatContext, extracted, suggestion, "Haldus").ok).toBe(false);
+    },
+  );
+
   it("a single-rate invoice with a Käibemaksuta label still reads that label as its net", () => {
     const extracted = extractedOf(["Pood OÜ", "Arve nr 55", "Arve kuupäev 07.10.2026", "Käibemaksuta 100,00", "Käibemaks 24% 24,00", "Kokku 124,00"].join("\n"));
     expect(extracted).toMatchObject({ total_net: 100, total_vat: 24, total_gross: 124 });

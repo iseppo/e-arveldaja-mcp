@@ -45,7 +45,7 @@ import { toUtcDay } from "./date-utils.js";
  * verifies ambiguous create/confirm outcomes without retrying a POST.
  */
 
-export type DocNamespace = "FX" | "LY" | "LY-FX" | "DIV" | "YEC";
+export type DocNamespace = "FX" | "LY" | "LY-FX" | "DIV" | "YEC" | "PKM";
 
 export interface DocKey {
   ns: DocNamespace;
@@ -55,7 +55,7 @@ export interface DocKey {
 
 /** "FX:123" / "LY:OR-EVN9C76R7A" */
 export function formatDocNumber(key: DocKey): string {
-  return key.ns === "DIV" ? `DIV-${key.id}` : `${key.ns}:${key.id}`;
+  return key.ns === "DIV" || key.ns === "PKM" ? `${key.ns}-${key.id}` : `${key.ns}:${key.id}`;
 }
 
 const KNOWN_NAMESPACES: readonly DocNamespace[] = ["FX", "LY", "LY-FX"];
@@ -70,6 +70,7 @@ const KNOWN_NAMESPACES: readonly DocNamespace[] = ["FX", "LY", "LY-FX"];
 export function parseDocNumber(raw: string | null | undefined): DocKey | undefined {
   if (typeof raw !== "string") return undefined;
   if (raw.startsWith("DIV-") && raw.length > 4) return { ns: "DIV", id: raw.slice(4) };
+  if (raw.startsWith("PKM-") && raw.length > 4) return { ns: "PKM", id: raw.slice(4) };
   const sep = raw.indexOf(":");
   if (sep <= 0) return undefined;
   const ns = raw.slice(0, sep);
@@ -136,6 +137,21 @@ export interface CreateOnceOptions {
   liveness?: Liveness;
   /** Attempt to confirm/register the created journal (default true). */
   confirm?: boolean;
+  /**
+   * Checks a journal recovered after an ambiguous create (found by document
+   * number, so not necessarily the payload sent) before it is confirmed.
+   * Returns a problem description to refuse: the journal is then NOT
+   * confirmed and {@link RecoveredJournalRejectedError} is thrown.
+   */
+  validateRecovered?: (journal: Journal) => string | undefined;
+}
+
+/** A journal recovered after an ambiguous create failed the caller's `validateRecovered`; it was not confirmed. */
+export class RecoveredJournalRejectedError extends Error {
+  constructor(readonly journalId: number, readonly businessKey: string, readonly problem: string) {
+    super(`Journal ${journalId} (${businessKey}) recovered after an ambiguous create ${problem}; it was not confirmed.`);
+    this.name = "RecoveredJournalRejectedError";
+  }
 }
 
 export type CreateOnceResult =
@@ -339,6 +355,12 @@ export class BookingGuard {
       }
 
       if (journalId == null) throw BookingGuard.indeterminate("create", businessKey, createAmbiguity);
+
+      if (recovered && opts?.validateRecovered) {
+        this.api.journals.invalidateListCache();
+        const problem = opts.validateRecovered(await this.api.journals.get(journalId));
+        if (problem !== undefined) throw new RecoveredJournalRejectedError(journalId, businessKey, problem);
+      }
 
       if (!registered && wantConfirm) {
         try {

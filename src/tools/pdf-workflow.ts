@@ -9,7 +9,10 @@ import { registerTool } from "../mcp-compat.js";
 import { sha256Hex } from "./receipt-inbox-files.js";
 import { toMcpJson, wrapUntrustedOcr, capUntrustedText } from "../mcp-json.js";
 import { desandboxAllStrings, desandboxText, renderExternalEntity, sandboxExternalText } from "../external-text-renderer.js";
-import { type ApiContext, isCompanyVatRegistered, parseJsonObjectArray, parsePurchaseInvoiceItems, jsonObjectArrayInput, coerceId, tagNotes } from "./crud-tools.js";
+import { isCompanyVatRegistered, resolveCompanyVatStatus } from "../company-vat-status.js";
+import { limitedVatPointOfUseNote, type SupplierFacts } from "../limited-vat.js";
+import { LIMITED_VAT_GUIDANCE_VERIFIED_AT, LIMITED_VAT_NUMBER_CHECK_URL } from "../limited-vat-guidance.js";
+import { type ApiContext, parseJsonObjectArray, parsePurchaseInvoiceItems, jsonObjectArrayInput, coerceId, tagNotes } from "./crud-tools.js";
 import type { Client, PurchaseInvoice, CreatePurchaseInvoiceData, PurchaseInvoiceItem } from "../types/api.js";
 import { InvoiceCreationError, previewPurchaseInvoiceTotals } from "../api/purchase-invoices.api.js";
 import type { RuntimeSafetyContext } from "../runtime-safety-context.js";
@@ -39,6 +42,7 @@ import {
   detectVatDeductionNotes,
   ESTONIAN_VAT_METADATA,
   standardVatRateOn,
+  type EstonianTaxNote,
 } from "../estonian-tax-rules.js";
 import {
   checkIntakeCashDuplicates,
@@ -781,7 +785,8 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext, run
               found: false,
               created: false,
               code: "legal_entity_identity_required",
-              reason: resolution.reason,
+              // The reason echoes caller-supplied identity text (registry code, country).
+              reason: resolution.reason === undefined ? undefined : sandboxExternalText(resolution.reason),
               suggestion:
                 "Refusing to auto-create a supplier without a verified legal-entity identity. Supply a checksum-valid Estonian registry code (reg_code), set is_physical_entity=true for a natural person, or set foreign_identity_attested=true for an operator-verified foreign registration.",
             } satisfies ResolveSupplierRefusalPayload),
@@ -815,7 +820,9 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext, run
               requires_manual_review: true,
               ...(deactivated ? { code: "supplier_client_deactivated" as const } : {}),
               ...(resolution.match_type === "strong_identifier_conflict" ? { match_type: "strong_identifier_conflict" as const } : {}),
-              ...(resolution.reason !== undefined ? { reason: resolution.reason } : {}),
+              // The reason interpolates supplied and stored identifiers after their
+              // sandbox markers were stripped for matching: re-wrap (and cap) it.
+              ...(resolution.reason !== undefined ? { reason: sandboxExternalText(resolution.reason) } : {}),
               ...(resolution.registry_data !== undefined ? { registry_data: renderRegistryDataForDisplay(resolution.registry_data) } : {}),
               suggestion: deactivated
                 ? "Nothing was created. The matching client is deactivated: after the user approves, reactivate it with reactivate_client and re-read it. Never create a replacement supplier for it."
@@ -1117,6 +1124,8 @@ export async function computeBookingSuggestion(
           ...detailed.flatMap(inv => inv.items?.map(item => item.custom_title) ?? []),
         ],
       });
+      const limitedVatNote = await limitedVatTaxNote(api, supplier);
+      if (limitedVatNote) tax_notes.push(limitedVatNote);
 
   return {
     supplier_id: clients_id,
@@ -1125,6 +1134,40 @@ export async function computeBookingSuggestion(
     dimension_notes,
     dimension_conflicts,
     history_notes: historyNotes,
+  };
+}
+
+/**
+ * KMS § 21 point-of-use advisory for a foreign supplier when the company is
+ * not fully VAT-registered (none / limited). Advisory only: a status read
+ * failure adds nothing and never fails the booking flow.
+ */
+export async function limitedVatTaxNote(
+  api: ApiContext,
+  supplier: SupplierFacts | null | undefined,
+): Promise<EstonianTaxNote | undefined> {
+  if (!supplier) return undefined;
+  let status;
+  try {
+    status = (await resolveCompanyVatStatus(api)).status;
+  } catch {
+    return undefined;
+  }
+  const detail = limitedVatPointOfUseNote(status, supplier);
+  if (!detail) return undefined;
+  return {
+    code: "KMS § 21 lg 1",
+    severity: status === "limited" ? "info" : "warning",
+    title: status === "none"
+      ? "Välismaa teenus — võimalik piiratud maksukohustuslase registreerimiskohustus"
+      : status === "unknown"
+        ? "Ettevõtte käibemaksustaatust ei saa lugeda"
+        : "Välismaa teenus — kuulub igakuisesse piiratud maksukohustuslase arvestusse",
+    detail,
+    basis: "KMS § 21 lg 1; KMS § 10 lg 5; KMS § 25 lg 1",
+    rules_version: ESTONIAN_VAT_METADATA.rules_version,
+    verified_at: LIMITED_VAT_GUIDANCE_VERIFIED_AT,
+    source_url: LIMITED_VAT_NUMBER_CHECK_URL,
   };
 }
 
@@ -1215,6 +1258,8 @@ export type CreatePurchaseInvoiceFromPdfPayload = Partial<CreatePurchaseInvoiceF
   referencing_journal_ids?: number[];
   /** The document's order / cart number line written into the notes (OCR-sandboxed). */
   order_reference_note?: string;
+  /** KMS § 21 advisory for a foreign supplier when the company is not fully VAT-registered (never blocks). */
+  limited_vat_note?: EstonianTaxNote;
 };
 
 /** A create_purchase_invoice_from_pdf refusal (toolError payload) raised by this handler. */
@@ -1518,6 +1563,7 @@ export function registerCreatePurchaseInvoiceFromPdfTool(server: McpServer, api:
         : formatDuplicatePostingWarnings(duplicateScan, duplicateCandidate, t => wrapUntrustedOcr(t) ?? "");
       const warnings = [...readbackWarnings, ...duplicateWarnings, ...formatJournalReferenceWarnings(journalReferenceScan)];
       const referencingJournalIds = journalReferenceScan.hits.map(hit => hit.journal_id);
+      const limitedVatNote = await limitedVatTaxNote(api, supplier);
 
       return {
         content: [{
@@ -1543,6 +1589,7 @@ export function registerCreatePurchaseInvoiceFromPdfTool(server: McpServer, api:
               : {}),
             ...(referencingJournalIds.length > 0 ? { referencing_journal_ids: referencingJournalIds } : {}),
             ...(orderReferenceNote !== undefined ? { order_reference_note: wrapUntrustedOcr(orderReferenceNote) } : {}),
+            ...(limitedVatNote ? { limited_vat_note: limitedVatNote } : {}),
           } satisfies CreatePurchaseInvoiceFromPdfPayload),
         }],
       };

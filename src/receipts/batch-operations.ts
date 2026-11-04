@@ -59,6 +59,8 @@ import { loadOwnIbans } from "../tools/own-company-identity.js";
 import { createAndMaybeMatchPurchaseInvoice, prepareReceiptInvoiceItems } from "../tools/receipt-inbox-booking.js";
 import { ALREADY_BOOKED_STATUSES, buildReceiptBatchSummary } from "../tools/receipt-inbox-summary.js";
 import { checkCurrencyEquivalent } from "../currency-equivalent-check.js";
+import { companyVatStatusFromInfo, requireKnownCompanyVatStatus } from "../company-vat-status.js";
+import { limitedVatPointOfUseNote } from "../limited-vat.js";
 import { textHazardSignals } from "../tools/document-text-hazards.js";
 import { groupByDigest } from "../file-digest-groups.js";
 // These pure guards + rule-target resolvers stay in receipt-inbox.ts (several
@@ -701,6 +703,10 @@ async function processSingleReceipt(
         notes.push(bookingSuggestion.history_partial_note);
       }
       applyReverseChargeAutoDetection(bookingSuggestion, extracted, supplierResolution, context.isVatRegistered, notes);
+      const limitedVatNote = context.companyVatStatus
+        ? limitedVatPointOfUseNote(context.companyVatStatus, supplierResolution.client ?? supplierResolution.preview_client)
+        : undefined;
+      if (limitedVatNote) notes.push(limitedVatNote);
       if (bookingSuggestion.reverse_charge_reason === "foreign_supplier_default") {
         signals.foreign_reverse_charge_default_unverified = true;
       }
@@ -1024,12 +1030,14 @@ class ReceiptBatchOperationsImpl implements ReceiptBatchOperations {
       }
       const vatInfo = await this.api.readonly.getVatInfo();
       const ownCompanyVat = vatInfo.vat_number?.trim() || undefined;
+      const companyVatStatus = requireKnownCompanyVatStatus(companyVatStatusFromInfo(vatInfo));
       const context: ReceiptProcessingContext = {
         clients: await this.api.clients.listAll(),
         purchaseInvoices: await this.api.purchaseInvoices.listAll(),
         purchaseArticlesWithVat: await getPurchaseArticlesWithVat(this.api),
         accounts: await this.api.readonly.getAccounts(),
-        isVatRegistered: !!vatInfo.vat_number,
+        isVatRegistered: companyVatStatus === "full",
+        companyVatStatus,
       };
       const ownCompanyRegistryCode = deriveOwnCompanyRegistryCode(
         context.clients,

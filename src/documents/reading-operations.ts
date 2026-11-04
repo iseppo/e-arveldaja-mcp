@@ -54,7 +54,7 @@ import { buildExtractionConfidenceSignals } from "../tools/receipt-inbox.js";
 import { summarizeInvoiceExtraction } from "../invoice-extraction-fallback.js";
 import { resolveOwnCompanyIdentifiers, type OwnCompanyIdentifiers } from "../tools/own-company-identity.js";
 import { computeBookingSuggestion, textItemsWithPageNums, type BookingSuggestionCore } from "../tools/pdf-workflow.js";
-import { isCompanyVatRegistered } from "../tools/crud-tools.js";
+import { isCompanyVatRegistered } from "../company-vat-status.js";
 import { resolveSupplierDefault } from "../resolution/supplier-default-resolution.js";
 import { detectDuplicatePurchaseInvoice } from "../tools/document-audit.js";
 import { findInvoiceNumberMatchesAnySupplier } from "../tools/receipt-inbox-matching.js";
