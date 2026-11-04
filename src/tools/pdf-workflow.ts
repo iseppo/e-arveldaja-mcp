@@ -1,3 +1,4 @@
+import { crossCheckSupplierWithRegistry } from "../receipts/registry-supplier-check.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { mkdtemp, rm, writeFile } from "fs/promises";
@@ -529,13 +530,13 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext, run
         } catch {
           // Offline / unconfigured connection — extract without self-exclusions.
         }
-        const extracted = extractReceiptFieldsFromText(parsedDocument.text, snapshot.fileName, {
+        const extracted = await crossCheckSupplierWithRegistry(extractReceiptFieldsFromText(parsedDocument.text, snapshot.fileName, {
           textItems: allTextItems,
           ownCompanyVat,
           ownCompanyRegistryCode,
           ownIbans,
           ownCompanyName,
-        });
+        }), { ownCompanyRegistryCode, ownCompanyName });
         // `extractReceiptFieldsFromText` already ran `extractIdentifiers` on the
         // same text + textItems and spread the result onto `extracted`; reuse
         // those identifiers rather than recomputing them (#14).

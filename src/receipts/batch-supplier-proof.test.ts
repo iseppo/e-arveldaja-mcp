@@ -212,14 +212,15 @@ describe("P2 E1: a new supplier's name needs proof right before the client is cr
   });
 
   it("create: preview verified, then the persistence lookup (the one right before clients.create) fails → zero writes, no client named PRINT", async () => {
-    // dry run, execute projection, execute preview: the registry answers; the lookup right before create fails.
-    const fetchMock = stubRegistry([true, true, true, false]);
+    // The extraction cross-check (cached after its first answer), then dry run, execute
+    // projection, execute preview: the registry answers; the lookup right before create fails.
+    const fetchMock = stubRegistry([true, true, true, true, false]);
     const { api, rec } = makeApi();
     const { dry, run } = await runMode(api, "create");
     expect(dry.results[0]!.supplier_resolution?.preview_client?.name).toBe(REGISTRY_NAME);
     if (!run.ok) throw new Error("run failed");
-    // The 4th lookup is the persistence-time one: the E1 boundary was reached.
-    expect(fetchMock).toHaveBeenCalledTimes(4);
+    // The 5th lookup is the persistence-time one: the E1 boundary was reached.
+    expect(fetchMock).toHaveBeenCalledTimes(5);
     expect(run.value.results[0]!.status).toBe("needs_review");
     expect(run.value.results[0]!.supplier_resolution?.code).toBe("supplier_name_unverified");
     expect(rec.clientsCreate).not.toHaveBeenCalled();
@@ -231,11 +232,12 @@ describe("P2 E1: a new supplier's name needs proof right before the client is cr
     // create_and_confirm needs high confidence, and an unmatched supplier always raises
     // supplier_resolution_failed (medium), so this mode can never reach clients.create
     // for a new supplier; the E1 boundary itself is covered by the create arm above.
-    const fetchMock = stubRegistry([true, true, true, false]);
+    const fetchMock = stubRegistry([true, true, true, true, false]);
     const { api, rec } = makeApi();
     const { run } = await runMode(api, "create_and_confirm");
     if (!run.ok) throw new Error("run failed");
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    // The extraction cross-check plus three resolution lookups; never the persistence one.
+    expect(fetchMock).toHaveBeenCalledTimes(4);
     expect(run.value.results[0]!.status).toBe("needs_review");
     expect(run.value.results[0]!.llm_fallback?.confidence_signals).toContain("supplier_resolution_failed");
     expect(rec.clientsCreate).not.toHaveBeenCalled();
@@ -371,7 +373,7 @@ describe("P2 E1: a new supplier's name needs proof right before the client is cr
       expect(result.notes.join(" ")).toContain("Name provenance (diagnostic): ocr/top_line");
     });
 
-    it("an existing client is matched as before: no registry lookup, no client created, invoice booked", async () => {
+    it("an existing client is matched as before: no resolution-time registry lookup, no client created, invoice booked", async () => {
       const fetchMock = stubRegistry([false]);
       const { api, rec } = makeApi([{
         id: 7, name: "Printimiskeskus OÜ", code: REG_CODE, is_supplier: true, is_client: false, cl_code_country: "EST",
@@ -379,7 +381,9 @@ describe("P2 E1: a new supplier's name needs proof right before the client is cr
       }]);
       const { run } = await runMode(api, "create");
       expect(run.ok && run.value.results[0]!.status).toBe("created");
-      expect(fetchMock).not.toHaveBeenCalled();
+      // Supplier resolution asks the registry nothing: the only lookups are the
+      // extraction cross-check, one per parse while the registry is unavailable.
+      expect(fetchMock).toHaveBeenCalledTimes(vi.mocked(parseDocument).mock.calls.length);
       expect(rec.clientsCreate).not.toHaveBeenCalled();
       expect(rec.invoicesCreate).toHaveBeenCalledTimes(1);
     });

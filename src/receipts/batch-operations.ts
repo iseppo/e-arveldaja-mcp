@@ -1,3 +1,4 @@
+import { crossCheckSupplierWithRegistry } from "./registry-supplier-check.js";
 import { plainFailureOutcome as fail, plainSuccessOutcome as ok, type OperationOutcome } from "../operation-outcome.js";
 import type { ApiContext } from "../tools/crud-tools.js";
 import type { RuntimeSafetyContext } from "../runtime-safety-context.js";
@@ -326,7 +327,7 @@ async function extractReceiptFields(
       pageNum: page.pageNum,
     }))
   );
-  const extracted = extractReceiptFieldsFromText(parsedDocument.text, snapshot.file.name, {
+  const extracted = await crossCheckSupplierWithRegistry(extractReceiptFieldsFromText(parsedDocument.text, snapshot.file.name, {
     ownCompanyVat,
     ownCompanyRegistryCode,
     ownIbans,
@@ -334,7 +335,7 @@ async function extractReceiptFields(
     textItems: allTextItems,
     minOcrConfidence: computeMinOcrConfidence(allTextItems),
     partialOcrFailure: parsedDocument.ocrPartialFailure,
-  });
+  }), { ownCompanyRegistryCode, ownCompanyName });
   return { extracted, textHazards: await textHazardSignals(parsedDocument, extracted.currency, snapshot.snapshot_path) };
 }
 

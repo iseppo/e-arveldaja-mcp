@@ -1,3 +1,4 @@
+import { crossCheckSupplierWithRegistry } from "../receipts/registry-supplier-check.js";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -413,13 +414,13 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
         // Offline / unconfigured — extract without self-exclusions.
       }
 
-      const extracted = extractReceiptFieldsFromText(parsedDocument.text, material.fileName, {
+      const extracted = await crossCheckSupplierWithRegistry(extractReceiptFieldsFromText(parsedDocument.text, material.fileName, {
         textItems: allTextItems,
         ownCompanyVat,
         ownCompanyRegistryCode,
         ownIbans,
         ownCompanyName,
-      });
+      }), { ownCompanyRegistryCode, ownCompanyName });
 
       // Okt 2026 finding 5: the order / cart number the document prints goes
       // into the booking notes (bound by the fingerprint, stored in the plan

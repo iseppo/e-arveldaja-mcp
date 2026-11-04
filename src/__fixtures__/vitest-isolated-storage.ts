@@ -14,6 +14,7 @@ import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { afterAll, beforeEach } from "vitest";
+import { clearRegistryNameCache } from "../receipts/registry-name-cache.js";
 
 const root = mkdtempSync(join(tmpdir(), "earveldaja-test-config-"));
 let counter = 0;
@@ -26,6 +27,9 @@ process.env.EARVELDAJA_CONFIG_DIR = join(root, "module");
 
 beforeEach(() => {
   process.env.EARVELDAJA_CONFIG_DIR = join(root, `t${counter++}`);
+  // Business-register names cached by the extraction cross-check never carry
+  // from one test's fetch stub into the next.
+  clearRegistryNameCache();
 });
 
 afterAll(() => {
