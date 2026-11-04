@@ -5,8 +5,12 @@
  * page either named the wrong block (a bank, a buyer) or carries another
  * party's code.
  *
- * - The register's name is printed on the page → the supplier name becomes the
- *   register's name (code and name agree with the register and the document).
+ * - The register's name is printed on the page, the read name has no supplier
+ *   label and the register's name sits under no other party's role label → the
+ *   supplier name becomes the register's name.
+ * - The register's name is printed but either condition fails (a labelled
+ *   "Müüja: X" against a bank's or buyer's code) → both companies are on the
+ *   page and the code is not X's: `supplier_identifier_ambiguous` holds it.
  * - The register's name is not on the page → an extraction note only. The
  *   page's name may be OCR noise or a brand; supplier resolution still matches
  *   by the code and names a new client from the register (P2 E1).
@@ -42,17 +46,34 @@ export function companyNamesAgree(left: string, right: string): boolean {
   return 1 - distance(a, b) / Math.max(a.length, b.length) >= 0.85;
 }
 
-/** The register's name as one printed line or whitespace column of the page (a leading "Label:" ignored). */
-export function registryNamePrinted(rawText: string, registryName: string): boolean {
+// A label naming a party other than the supplier: buyer, payer, manager, bank
+// or payment agent.
+const OTHER_PARTY_LABEL_RE =
+  /^(?:maksja|ostja|arve\s+saaja|saaja|klient|buyer|bill\s+to|invoice\s+to|recipient|client|haldaja|haldur|valitseja|administrator|manager|property\s+manager|pank|bank|panga\s+\p{L}+|teenindav\s+pank|pangarekvisiidid|bank\s+details|maksevahendaja|maksete\s+vahendaja|makseagent|payment\s+(?:agent|provider|institution))\b/iu;
+
+const segmentsOf = (line: string) => [line, ...line.split(/\s{2,}/)].map(segment => segment.trim()).filter(Boolean);
+
+/**
+ * Where the register's name is printed on the page: one line or whitespace
+ * column (a leading "Label:" ignored). `under_other_party` when that label, or
+ * a column of one of the two lines above, is another party's role label.
+ */
+export function registryNamePrinted(rawText: string, registryName: string): { under_other_party: boolean } | undefined {
   const key = normalizeCompanyName(registryName);
-  if (key.length < 3) return false;
-  for (const line of rawText.split(/\r?\n/)) {
-    for (const segment of [line, ...line.split(/\s{2,}/)]) {
-      const text = segment.trim().replace(/^[^:]{1,40}:\s*/u, "");
-      if (text && normalizeCompanyName(text) === key) return true;
+  if (key.length < 3) return undefined;
+  const lines = rawText.split(/\r?\n/).filter(line => line.trim() !== "");
+  let found: { under_other_party: boolean } | undefined;
+  lines.forEach((line, index) => {
+    for (const segment of segmentsOf(line)) {
+      const label = /^([^:]{1,40}):\s*/u.exec(segment);
+      const text = label ? segment.slice(label[0].length) : segment;
+      if (!text || normalizeCompanyName(text) !== key) continue;
+      const underOtherParty = (label !== null && OTHER_PARTY_LABEL_RE.test(label[1]!.trim())) ||
+        [index - 1, index - 2].some(at => at >= 0 && segmentsOf(lines[at]!).some(above => OTHER_PARTY_LABEL_RE.test(above)));
+      found = { under_other_party: (found?.under_other_party ?? false) || underOtherParty };
     }
-  }
-  return false;
+  });
+  return found;
 }
 
 export async function crossCheckSupplierWithRegistry(
@@ -76,7 +97,19 @@ export async function crossCheckSupplierWithRegistry(
   if (options.ownCompanyName && companyNamesAgree(registryName, options.ownCompanyName)) return extracted;
   if (companyNamesAgree(name, registryName)) return extracted;
 
-  if (registryNamePrinted(extracted.raw_text ?? "", registryName)) {
+  const printed = registryNamePrinted(extracted.raw_text ?? "", registryName);
+  const nameLabelled = extracted.field_provenance?.some(entry => entry.field === "supplier_name" && entry.source === "label") ?? false;
+  if (printed && (nameLabelled || printed.under_other_party)) {
+    return {
+      ...extracted,
+      supplier_identifier_ambiguous: true,
+      extraction_notes: [
+        ...(extracted.extraction_notes ?? []),
+        `Registry code ${regCode} belongs to another company in the Estonian business register, and that company is also printed on the document (${nameLabelled ? "the supplier name is labelled" : "under another party's label"}); verify which company is the supplier and whose code this is.`,
+      ],
+    };
+  }
+  if (printed) {
     return {
       ...extracted,
       supplier_name: registryName,

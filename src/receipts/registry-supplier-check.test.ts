@@ -50,6 +50,42 @@ describe("crossCheckSupplierWithRegistry", () => {
     expect(buildExtractionConfidenceSignals(result, {})).toEqual({});
   });
 
+  it("holds instead of renaming a labelled supplier to the company the code belongs to", async () => {
+    // A misread bank code: the labelled supplier is right; the code's owner (the bank) is also printed.
+    const input: ExtractedReceiptFields = {
+      supplier_name: "Õige Stuudio OÜ",
+      supplier_reg_code: "10000018",
+      raw_text: "Müüja: Õige Stuudio OÜ\nTeenindav pank: Näidis Finants AS\nReg-kood 10000018",
+      field_provenance: [{ field: "supplier_name", value: "Õige Stuudio OÜ", source: "label", rationale: "labeled" }],
+    };
+    const result = await crossCheckSupplierWithRegistry(input, { lookup: registry("Näidis Finants AS") });
+    expect(result.supplier_name).toBe("Õige Stuudio OÜ");
+    expect(result.supplier_identifier_ambiguous).toBe(true);
+    expect(result.extraction_notes?.join(" ")).toMatch(/also printed on the document \(the supplier name is labelled\)/);
+    expect(buildExtractionConfidenceSignals(result, {}).supplier_identifier_ambiguous).toBe(true);
+  });
+
+  it("holds a labelled supplier even when the code's owner is printed without any label", async () => {
+    const input: ExtractedReceiptFields = {
+      supplier_name: "Õige Stuudio OÜ",
+      supplier_reg_code: "10000018",
+      raw_text: "Müüja: Õige Stuudio OÜ\nArve nr INV-731\nKuupäev 01.10.2026\nNäidis Finants AS\nReg-kood 10000018",
+      field_provenance: [{ field: "supplier_name", value: "Õige Stuudio OÜ", source: "label", rationale: "labeled" }],
+    };
+    const result = await crossCheckSupplierWithRegistry(input, { lookup: registry("Näidis Finants AS") });
+    expect(result.supplier_name).toBe("Õige Stuudio OÜ");
+    expect(result.supplier_identifier_ambiguous).toBe(true);
+  });
+
+  it("holds instead of renaming the supplier to a company printed under a bank label", async () => {
+    const result = await crossCheckSupplierWithRegistry(
+      fields({ raw_text: `${RAW_TEXT}\nPanga andmed:\nHoopis Teine OÜ` }),
+      { lookup: registry("Hoopis Teine OÜ") },
+    );
+    expect(result.supplier_name).toBe("Näidis Finants AS");
+    expect(result.supplier_identifier_ambiguous).toBe(true);
+  });
+
   it("only notes it when the register's company for the code is not named on the page", async () => {
     const result = await crossCheckSupplierWithRegistry(fields(), { lookup: registry("Hoopis Teine OÜ") });
     expect(result.supplier_name).toBe("Näidis Finants AS");
@@ -108,11 +144,20 @@ describe("crossCheckSupplierWithRegistry", () => {
 
 describe("registry name helpers", () => {
   it("finds the register's name as a line, a whitespace column or a labelled value", () => {
-    expect(registryNamePrinted("Näidis Stuudio OÜ", "Näidis Stuudio OÜ")).toBe(true);
-    expect(registryNamePrinted("Rg-kood 1      NÄIDIS STUUDIO OU", "Näidis Stuudio OÜ")).toBe(true);
-    expect(registryNamePrinted("Müüja: Näidis Stuudio OÜ", "Näidis Stuudio OÜ")).toBe(true);
-    expect(registryNamePrinted("Näidis Stuudio Grupp OÜ", "Näidis Stuudio OÜ")).toBe(false);
-    expect(registryNamePrinted("Stuudio", "Näidis Stuudio OÜ")).toBe(false);
+    const free = { under_other_party: false };
+    expect(registryNamePrinted("Näidis Stuudio OÜ", "Näidis Stuudio OÜ")).toEqual(free);
+    expect(registryNamePrinted("Rg-kood 1      NÄIDIS STUUDIO OU", "Näidis Stuudio OÜ")).toEqual(free);
+    expect(registryNamePrinted("Müüja: Näidis Stuudio OÜ", "Näidis Stuudio OÜ")).toEqual(free);
+    expect(registryNamePrinted("Näidis Stuudio Grupp OÜ", "Näidis Stuudio OÜ")).toBeUndefined();
+    expect(registryNamePrinted("Stuudio", "Näidis Stuudio OÜ")).toBeUndefined();
+  });
+
+  it.each([
+    ["on the label's line", "Teenindav pank: Näidis Finants AS"],
+    ["one line under a bank heading", "Panga andmed:\nNäidis Finants AS"],
+    ["two lines under a buyer label, in a column", "Ostja:\nPargi 1                Kuupäev 01.10.2026\nNäidis Finants AS      Arve 7"],
+  ])("marks the register's name under another party's label (%s)", (_label, text) => {
+    expect(registryNamePrinted(text, "Näidis Finants AS")).toEqual({ under_other_party: true });
   });
 
   it("takes a brand name that starts the register's name as agreeing, never a different name", () => {
