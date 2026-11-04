@@ -938,7 +938,12 @@ function existingDuplicateKeysByKind(
   const exact = new Set<string>();
   for (const variant of variants) (variant.lossy ? lossy : exact).add(variant.key);
   const alias = new Set<string>();
-  for (const legacy of entry.legacy_identities ?? []) {
+  // A release before 7490e3d read a camt.053.001.08 party wrapped in <Pty> as
+  // nameless and stored (and signed) the row so. The bank's v02 export of the
+  // same movement cannot tell, so every named entry also claims its nameless key;
+  // every other field (bank reference, date, amount, IBAN, text) must still agree.
+  const nameless: Array<Partial<ParsedCamtEntry>> = normalizeOptionalReference(entry.counterparty_name) ? [{ counterparty_name: undefined }] : [];
+  for (const legacy of [...(entry.legacy_identities ?? []), ...nameless]) {
     const legacyEntry = { ...entry, ...legacy, legacy_identities: undefined };
     const legacyKeys = existingDuplicateKeysByKind(legacyEntry, selectedDimensionId);
     for (const key of [...legacyKeys.current, ...legacyKeys.alias]) {

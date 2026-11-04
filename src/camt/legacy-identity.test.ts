@@ -5,7 +5,7 @@ import { computeCamtImportProjection } from "./projection.js";
 import { buildCamtDescriptionWithMetadata, isTrustedCamtDescriptionMetadata, legacyTruncatedCamtMarkerHint } from "./duplicate-identity.js";
 import { buildCamtDescriptionWithMetadataV1 } from "./marker-render-v1.js";
 import { computeExactMatchProjection, EXACT_CONFIRM_DEFAULT_MIN_CONFIDENCE } from "../banking/reconciliation/duplicate-policy.js";
-import type { ParsedCamtEntry, Transaction } from "./types.js";
+import type { CamtParseResult, ParsedCamtEntry, Transaction } from "./types.js";
 import type { Journal, SaleInvoice } from "../types/api.js";
 
 // Rows stored by the release before CntrValAmt-weighted splitting and the
@@ -23,8 +23,8 @@ const ntry = (amount: string, ref: string, inner: string, addtl = "") =>
   `<Ntry><Amt Ccy="EUR">${amount}</Amt><CdtDbtInd>DBIT</CdtDbtInd><BookgDt><Dt>2026-02-04</Dt></BookgDt>` +
   `${ref ? `<AcctSvcrRef>${ref}</AcctSvcrRef>` : ""}${inner ? `<NtryDtls>${inner}</NtryDtls>` : ""}${addtl ? `<AddtlNtryInf>${addtl}</AddtlNtryInf>` : ""}</Ntry>`;
 
-async function project(xml: string, ledger: Transaction[], journals: Journal[] = []) {
-  const preflight = preflightCamt053Xml(xml);
+async function project(xml: string | CamtParseResult, ledger: Transaction[], journals: Journal[] = []) {
+  const preflight = typeof xml === "string" ? preflightCamt053Xml(xml) : { ok: true as const, value: xml };
   if (!preflight.ok) throw new Error(`preflight rejected: ${JSON.stringify(preflight.rejected_fields)}`);
   return computeCamtImportProjection({
     loaded: preflight.value,
@@ -421,5 +421,83 @@ describe("CAMT re-import against API-read-back rows whose marker sig fails (F3)"
     expect(rerun.descriptors).toHaveLength(0);
     expect(rerun.skipped.map(row => row.amount)).toEqual([90, 95]);
     expect(rerun.skipped.every(row => /previous release imported only in part/.test(row.review_note ?? ""))).toBe(true);
+  });
+});
+
+// Before 7490e3d a camt.053.001.08 party wrapped in <Pty> parsed with no name or
+// registry code, and its marker was signed over that empty name. Re-importing the
+// same movement now (v08 with the name, or the bank's v02 export) must book nothing.
+describe("CAMT re-import against rows a pre-<Pty> release imported from camt.053.001.08", () => {
+  const orgId = "<Id><OrgId><Othr><Id>14999999</Id><SchmeNm><Cd>COID</Cd></SchmeNm></Othr></OrgId></Id>";
+  const party = (v08: boolean, name: string) => v08
+    ? `<Cdtr><Pty><Nm>${name}</Nm>${orgId}</Pty></Cdtr>`
+    : `<Cdtr><Nm>${name}</Nm>${orgId}</Cdtr>`;
+  const movement = (v08: boolean, o: { ref?: string; amount?: string; iban?: string; name?: string } = {}) =>
+    `<Ntry><Amt Ccy="EUR">${o.amount ?? "25.00"}</Amt><CdtDbtInd>DBIT</CdtDbtInd><BookgDt><Dt>2026-03-10</Dt></BookgDt>` +
+    `<AcctSvcrRef>${o.ref ?? "PTY-REF-0001"}</AcctSvcrRef><NtryDtls><TxDtls><RltdPties>${party(v08, o.name ?? "OÜ Meening")}` +
+    `<CdtrAcct><Id><IBAN>${o.iban ?? "EE927700771006313596"}</IBAN></Id></CdtrAcct></RltdPties></TxDtls></NtryDtls></Ntry>`;
+  const statement = (v08: boolean, entries: string) => `<?xml version="1.0" encoding="UTF-8"?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.${v08 ? "08" : "02"}"><BkToCstmrStmt><Stmt><Id>s</Id>
+<Acct><Id><IBAN>EE637700771011212909</IBAN></Id><Ccy>EUR</Ccy></Acct>${entries}</Stmt></BkToCstmrStmt></Document>`;
+  const loaded = (xml: string) => {
+    const preflight = preflightCamt053Xml(xml);
+    if (!preflight.ok) throw new Error("preflight rejected");
+    return preflight.value;
+  };
+  /** What the pre-7490e3d parser returned for a v08 file: the <Pty> party unread. */
+  const preFixV08 = (xml: string): CamtParseResult => {
+    const value = loaded(xml);
+    return { ...value, entries: value.entries.map(e => ({ ...e, counterparty_name: undefined, counterparty_reg_code: undefined })) };
+  };
+  /** Created rows as GET /transactions returns them: type C, no bank reference or IBAN. */
+  const readBack = (projection: Awaited<ReturnType<typeof project>>): Transaction[] =>
+    projection.descriptors.map((descriptor, index) => ({
+      ...descriptor.payload, id: 3000 + index, status: "PROJECT", type: "C",
+      bank_ref_number: null, bank_account_no: null, bank_account_name: descriptor.payload.bank_account_name ?? null,
+    }) as Transaction);
+  const oldLedger = async () => {
+    const old = await project(preFixV08(statement(true, movement(true))), []);
+    expect(old.descriptors).toHaveLength(1);
+    const ledger = readBack(old);
+    expect(ledger[0]!.bank_account_name).toBeNull();
+    expect(isTrustedCamtDescriptionMetadata(ledger[0]!)).toBe(true);
+    return ledger;
+  };
+
+  it("the current parser reads the name the old one lost", () => {
+    expect(loaded(statement(true, movement(true))).entries[0]).toMatchObject({ counterparty_name: "OÜ Meening", counterparty_reg_code: "14999999" });
+    expect(preFixV08(statement(true, movement(true))).entries[0]!.counterparty_name).toBeUndefined();
+  });
+
+  it.each([["camt.053.001.08", true], ["camt.053.001.02", false]] as const)("re-importing as %s creates nothing", async (_format, v08) => {
+    const ledger = await oldLedger();
+    const rerun = await project(statement(v08, movement(v08)), ledger);
+    expect(rerun.descriptors).toHaveLength(0);
+    expect(rerun.skipped.map(row => [row.duplicate_transaction_ids, row.review_note])).toEqual([[[3000], undefined]]);
+  });
+
+  it("counts repeated movements against the nameless row exactly as against a named one", async () => {
+    const xml = statement(true, movement(true) + movement(true));
+    const outcome = (p: Awaited<ReturnType<typeof project>>) =>
+      [p.descriptors.length, p.skipped.map(row => [row.reason, row.duplicate_transaction_ids, row.review_note])];
+    const named = readBack(await project(statement(true, movement(true)), []));
+    expect(outcome(await project(xml, await oldLedger()))).toEqual(outcome(await project(xml, named)));
+  });
+
+  it.each([
+    ["another bank reference", { ref: "PTY-REF-0002" }],
+    ["another amount", { amount: "25.01" }],
+    ["another creditor IBAN", { iban: "EE382200221020145685" }],
+  ])("still books a different movement (%s)", async (_name, change) => {
+    const ledger = await oldLedger();
+    const rerun = await project(statement(true, movement(true, change)), ledger);
+    expect(rerun.descriptors).toHaveLength(1);
+    expect(rerun.skipped).toHaveLength(0);
+  });
+
+  it("does not take a row stored under another creditor name as the same movement", async () => {
+    const other = readBack(await project(statement(false, movement(false, { name: "Other Creditor AS" })), []));
+    const rerun = await project(statement(true, movement(true)), other);
+    expect(rerun.skipped.filter(row => row.review_note === undefined && row.duplicate_transaction_ids.length > 0)).toHaveLength(0);
   });
 });

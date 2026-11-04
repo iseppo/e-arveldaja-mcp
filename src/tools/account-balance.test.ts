@@ -592,7 +592,17 @@ describe("compute_account_dimension_balances tool — unmapped opening-balance d
       (await handler({ account_id: ACCOUNT_ID, date_from: "2025-01-01" })).content[0]!.text,
     );
 
-    expect(data.warnings.join(" ")).toMatch(/Partial dimension attribution: API INITIAL includes 1000\.00 EUR/);
+    // The 1000 D predates date_from: it is opening, not period movement.
+    expect(data.total).toBe(0);
+    expect(data.opening_balance_at_date_from).toBe(1000);
+    expect(data.closing_balance).toBe(1000);
+    const unattributed = data.dimensions!.find(row => row.title === "(määramata)")!;
+    expect(unattributed).toMatchObject({ balance: 0, opening_balance_at_date_from: 1000, closing_balance: 1000 });
+    expect(data.dimensions!.filter(row => row !== unattributed).every(row => !row.opening_balance_at_date_from && !row.closing_balance)).toBe(true);
+    const warning = data.warnings.find(w => w.startsWith("Partial dimension attribution:"))!;
+    expect(warning).toContain("API INITIAL includes 1000.00 EUR");
+    expect(warning).toContain(`included in the account's and the "(määramata)" row's opening_balance_at_date_from and closing_balance (not in total or the row's balance)`);
+    expect(warning).not.toMatch(/included in the total/);
   });
 
   it("compute_account_balance warns that an unattributed opening balance is outside a dimension-scoped figure", async () => {
