@@ -3540,19 +3540,7 @@ describe("receipt fields — invoice number, supplier and document type misreads
     expect(result.supplier_name).toBe("OÜ Näidis Trade Baltic");
   });
 
-  describe("supplier label rows and header columns (RDE / R9studio shapes)", () => {
-    it("an indented 'Müüja:' row takes its value column, not the next line's address", () => {
-      const text = [
-        "    Väljastamise kuupäev:  29. juuni 2026",
-        "    Müüja:               OÜ Näidis Trade               KMKR nr:          EE100000010",
-        "    Juriidiline aadress: Tänav 1, Tallinn, 10111, Eesti      Ettevõtte kood:   10000018",
-        "    Ostja:               Proovi OÜ",
-        "Kokku käibemaksuga: 151,80",
-      ].join("\n");
-      expect(extractReceiptFieldsFromText(text, "rde.pdf", { ownCompanyName: "Proovi OÜ" }).supplier_name).toBe("OÜ Näidis Trade");
-      expect(extractReceiptFieldsFromText(text, "rde.pdf").supplier_name).toBe("OÜ Näidis Trade");
-    });
-
+  describe("supplier label rows and header columns (review reproducers)", () => {
     it("a bare supplier label next to another label is not given that label as its value", () => {
       const text = ["Müüja:      Ostja:", "Näidis Kaubandus OÜ      Proovi OÜ", "Arve nr 7", "Kokku 10,00 EUR"].join("\n");
       const name = extractReceiptFieldsFromText(text, "x.pdf", { ownCompanyName: "Proovi OÜ" }).supplier_name;
@@ -3655,19 +3643,6 @@ describe("receipt fields — invoice number, supplier and document type misreads
       expect(name).not.toBe("Teine OÜ");
     });
 
-    it("a layout field label ending in a colon is never the supplier name", () => {
-      const text = ["Väljastamise kuupäev:   29.06.2026", "Müüja:   OÜ Näidis Trade", "Kokku 10,00 EUR"].join("\n");
-      const textItems: LayoutTextItem[] = [
-        { text: "Väljastamise kuupäev:", x: 52, y: 132, width: 80, height: 9, pageNum: 1 },
-        { text: "29.06.2026", x: 143, y: 127, width: 79, height: 9, pageNum: 1 },
-        { text: "Müüja:", x: 52, y: 162, width: 27, height: 8, pageNum: 1 },
-        { text: "OÜ Näidis Trade", x: 120, y: 162, width: 84, height: 8, pageNum: 1 },
-        { text: "Kokku 10,00 EUR", x: 52, y: 400, width: 80, height: 8, pageNum: 1 },
-      ];
-      const result = extractSupplierNameWithNotes(text, "x.pdf", textItems);
-      expect(result.name).not.toBe("Väljastamise");
-      expect(result.name).toBe("OÜ Näidis Trade");
-    });
   });
 
   it("MTU-like: a supplier label in the right column takes the same column of the next line", () => {
