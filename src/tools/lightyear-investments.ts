@@ -1543,6 +1543,9 @@ function poolTradePass(
     const foreignConv = foreignRows[0]!;
     const conversionFailure = validateConversionAmounts(eurConv, foreignConv);
     if (conversionFailure) { markPool(entry, funded, conversionFailure); continue; }
+    // A fee on the receiving USD leg leaves only the USD net to pay the buy, while the pool part and the
+    // EUR fee are figured from the gross: held, never funded (astra review 2026-11-04 #1).
+    if (foreignConv.fee !== 0) { markPool(entry, funded, fxReason("conversion_fee_conflict")); continue; }
     const resolution = resolveFxPair(Math.abs(eurConv.net_amount), Math.abs(foreignConv.net_amount), [eurConv.fx_rate, foreignConv.fx_rate]);
     if (!resolution.ok) { markPool(entry, funded, resolution.reason); continue; }
     const fxFee = fxFeeToEur(eurConv, foreignConv, resolution);
@@ -5023,6 +5026,8 @@ async function valuePoolTrades(params: {
     // Every bookability check that does not need the pool state runs before the projection, so a
     // trade that would be skipped never consumes provisional pool state (Codex review of Q4, #4).
     if (tradePool.kind === "buy_relief" && ecbCents !== null && !buyInvestmentCents(trade, ecbCents).ok) valueConflict = true;
+    // The same positive, safe quantity classifyTradeIntrinsicReadiness requires of a 1:1 trade (astra review 2026-11-04 #2).
+    if (!(trade.quantity > 0) || quantityToSafeMicrounits(trade.quantity) === null) valueConflict = true;
     prepared.set(trade.reference, { trade, ecb: outcome.ok ? outcome.rate : null, ecbCents, feeCents });
     // Only a usd_pool_funded trade may be valued: an intrinsic pairing/conversion error
     // (invalid_conversion_pair, conversion_*_conflict, …) is a barrier, never a zero consideration.
@@ -6215,7 +6220,19 @@ export function registerLightyearTools(
         const sameNumber = journals.filter(j => j.document_number === documentNumber && j.is_deleted !== true);
         const sameDate = view.checkpoints.find(c => c.kind === "revaluation" && c.as_of === as_of);
         if (sameDate) {
-          const matches = sameDate.journal_id === null ? sameNumber.length === 0 : sameNumber.some(j => j.id === sameDate.journal_id);
+          let matches = sameDate.journal_id === null && sameNumber.length === 0;
+          // A booked revaluation is done only while its one journal still carries the approved date, postings and broker net.
+          if (sameDate.journal_id !== null && sameNumber.length === 1 && sameNumber[0]!.id === sameDate.journal_id) {
+            let stored: Journal;
+            try {
+              stored = await api.journals.get(sameDate.journal_id);
+            } catch {
+              return review("usd_pool_validation_unavailable");
+            }
+            matches = journalMatchesPoolRecord(stored, key, {
+              document_number: documentNumber, broker_net_cents: sameDate.fx_cents, postings: sameDate.postings, effective_date: sameDate.effective_date,
+            }) === "ok";
+          }
           return matches ? done({ kind: "already_booked", checkpoint: sameDate }) : review("fx_revaluation_conflict", documentNumber);
         }
         if (sameNumber.length > 0) return review("fx_revaluation_conflict", documentNumber);
@@ -6228,7 +6245,7 @@ export function registerLightyearTools(
         const order = checkpointOrder("revaluation", as_of);
         const validated = await validateUsdPool({
           api, store: usdPoolStore, key, until: order, newRecords: [order],
-          statement: statementPoolEvents(rows, tradeExtraction, distributionExtraction, fundingTickers),
+          statement: { ...statementPoolEvents(rows, tradeExtraction, distributionExtraction, fundingTickers), period },
           requireRegistered: true,
         });
         if (!validated.ok) return review(validated.code, validated.detail);

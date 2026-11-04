@@ -482,6 +482,52 @@ describe("book_lightyear_trades — buys paid from the USD pool (C4, generalised
   });
 });
 
+describe("book_lightyear_trades — astra review 2026-11-04", () => {
+  beforeEach(() => {
+    mockedResolveFileInput.mockResolvedValue({ path: STATEMENT_PATH });
+    mockedReadFileCapped.mockReset();
+  });
+
+  // A later 10 USD buy paid 100 % from the pool: it must not be valued past a held earlier spend.
+  const LATER_BUY = ["21/10/2026 10:00:00", "OR-TESTLATER1", "NVDA", "US67066G1040", "Buy", "0.05", "USD", "200", "10.00", "0", "0", "10.00", "0"];
+
+  it("#1 a fee on the conversion's receiving USD leg holds the funded buy and every later pool spend", async () => {
+    // Opening 100 USD / €100 at ECB 1. EUR 80 buys USD 101 gross, of which only 100 net arrives (1 USD fee);
+    // the buy spends 150 USD, so 50 USD (€50) must come from the pool — funding from the 101 gross would
+    // take 49 USD / €49 and book €129 + €0.80 against €130 actually paid. Held, nothing is booked.
+    loadStatement([
+      ["19/10/2026 14:43:48", "CN-TESTRCV01", "", "", "Conversion", "0", "EUR", "0", "-80.00", "1.25", "0", "-80.00", "0"],
+      ["19/10/2026 14:43:48", "CN-TESTRCV01", "", "", "Conversion", "0", "USD", "0", "101.00", "0.8", "1.00", "100.00", "0"],
+      ["19/10/2026 14:43:49", "OR-TESTRCVB1", "NVDA", "US67066G1040", "Buy", "1", "USD", "150", "150.00", "0", "0", "150.00", "0"],
+      LATER_BUY,
+    ]);
+    const env = setup({ pool: [opening(10000, 10000, "1")], fetch: rateFetch("1") });
+    const dry = await env.run({ dry_run: true });
+    expect(reviewCode(dry.payload, "OR-TESTRCVB1")).toBe("conversion_fee_conflict");
+    expect(resultFor(dry.payload, "OR-TESTRCVB1")).toMatchObject({ status: "skipped" });
+    expect(reviewCode(dry.payload, "OR-TESTLATER1")).toBe("usd_pool_prerequisite_failed");
+    expect(resultFor(dry.payload, "OR-TESTLATER1")).toMatchObject({ status: "skipped" });
+    expect(dry.payload.results.some(row => row.status === "would_create")).toBe(false);
+    expect(env.store.records.filter(record => record.record === "event")).toEqual([]);
+  });
+
+  it.each([["0"], ["-1"], ["10000000000000"]])("#2 a pool-funded buy with quantity %s is trade_amount_conflict and stops later pool spends", async quantity => {
+    // Opening 100 USD / €100 at ECB 1; the 100 USD buy has no valid quantity, so it must not drain the pool (D 1550 €100 / C 1120 €100).
+    loadStatement([
+      ["19/10/2026 14:43:49", "OR-TESTQTY01", "NVDA", "US67066G1040", "Buy", quantity, "USD", "200", "100.00", "0", "0", "100.00", "0"],
+      LATER_BUY,
+    ]);
+    const env = setup({ pool: [opening(10000, 10000, "1")], fetch: rateFetch("1") });
+    const dry = await env.run({ dry_run: true });
+    expect(reviewCode(dry.payload, "OR-TESTQTY01")).toBe("trade_amount_conflict");
+    expect(resultFor(dry.payload, "OR-TESTQTY01")).toMatchObject({ status: "skipped" });
+    expect(resultFor(dry.payload, "OR-TESTQTY01")!.pool).toBeUndefined();
+    expect(reviewCode(dry.payload, "OR-TESTLATER1")).toBe("usd_pool_prerequisite_failed");
+    expect(dry.payload.results.some(row => row.status === "would_create")).toBe(false);
+    expect(env.store.records.filter(record => record.record === "event")).toEqual([]);
+  });
+});
+
 function parseRowsForTest(rows: string[][]) {
   const numeric = (value: string | undefined): number => value?.trim() ? Number.parseFloat(value) : 0;
   return rows.map((fields, row_index) => ({

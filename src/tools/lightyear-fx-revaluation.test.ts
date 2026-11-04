@@ -9,7 +9,8 @@ import type { ApiContext } from "./crud/shared.js";
 import type { Journal } from "../types/api.js";
 import type { EcbFetch, EcbFetchResponse } from "../fx/ecb-rates.js";
 import { endOfDaySeconds, type PoolKey, type UsdPoolCheckpoint, type UsdPoolEvent, type UsdPoolRecord } from "../lightyear/usd-pool.js";
-import { registerLightyearTools, type LightyearFxRevaluationPayload } from "./lightyear-investments.js";
+import { registerLightyearTools, type LightyearDistributionsPayload, type LightyearFxRevaluationPayload } from "./lightyear-investments.js";
+import { rateFetch as harnessRateFetch, setupPoolTool } from "../__fixtures__/lightyear-pool-harness.js";
 
 vi.mock("../bounded-read.js", async () => {
   const actual = await vi.importActual<typeof import("../bounded-read.js")>("../bounded-read.js");
@@ -324,5 +325,81 @@ describe("book_lightyear_fx_revaluation (C5)", () => {
   it("revalue without expected_usd_holding is an argument error", async () => {
     const { result } = await setup().run({ dry_run: true, expected_usd_holding: undefined });
     expect(result.isError).toBe(true);
+  });
+});
+
+describe("book_lightyear_fx_revaluation — astra review 2026-11-04", () => {
+  beforeEach(() => {
+    mockedResolveFileInput.mockResolvedValue({ path: STATEMENT_PATH });
+    mockedReadFileCapped.mockReset();
+    mockedReadFileCapped.mockResolvedValue(Buffer.from(statement(ROWS), "utf8"));
+  });
+
+  it("#3 a distribution at the opening day's 23:59:59 is in the opening replay and is held usd_pool_before_opening, never added twice", async () => {
+    // 100 USD bought on Sep 2 plus a 10 USD dividend at 30/09 23:59:59: the opening holds 110 USD. Booking that
+    // dividend afterwards would make the pool 120 USD against the statement's 110.
+    const rows = [
+      ["02/09/2026 10:00:00", "DT-TESTDEP02", "", "", "Deposit", "0", "EUR", "0", "1000.00", "0", "0", "1000.00", "0"],
+      ["02/09/2026 11:00:00", "CN-TESTOPEN2", "", "", "Conversion", "0", "EUR", "0", "-100.00", "1", "0", "-100.00", "0"],
+      ["02/09/2026 11:00:00", "CN-TESTOPEN2", "", "", "Conversion", "0", "USD", "0", "100.00", "1", "0", "100.00", "0"],
+      ["30/09/2026 23:59:59", "DD-TESTLAST09", "AMD", "US0079031078", "Dividend", "0", "USD", "0", "10.00", "0", "0", "10.00", "0"],
+    ];
+    mockedResolveFileInput.mockImplementation(async (input: string) => ({ path: input }));
+    mockedReadFileCapped.mockResolvedValue(Buffer.from(statement(rows), "utf8"));
+    const fetch = harnessRateFetch("1");
+    const opening = setupPoolTool<LightyearFxRevaluationPayload>("book_lightyear_fx_revaluation", { broker_account: 1120 }, { fetch });
+    const stored = await opening.book({ mode: "opening", as_of: "2026-09-30" });
+    expect(stored.exec.payload.status).toBe("opening_stored");
+    expect(opening.store.records).toEqual([expect.objectContaining({ kind: "opening", usd_cents: 11000, eur_cents: 11000 })]);
+    const distributions = setupPoolTool<LightyearDistributionsPayload>("book_lightyear_distributions",
+      { broker_account: 1120, income_account: 8330, tax_account: 8610, fee_account: 8610 }, { fetch, store: opening.store });
+    const dry = await distributions.run({ fx_source: "ecb", dry_run: true });
+    const held = dry.payload.results.find(row => String(row.reference).includes("DD-TESTLAST09"));
+    expect(held).toMatchObject({ status: "manual_review", review_reason: { code: "usd_pool_before_opening" } });
+    expect(distributions.create).not.toHaveBeenCalled();
+    expect(opening.store.records).toHaveLength(1);
+  });
+
+  it("#3 a revaluation counts a committed event in the reporting day's last second (23:59:59)", async () => {
+    // 100.00 USD / €88.97 plus 1.00 USD / €0.89 at 30/10 23:59:59 = 101.00 USD / €89.86; at 1.1172 the target is
+    // 101 / 1.1172 = €90.40 (90.404…), so FX +€0.54.
+    const last = ["30/10/2026 23:59:59", "DD-TESTLAST10", "NVDA", "US67066G1040", "Dividend", "0", "USD", "0", "1.00", "0", "0", "1.00", "0"];
+    const rows = [...ROWS, last];
+    mockedReadFileCapped.mockResolvedValue(Buffer.from(statement(rows), "utf8"));
+    const event = { ...poolEvent("DD-TESTLAST10", "2026-10-30T23:59:59Z", "distribution_in", 100, 89, 504), source_digest: sourceDigestOf(rows, "DD-TESTLAST10") };
+    const dry = await setup({ pool: [...POOL, event], journals: [...JOURNALS, journal(504, "LY:DD-TESTLAST10", 89)] }).run({ dry_run: true, expected_usd_holding: 101 });
+    expect(dry.payload).toMatchObject({ status: "would_create", usd_amount: 101, carrying_eur: 89.86, target_eur: 90.4, fx_amount: 0.54 });
+  });
+
+  it.each([
+    ["omits a committed distribution", ROWS.filter(row => row[1] !== "IN-TESTFUND01")],
+    ["has no rows (header only)", []],
+  ])("#4 a full-period export that %s is usd_pool_source_changed; nothing is written", async (_label, rows) => {
+    // The file name declares 2026-09-01…2026-10-30, so the Oct 1 distribution logged in the pool (and its journal) must be in it.
+    mockedReadFileCapped.mockResolvedValue(Buffer.from(statement(rows), "utf8"));
+    const env = setup();
+    const dry = await env.run({ dry_run: true });
+    expect(dry.payload).toMatchObject({ status: "review", review_reason: { code: "usd_pool_source_changed" } });
+    expect(dry.payload.plan_handle).toBeUndefined();
+    expect(env.create).not.toHaveBeenCalled();
+    expect(checkpointsOf(env.store.records)).toEqual([]);
+  });
+
+  type Edit = (ledger: Map<number, Journal>) => void;
+  const editJournal = (change: (journal: Journal) => Journal): Edit => ledger => { ledger.set(9001, change(ledger.get(9001)!)); };
+  it.each<[string, Edit]>([
+    ["its amount", editJournal(j => ({ ...j, postings: j.postings!.map(p => ({ ...p, amount: 0.55 })) }))],
+    ["its effective date", editJournal(j => ({ ...j, effective_date: "2026-10-29" }))],
+    ["an account", editJournal(j => ({ ...j, postings: j.postings!.map(p => p.accounts_id === 8500 ? { ...p, accounts_id: 8330 } : p) }))],
+    ["a dimension", editJournal(j => ({ ...j, postings: j.postings!.map(p => p.accounts_id === 1120 ? { ...p, accounts_dimensions_id: 7 } : p) }))],
+    ["a second live journal with the same number", ledger => { ledger.set(700, journal(700, DOC, 54)); }],
+  ])("#5 a same-date retry after editing %s is fx_revaluation_conflict, not already_booked", async (_label, edit) => {
+    const env = setup();
+    await env.book();
+    expect(env.created).toHaveLength(1);
+    edit(env.ledger);
+    const retry = await env.run({ dry_run: true });
+    expect(retry.payload).toMatchObject({ status: "review", review_reason: { code: "fx_revaluation_conflict" } });
+    expect(env.created).toHaveLength(1);
   });
 });

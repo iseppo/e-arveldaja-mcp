@@ -187,6 +187,23 @@ describe("simulateLightyearYear (plan Q5)", () => {
     expect(sim.reviews).toEqual([]);
   });
 
+  it("astra review 2026-11-04 #6: movements between the opening and --from are replayed, not dropped (USD 110, not 100)", async () => {
+    // Opening 2025-12-31 asserts 100 USD / €100 at 1; a January 10 USD dividend (€10 at ECB 1) and a February EUR
+    // reward follow. Reporting February only, the pool at the end of February is 110 USD / €110.
+    const rows = [
+      dividend("15/01/2026 10:00:00", "DD-TESTGAP01", "10.00"),
+      ["10/02/2026 09:00:00", "RW-TESTGAP02", "", "", "Reward", "0", "EUR", "0", "5", "1", "0", "5", "0"],
+    ];
+    const sim = await simulateLightyearYear({
+      statementCsv: lightyearStatementCsv(rows), gainsCsv: null,
+      from: "2026-02-01", to: "2026-02-28", lightyearAccount: "TESTACCT1", opening: { as_of: "2025-12-31", usd_cents: 10000, eur_cents: 10000, rate: "1" }, accounts: ACCOUNTS,
+      ecb: { fetch: rateFetch("1"), today: () => "2026-10-31", now: () => new Date("2026-10-31T08:00:00Z"), cache: new Map() },
+    });
+    expect(sim.monthEnds).toEqual([expect.objectContaining({ month: "2026-02", usd_cents: 11000, eur_cents: 11000 })]);
+    expect(sim.journals.map(journal => journal.document_number)).toEqual(["LY:RW-TESTGAP02"]);
+    expect(sim.reviews).toEqual([]);
+  });
+
   it("statement days set the month: 31/03 23:59:59 is March, 01/04 00:00:00 is April", async () => {
     const rows = [buy("31/03/2026 23:59:59", "OR-TESTMB1", "10.00", "0", "EUR"), buy("01/04/2026 00:00:00", "OR-TESTMB2", "11.00", "0", "EUR")];
     const sim = await simulate(rows, { as_of: "2025-12-31", usd_cents: 0, eur_cents: 0, rate: "1" });

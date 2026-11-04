@@ -271,7 +271,11 @@ export function endOfDaySeconds(day: string): number {
 
 // ---- ordering -----------------------------------------------------------------
 
-/** Total order: ts, then checkpoint before event, then ref. */
+/**
+ * Total order: ts, then event before checkpoint, then ref. A checkpoint stands at
+ * its day's last second (23:59:59), so an event in that second belongs to the day
+ * it closes (astra review 2026-11-04 #3).
+ */
 export interface PoolOrder {
   ts: number;
   rank: 0 | 1;
@@ -280,8 +284,8 @@ export interface PoolOrder {
 
 function orderOf(record: UsdPoolRecord): PoolOrder {
   return record.record === "checkpoint"
-    ? { ts: record.ts, rank: 0, ref: `${record.kind}:${record.as_of}` }
-    : { ts: record.ts, rank: 1, ref: record.ref };
+    ? { ts: record.ts, rank: 1, ref: `${record.kind}:${record.as_of}` }
+    : { ts: record.ts, rank: 0, ref: record.ref };
 }
 
 export function compareOrder(a: PoolOrder, b: PoolOrder): number {
@@ -289,11 +293,11 @@ export function compareOrder(a: PoolOrder, b: PoolOrder): number {
 }
 
 export function eventOrder(ref: string, ts: number): PoolOrder {
-  return { ts, rank: 1, ref };
+  return { ts, rank: 0, ref };
 }
 
 export function checkpointOrder(kind: "opening" | "revaluation", asOf: string): PoolOrder {
-  return { ts: endOfDaySeconds(asOf), rank: 0, ref: `${kind}:${asOf}` };
+  return { ts: endOfDaySeconds(asOf), rank: 1, ref: `${kind}:${asOf}` };
 }
 
 /**
