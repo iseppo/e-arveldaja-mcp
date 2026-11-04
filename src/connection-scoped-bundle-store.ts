@@ -1,4 +1,4 @@
-import { existsSync } from "fs";
+import { statSync } from "fs";
 import { dirname } from "path";
 import {
   checkBundleRecordIdentity,
@@ -32,6 +32,21 @@ export interface ConnectionScopedBundleStore<T> {
 
 type Persisted<T> = T & { connectionIdentity?: string };
 
+/**
+ * True when the store file exists; false only for genuine absence (ENOENT,
+ * also a missing parent dir). Any other error (EACCES, ENOTDIR, …) throws:
+ * an inaccessible store is not an empty one (`existsSync` would say false).
+ */
+function storeFileExists(path: string): boolean {
+  try {
+    statSync(path);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+}
+
 export function createConnectionScopedBundleStore<T extends object>(options: {
   fileName: string;
   label: string;
@@ -56,7 +71,7 @@ export function createConnectionScopedBundleStore<T extends object>(options: {
       throw new Error(`${options.label} require bundle storage; single-file EARVELDAJA_RULES_FILE mode is not supported.`);
     }
     withBundleLock(dirname(path), () => {
-      const next = mutate(existsSync(path) ? readPersisted(path) : []);
+      const next = mutate(storeFileExists(path) ? readPersisted(path) : []);
       const serialized = JSON.stringify(next, null, 2);
       if (Buffer.byteLength(serialized, "utf8") > MAX_JSON_INPUT_SIZE) {
         throw new Error(`${options.fileName} would exceed the maximum size of ${MAX_JSON_INPUT_SIZE} bytes; not written.`);
@@ -72,7 +87,7 @@ export function createConnectionScopedBundleStore<T extends object>(options: {
       if (!path) return null;
       const key = `${path}\n${getBundleRecordIdentity().stableIdentity}`;
       if (cache && cache.key === key) return cache.value;
-      const value = existsSync(path)
+      const value = storeFileExists(path)
         ? readPersisted(path).filter(ownRecord).map(({ connectionIdentity: _identity, ...record }) => record as T)
         : [];
       cache = { key, value };

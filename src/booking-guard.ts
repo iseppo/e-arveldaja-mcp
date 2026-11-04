@@ -137,6 +137,21 @@ export interface CreateOnceOptions {
   liveness?: Liveness;
   /** Attempt to confirm/register the created journal (default true). */
   confirm?: boolean;
+  /**
+   * Checks a journal recovered after an ambiguous create (found by document
+   * number, so not necessarily the payload sent) before it is confirmed.
+   * Returns a problem description to refuse: the journal is then NOT
+   * confirmed and {@link RecoveredJournalRejectedError} is thrown.
+   */
+  validateRecovered?: (journal: Journal) => string | undefined;
+}
+
+/** A journal recovered after an ambiguous create failed the caller's `validateRecovered`; it was not confirmed. */
+export class RecoveredJournalRejectedError extends Error {
+  constructor(readonly journalId: number, readonly businessKey: string, readonly problem: string) {
+    super(`Journal ${journalId} (${businessKey}) recovered after an ambiguous create ${problem}; it was not confirmed.`);
+    this.name = "RecoveredJournalRejectedError";
+  }
 }
 
 export type CreateOnceResult =
@@ -340,6 +355,12 @@ export class BookingGuard {
       }
 
       if (journalId == null) throw BookingGuard.indeterminate("create", businessKey, createAmbiguity);
+
+      if (recovered && opts?.validateRecovered) {
+        this.api.journals.invalidateListCache();
+        const problem = opts.validateRecovered(await this.api.journals.get(journalId));
+        if (problem !== undefined) throw new RecoveredJournalRejectedError(journalId, businessKey, problem);
+      }
 
       if (!registered && wantConfirm) {
         try {

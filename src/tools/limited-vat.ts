@@ -11,7 +11,7 @@ import { isStrictDate, parseStrictMonth } from "../strict-date.js";
 import { roundMoney } from "../money.js";
 import { findAccountByName } from "../account-resolution.js";
 import { resolveBundleStorePath } from "../accounting-rules.js";
-import { BookingGuard } from "../booking-guard.js";
+import { BookingGuard, RecoveredJournalRejectedError } from "../booking-guard.js";
 import { standardVatRateOn, LIMITED_TAXPAYER_RULES, type TaxRuleReference } from "../estonian-tax-rules.js";
 import { buildLimitedVatGuidance, type LimitedVatGuidance } from "../limited-vat-guidance.js";
 import {
@@ -645,14 +645,31 @@ async function handleMonth(api: ApiContext, ctx: RuntimeSafetyContext, args: Mon
   }
   const state = build.state;
   const { to } = monthBounds(build.month);
-  const guard = await BookingGuard.load(api);
-  const booking = await guard.createJournalOnce(
-    { ns: "PKM", id: state.document_number.slice(4) },
-    { title: journalTitle(build.month, state.document_number), effective_date: to, postings: build.postings },
-    { confirm: true },
-  );
-  const journalId = booking.journal_id;
   const expected = postingSignature(build.postings);
+  const guard = await BookingGuard.load(api);
+  let booking;
+  try {
+    booking = await guard.createJournalOnce(
+      { ns: "PKM", id: state.document_number.slice(4) },
+      { title: journalTitle(build.month, state.document_number), effective_date: to, postings: build.postings },
+      {
+        confirm: true,
+        // A journal recovered by document number after a lost create is confirmed only when it is this booking.
+        validateRecovered: journal => {
+          if (journal.is_deleted === true) return "is deleted";
+          if ((journal.effective_date ?? "").slice(0, 10) !== to) return `is dated ${journal.effective_date}, not the approved ${to}`;
+          if (postingSignature(journal.postings ?? []).join() !== expected.join()) return "has different postings";
+          return undefined;
+        },
+      },
+    );
+  } catch (error) {
+    if (error instanceof RecoveredJournalRejectedError) {
+      return refuse("limited_vat_journal_conflict", `${error.message} Review that journal; nothing was recorded.`, { journal_ids: [error.journalId] });
+    }
+    throw error;
+  }
+  const journalId = booking.journal_id;
   if (booking.status === "duplicate" || booking.recovered === true) {
     api.journals.invalidateListCache();
     const existing = await api.journals.get(journalId);

@@ -391,6 +391,25 @@ describe("limited_vat review fixes (fail closed)", () => {
     expect(limitedVatStore.read()!.some(record => record.kind === "booking")).toBe(false);
   });
 
+  it("F4: a lost create whose recovered draft has the wrong date is never confirmed", async () => {
+    const state = baseState();
+    const { call, api } = setup(state);
+    await setLimited(call);
+    const args = { mode: "month", month: "2026-03", supplier_classifications: [{ clients_id: 10, classification: "counts" }] };
+    const dry = parseToolPayload<LimitedVatMonthPayload>((await call(args)).text);
+    const journals = api.journals as unknown as { create: (data: Partial<Journal>) => Promise<unknown> };
+    journals.create = async (data: Partial<Journal>) => {
+      state.writes.push(`create:${data.document_number}`);
+      state.journals.push({ ...(data as Journal), id: 777, effective_date: "2025-03-31", registered: false });
+      throw new Error("socket hang up"); // the create may have happened: indeterminate
+    };
+    const executed = await call({ ...args, execute: true, plan_handle: dry.plan_handle });
+    expect(executed.result.isError).toBe(true);
+    expect(executed.text).toContain("limited_vat_journal_conflict");
+    expect(state.writes).toEqual(["create:PKM-2026-03"]);
+    expect(state.journals.find(journal => journal.id === 777)!.registered).toBe(false);
+  });
+
   it("F5: includes an invoice dated months later but prepaid in the month", async () => {
     const state = baseState({
       invoices: [invoice(1, 10, "2026-07-15", 50, { transactions: [70] })],
