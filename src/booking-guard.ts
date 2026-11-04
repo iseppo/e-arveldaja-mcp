@@ -45,7 +45,7 @@ import { toUtcDay } from "./date-utils.js";
  * verifies ambiguous create/confirm outcomes without retrying a POST.
  */
 
-export type DocNamespace = "FX" | "LY" | "LY-FX" | "DIV" | "YEC";
+export type DocNamespace = "FX" | "LY" | "LY-FX" | "DIV" | "YEC" | "PKM";
 
 export interface DocKey {
   ns: DocNamespace;
@@ -55,7 +55,7 @@ export interface DocKey {
 
 /** "FX:123" / "LY:OR-EVN9C76R7A" */
 export function formatDocNumber(key: DocKey): string {
-  return key.ns === "DIV" ? `DIV-${key.id}` : `${key.ns}:${key.id}`;
+  return key.ns === "DIV" || key.ns === "PKM" ? `${key.ns}-${key.id}` : `${key.ns}:${key.id}`;
 }
 
 const KNOWN_NAMESPACES: readonly DocNamespace[] = ["FX", "LY", "LY-FX"];
@@ -70,6 +70,7 @@ const KNOWN_NAMESPACES: readonly DocNamespace[] = ["FX", "LY", "LY-FX"];
 export function parseDocNumber(raw: string | null | undefined): DocKey | undefined {
   if (typeof raw !== "string") return undefined;
   if (raw.startsWith("DIV-") && raw.length > 4) return { ns: "DIV", id: raw.slice(4) };
+  if (raw.startsWith("PKM-") && raw.length > 4) return { ns: "PKM", id: raw.slice(4) };
   const sep = raw.indexOf(":");
   if (sep <= 0) return undefined;
   const ns = raw.slice(0, sep);

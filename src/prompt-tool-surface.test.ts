@@ -167,6 +167,19 @@ describe("profile-specific prompt content", () => {
     expect(guided.promptTexts.get("month-end-close")).toContain("`run_accounting_report`");
   });
 
+  it("names limited_vat only where it is registered: standard/full prompts yes, guided prompts never", async () => {
+    const standard = await openSurface(SURFACES.find(surface => surface.name === "standard")!);
+    expect(standard.tools.has("limited_vat")).toBe(true);
+    for (const name of ["book-invoice", "receipt-batch", "month-end-close"]) {
+      expect(standard.promptTexts.get(name), `standard ${name}`).toContain("`limited_vat`");
+    }
+    for (const surfaceName of ["guided", "guided-sales", "custom-lean"]) {
+      const { tools, promptTexts } = await openSurface(SURFACES.find(surface => surface.name === surfaceName)!);
+      expect(tools.has("limited_vat")).toBe(false);
+      for (const [name, text] of promptTexts) expect(text, `${surfaceName} ${name}`).not.toContain("limited_vat");
+    }
+  });
+
   it("carries the plan handle into every execute step", async () => {
     for (const surface of SURFACES.filter(entry => !entry.setupMode)) {
       const { promptTexts } = await openSurface(surface);

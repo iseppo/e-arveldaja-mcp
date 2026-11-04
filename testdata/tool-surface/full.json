@@ -1,10 +1,10 @@
 {
   "profile": "full",
   "measurement": {
-    "toolCount": 147,
-    "toolsListBytes": 181634,
-    "descriptionsBytes": 27105,
-    "inputSchemasBytes": 119030,
+    "toolCount": 148,
+    "toolsListBytes": 184037,
+    "descriptionsBytes": 27725,
+    "inputSchemasBytes": 120582,
     "largestTool": {
       "name": "import_wise_transactions",
       "bytes": 5627
@@ -4725,6 +4725,99 @@
       },
       "name": "check_tax_free_limits",
       "title": "Check Tax-Free Limits"
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "description": "Limited taxpayer (piiratud maksukohustuslane, KMS § 21): a non-VAT company buying foreign services such as cloud/SaaS/API. mode guide = Estonian guidance (why, how to register, monthly routine); status = the company VAT status (none/limited/full) and, for none, foreign-service candidates in the books; set_status = store the status (preview → owner approval → execute:true + plan_handle); month = dry run for YYYY-MM (foreign invoices by service date, ECB rates, VAT per cost account, KMD figures), then execute:true + plan_handle creates and confirms journal PKM-YYYY-MM after owner approval. Never files the KMD.",
+      "execution": {
+        "taskSupport": "forbidden"
+      },
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "properties": {
+          "effective_from": {
+            "description": "set_status: first day the status applies (required for limited: the day the obligation arose)",
+            "type": "string"
+          },
+          "execute": {
+            "description": "set_status / month: false (default) = preview; true = execute an approved plan_handle",
+            "type": "boolean"
+          },
+          "liability_account": {
+            "description": "month: VAT liability account number (default: by name 'Käibemaksukohustis' / 'Arvestatud käibemaks' / 'Käibemaksuvõlg'; never guessed)",
+            "exclusiveMinimum": 0,
+            "maximum": 9007199254740991,
+            "type": "integer"
+          },
+          "mode": {
+            "description": "guide | status | set_status | month",
+            "enum": [
+              "guide",
+              "status",
+              "set_status",
+              "month"
+            ],
+            "type": "string"
+          },
+          "month": {
+            "description": "month: the month to compute (YYYY-MM)",
+            "pattern": "^\\d{4}-\\d{2}$",
+            "type": "string"
+          },
+          "plan_handle": {
+            "description": "set_status / month with execute:true: the handle from the preview",
+            "type": "string"
+          },
+          "status": {
+            "description": "set_status: the company VAT status",
+            "enum": [
+              "none",
+              "limited",
+              "full"
+            ],
+            "type": "string"
+          },
+          "supplier_classifications": {
+            "description": "month: owner decisions per foreign supplier (counts = KMS § 10 lg 5 service; excluded = not); saved on execute",
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "classification": {
+                  "enum": [
+                    "counts",
+                    "excluded"
+                  ],
+                  "type": "string"
+                },
+                "clients_id": {
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "clients_id",
+                "classification"
+              ],
+              "type": "object"
+            },
+            "maxItems": 200,
+            "type": "array"
+          }
+        },
+        "required": [
+          "mode"
+        ],
+        "type": "object"
+      },
+      "name": "limited_vat",
+      "title": "Limited VAT Taxpayer"
     },
     {
       "annotations": {

@@ -183,8 +183,10 @@ const COMPANY_OVERVIEW_VARIANTS: readonly PromptVariant[] = [
   ...surfaceVariants("compute_balance_sheet", "run_accounting_report"),
   { name: "sales", advertisedTools: ["compute_receivables_aging"] },
 ];
+const LIMITED_VAT_VARIANT: PromptVariant = { name: "limited-vat", advertisedTools: ["limited_vat"] };
 const MONTH_END_VARIANTS: readonly PromptVariant[] = [
   ...surfaceVariants("month_end_close_checklist", "run_accounting_report"),
+  LIMITED_VAT_VARIANT,
   { name: "sales", advertisedTools: ["confirm_sale_invoice"] },
   { name: "guided-sales", advertisedTools: ["manage_sale_invoice"], unlessTools: ["confirm_sale_invoice"] },
   { name: "year-end", advertisedTools: ["prepare_year_end_close"] },
@@ -306,7 +308,7 @@ const PROMPT_DEFINITIONS = [
     },
     featurePredicate: enabled,
     requiredTools: ["extract_pdf_invoice", "process_accounting_document"],
-    variants: surfaceVariants("extract_pdf_invoice", "process_accounting_document"),
+    variants: [...surfaceVariants("extract_pdf_invoice", "process_accounting_document"), LIMITED_VAT_VARIANT],
   },
   {
     name: "receipt-batch",
@@ -324,7 +326,7 @@ const PROMPT_DEFINITIONS = [
     },
     featurePredicate: enabled,
     requiredTools: ["receipt_batch"],
-    variants: surfaceVariants("list_account_dimensions", "receipt_batch"),
+    variants: [...surfaceVariants("list_account_dimensions", "receipt_batch"), LIMITED_VAT_VARIANT],
   },
   {
     name: "import-camt",
