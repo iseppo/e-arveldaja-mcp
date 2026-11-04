@@ -55,19 +55,39 @@ describe("API health probe on failed requests", () => {
     vi.restoreAllMocks();
   });
 
-  it("healthy probe keeps the API-key / allowed-IP troubleshooting on a 401", async () => {
-    const fetchMock = routedFetch(() => json(401), () => new Response("openapi: 3.0.0", { status: 200 }));
+  // LIVE FACT (verified 2026-11-04): the healthy live API answers the
+  // unauthenticated `GET https://rmp-api.rik.ee/v1/openapi.yaml` with 401 in
+  // ~0.2 s while an authenticated GET /v1/invoice_info on a valid key got 200.
+  // So a 401 (or any other non-5xx answer) to the probe means "reachable",
+  // never "down"; an all-401 incident looks the same and is not claimed either way.
+  it.each([
+    ["401 (the live healthy answer)", 401],
+    ["404", 404],
+    ["403", 403],
+    ["200", 200],
+    ["302", 302],
+  ])("probe answering %s is reachable: a 401 gets credential/IP/clock advice, never outage advice", async (_label, probeStatus) => {
+    const fetchMock = routedFetch(() => json(401), () => new Response(null, { status: probeStatus as number }));
     vi.stubGlobal("fetch", fetchMock);
 
     const error = await rejectionOf(new HttpClient(configFor(LIVE)).get("/clients"));
 
     expect(error.status).toBe(401);
+    expect(error.api_health).toBe("reachable");
+    expect(error.probe_status).toBe(probeStatus);
+    expect(error.probe_checked_at).toBe("2026-11-04T10:00:00.000Z");
+    expect(error.message).toContain(
+      "The e-arveldaja API server is responding, so this 401 most likely concerns this connection: " +
+      "check the API key (expired, replaced, or for a different company), the allowed IP address list, " +
+      "and this computer's clock.",
+    );
+    expect(error.message).toContain("it does not indicate an outage");
     expect(error.message).toContain("Troubleshooting 401 Unauthorized");
     expect(error.message).toContain("Lubatud IP-aadressid");
-    expect(error.api_health).toBe("healthy");
-    expect(error.probe_status).toBe(200);
-    expect(error.probe_checked_at).toBe("2026-11-04T10:00:00.000Z");
-    expect(error.recovery_hint).toContain("Check API credentials");
+    expect(error.message).toContain("Is this computer's clock correct?");
+    expect(error.message).not.toMatch(/appears to be down|retry in a few minutes/);
+    expect(error.recovery_hint).toContain("The e-arveldaja API server is responding");
+    expect(error.recovery_hint).not.toMatch(/appears to be down/);
     expect(error.next_actions?.map(a => a.tool)).toEqual(["get_setup_instructions", "list_connections"]);
   });
 
@@ -85,21 +105,59 @@ describe("API health probe on failed requests", () => {
     expect(init.body).toBeUndefined();
   });
 
-  it("failing probe replaces the credential advice with outage advice and drops setup next_actions", async () => {
-    const fetchMock = routedFetch(() => json(401), () => json(401));
+  const API_DOWN_TEXT =
+    "The e-arveldaja API server did not answer a health check either (timeout, network/TLS error or server error), " +
+    "so the API appears to be down or unreachable from this machine right now. " +
+    "This is probably not a credentials problem — do not change the API key; retry in a few minutes.";
+
+  const hangingProbe: Responder = (init) => new Promise<Response>((_resolve, reject) => {
+    init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+  });
+
+  it.each<[string, Responder, number | "network"]>([
+    ["503", () => json(503), 503],
+    ["500", () => json(500), 500],
+    ["a timeout", hangingProbe, "network"],
+    ["a network/TLS error", () => { throw new TypeError("fetch failed"); }, "network"],
+  ])("probe failing with %s on a 401 gives outage advice and drops setup next_actions", async (_label, probe, probeStatus) => {
+    const fetchMock = routedFetch(() => json(401), probe);
     vi.stubGlobal("fetch", fetchMock);
 
     const error = await rejectionOf(new HttpClient(configFor(LIVE)).get("/clients"));
 
     expect(error.status).toBe(401);
-    expect(error.api_health).toBe("rejecting_all");
-    expect(error.probe_status).toBe(401);
+    expect(error.api_health).toBe("unreachable");
+    expect(error.probe_status).toBe(probeStatus);
+    expect(error.message).toContain(API_DOWN_TEXT);
     expect(error.message).not.toContain("Troubleshooting 401 Unauthorized");
     expect(error.message).not.toContain("api.ipify.org");
-    expect(error.message).toContain("rejecting or failing every request right now, including unauthenticated ones");
-    expect(error.message).toContain("do not change them; retry later");
-    expect(error.recovery_hint).toContain("RIK outage or a temporary block of this machine's IP address");
+    expect(error.message).not.toContain("API server is responding");
+    expect(error.recovery_hint).toBe(API_DOWN_TEXT);
     expect(error.next_actions).toBeUndefined();
+  });
+
+  it("5xx request with an unreachable probe gets the outage advice as recovery hint", async () => {
+    const fetchMock = routedFetch(() => json(503), () => json(503));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const error = await rejectionOf(new HttpClient(configFor(LIVE)).post("/journals", {}));
+
+    expect(error.status).toBe(503);
+    expect(error.message).toBe("API request failed: POST /journals → 503");
+    expect(error.api_health).toBe("unreachable");
+    expect(error.recovery_hint).toBe(API_DOWN_TEXT);
+  });
+
+  it("5xx request with a reachable (401) probe keeps its own advice and claims no outage", async () => {
+    const fetchMock = routedFetch(() => json(502), () => json(401));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const error = await rejectionOf(new HttpClient(configFor(LIVE)).post("/journals", {}));
+
+    expect(error.status).toBe(502);
+    expect(error.message).toBe("API request failed: POST /journals → 502");
+    expect(error.api_health).toBe("reachable");
+    expect(error.recovery_hint ?? "").not.toMatch(/appears to be down|API server is responding/);
   });
 
   it("unreachable probe on a 5xx POST marks the error unreachable without changing its status or message", async () => {
@@ -122,7 +180,7 @@ describe("API health probe on failed requests", () => {
     const error = await rejectionOf(new HttpClient(configFor(LIVE)).post("/journals", {}));
 
     expect(error.status).toBe("network");
-    expect(error.api_health).toBe("healthy");
+    expect(error.api_health).toBe("reachable");
   });
 
   it("does not probe on errors that are not 401/5xx/network (e.g. 404)", async () => {
@@ -143,7 +201,7 @@ describe("API health probe on failed requests", () => {
 
     for (let i = 0; i < 5; i++) {
       const error = await rejectionOf(client.post("/journals", {}));
-      expect(error.api_health).toBe("rejecting_all");
+      expect(error.api_health).toBe("unreachable");
     }
     expect(probeCalls(fetchMock)).toBe(1);
 
@@ -231,7 +289,7 @@ describe("API health probe on failed requests", () => {
 
     expect(status.api_health_probes).toEqual([{
       server: LIVE,
-      api_health: "rejecting_all",
+      api_health: "reachable",
       probe_status: 403,
       checked_at: "2026-11-04T10:00:00.000Z",
     }]);

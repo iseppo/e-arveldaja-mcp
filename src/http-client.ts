@@ -38,9 +38,9 @@ export class HttpError extends Error {
   }>;
   /**
    * Set on 401 / 5xx / network failures from the unauthenticated health probe
-   * (`src/api-health.ts`): "healthy" = the API answers normally, so the failure
-   * is specific to this request/credentials; "rejecting_all" / "unreachable" =
-   * the API fails every request right now (outage or IP block).
+   * (`src/api-health.ts`): "reachable" = the server answered the probe (any
+   * non-5xx; 401 is normal), so a 401 points at this connection's credentials;
+   * "unreachable" = timeout, network/TLS error or 5xx (the API appears down).
    */
   readonly api_health?: ApiHealth;
   readonly probe_status?: number | "network" | null;
@@ -115,16 +115,30 @@ const MAX_RETRIES = 3;
 
 const UNAUTHORIZED_TROUBLESHOOTING =
   `\n\nTroubleshooting 401 Unauthorized:\n` +
-  `  1. Is the API key downloaded and configured? Check apikey*.txt or environment variables.\n` +
+  `  1. Is the API key downloaded and configured, and still valid? Check apikey*.txt or environment variables; ` +
+  `a key that has expired, was replaced by a new one, or belongs to another company is refused.\n` +
   `  2. Is this machine's public IP address allowed in e-arveldaja API settings?\n` +
   `     Find the current public IP locally (for example, open https://api.ipify.org in your browser) ` +
   `and add it to: e-arveldaja → Seaded → API võtmed → Lubatud IP-aadressid\n` +
-  `     Multiple IP addresses can be added, separated by ;`;
+  `     Multiple IP addresses can be added, separated by ;\n` +
+  `  3. Is this computer's clock correct? Requests are signed with the current time, so a wrong clock is refused.`;
 
+/**
+ * 401 while the unauthenticated probe got an answer. The live API answers that
+ * probe with 401 even when healthy, so this is no proof either way about an
+ * outage — point at the connection's own credentials, never claim an outage.
+ */
+const API_RESPONDING_401_ADVICE =
+  "The e-arveldaja API server is responding, so this 401 most likely concerns this connection: " +
+  "check the API key (expired, replaced, or for a different company), the allowed IP address list, " +
+  "and this computer's clock. Restart the MCP server after changing stored credentials. " +
+  "This check cannot rule out a server-side problem, but it does not indicate an outage.";
+
+/** Timeout / network / TLS error / 5xx on the probe too. */
 const API_DOWN_ADVICE =
-  "The e-arveldaja API is rejecting or failing every request right now, including unauthenticated ones. " +
-  "This is likely a RIK outage or a temporary block of this machine's IP address. " +
-  "The credentials are probably fine — do not change them; retry later.";
+  "The e-arveldaja API server did not answer a health check either (timeout, network/TLS error or server error), " +
+  "so the API appears to be down or unreachable from this machine right now. " +
+  "This is probably not a credentials problem — do not change the API key; retry in a few minutes.";
 const INITIAL_RETRY_DELAY_MS = 1_000;
 
 export class HttpClient {
@@ -411,12 +425,20 @@ export class HttpClient {
     } catch {
       outcome = undefined;
     }
-    const apiDown = outcome?.api_health === "rejecting_all" || outcome?.api_health === "unreachable";
+    const apiDown = outcome?.api_health === "unreachable";
+    const apiResponding = outcome?.api_health === "reachable";
     let message = error.message;
     let recovery_hint = error.recovery_hint;
     let next_actions = error.next_actions;
     if (status === 401) {
-      message += apiDown ? `\n\n${API_DOWN_ADVICE}` : UNAUTHORIZED_TROUBLESHOOTING;
+      if (apiDown) {
+        message += `\n\n${API_DOWN_ADVICE}`;
+      } else if (apiResponding) {
+        message += `\n\n${API_RESPONDING_401_ADVICE}${UNAUTHORIZED_TROUBLESHOOTING}`;
+        recovery_hint = API_RESPONDING_401_ADVICE;
+      } else {
+        message += UNAUTHORIZED_TROUBLESHOOTING;
+      }
     }
     if (apiDown) {
       recovery_hint = API_DOWN_ADVICE;

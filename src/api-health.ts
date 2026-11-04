@@ -1,21 +1,23 @@
 // API health probe + per-connection 401 brake.
 //
 // When an authenticated API request fails with 401, 5xx or a network/timeout
-// error, ONE unauthenticated GET is sent to the same API server to tell "our
-// credentials are wrong" apart from "the API is rejecting/failing everything"
-// (RIK outage, or a temporary server-side block of this machine's IP). The
-// probe only enriches the original error; it never changes its outcome.
+// error, ONE unauthenticated GET is sent to the same API server to tell "the
+// server is responding" apart from "the server is down or unreachable"
+// (timeout, network/TLS error, 5xx). An unauthenticated probe cannot tell a
+// healthy API apart from one that rejects every key: both may answer it with
+// 401. The probe only enriches the original error; it never changes its outcome.
 
 /**
- * Single place for the probe target and its healthy baseline.
- * PENDING LIVE VERIFICATION: `GET {baseUrl}/openapi.yaml` answering 200 without
- * auth headers is assumed to be the healthy baseline; confirm it on the live
- * and demo servers and adjust `path` / `healthyStatus` here if it differs.
+ * Single place for the probe target.
+ * LIVE-VERIFIED 2026-11-04: the healthy live API answers an unauthenticated
+ * `GET https://rmp-api.rik.ee/v1/openapi.yaml` with 401 in ~0.2 s (while an
+ * authenticated request on a valid key got 200). So any HTTP answer below 500
+ * means "reachable"; only a timeout, network/TLS error or 5xx means
+ * "unreachable" (the outages seen that day hung after TLS without answering).
  */
 export const API_HEALTH_PROBE = Object.freeze({
   /** Appended to the connection's base URL (which already ends in `/v1`). */
   path: "/openapi.yaml",
-  healthyStatus: 200,
   timeoutMs: 5_000,
   /** At most one probe per server per window; the outcome is reused inside it. */
   cacheWindowMs: 60_000,
@@ -28,7 +30,12 @@ export const AUTH_BRAKE = Object.freeze({
   cooldownMs: 60_000,
 });
 
-export type ApiHealth = "unreachable" | "rejecting_all" | "healthy" | "unknown";
+/**
+ * "reachable": the server answered the probe with a non-5xx status (401 is the
+ * normal answer). "unreachable": timeout, network/TLS error or 5xx.
+ * "unknown": no probe outcome.
+ */
+export type ApiHealth = "reachable" | "unreachable" | "unknown";
 
 export interface ApiHealthProbeOutcome {
   readonly api_health: ApiHealth;
@@ -68,7 +75,7 @@ async function runProbe(server: string): Promise<ApiHealthProbeOutcome> {
     try { await response.body?.cancel(); } catch { /* ignore */ }
     const status = response.status;
     return {
-      api_health: status === API_HEALTH_PROBE.healthyStatus ? "healthy" : "rejecting_all",
+      api_health: status >= 500 ? "unreachable" : "reachable",
       probe_status: status,
       checked_at: new Date().toISOString(),
     };
