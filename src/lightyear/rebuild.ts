@@ -133,7 +133,8 @@ export interface SimulateParams {
   chart?: { accounts: Account[]; dimensions: AccountDimension[] };
   /**
    * The statement export's own coverage (the file name's `-YYYY-MM-DD_YYYY-MM-DD`). Without it the rows
-   * prove coverage only from the opening when one is dated at or before it.
+   * prove coverage only from the opening when one is dated at or before it, and never its end: no
+   * month-end holding is reported without it.
    */
   statementPeriod?: { from: string; to: string } | null;
 }
@@ -221,7 +222,8 @@ export async function simulateLightyearYear(params: SimulateParams): Promise<Sim
     : allDays.length > 0 && allDays[0]! <= opening.as_of ? replayFrom : allDays.find(day => day > opening.as_of) ?? "9999-12-31";
   const coverageTo = params.statementPeriod && params.statementPeriod.to < params.to ? params.statementPeriod.to : params.to;
   const period = { from: coverageFrom, to: coverageTo };
-  const coversReplay = coverageFrom <= replayFrom && coverageTo >= params.to;
+  // Rows never prove where the export ends: without a declared period the end is unknown, so a gap.
+  const coversReplay = Boolean(params.statementPeriod) && coverageFrom <= replayFrom && coverageTo >= params.to;
 
   type Command = { reference: string; date: string; postings: Array<{ accounts_id: number; accounts_dimensions_id?: number; type: "D" | "C"; amount: number }>; poolEvent?: PendingPoolEvent };
   // As the booking tools: every posting of the projection is validated against
@@ -308,7 +310,7 @@ export async function simulateLightyearYear(params: SimulateParams): Promise<Sim
   const rates = await resolveFrozenFxOutcomes(monthEndDays.map(day => fxOutcomeKey("USD", day)), params.ecb);
   const events = store.records().filter((record): record is UsdPoolEvent => record.record === "event" && record.state === "committed");
   if (!coversReplay) {
-    warnings.push(`USD pool [usd_pool_statement_gap]: the statement covers ${coverageFrom}..${coverageTo}, not every day from ${replayFrom} through ${params.to}; no month-end USD holding is reported.`);
+    warnings.push(`USD pool [usd_pool_statement_gap]: the statement covers ${params.statementPeriod ? `${coverageFrom}..${coverageTo}` : `${coverageFrom}.. with no declared end`}, not every day from ${replayFrom} through ${params.to}; no month-end USD holding is reported.`);
   }
   const monthEnds = !coversReplay ? [] : monthEndDays.map((day): RebuildMonthEnd => {
     const until = endOfDaySeconds(day);

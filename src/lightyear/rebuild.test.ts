@@ -231,6 +231,21 @@ describe("simulateLightyearYear (plan Q5)", () => {
       expect(sim.warnings.some(warning => warning.includes("[usd_pool_statement_gap]") && warning.includes("month-end"))).toBe(true);
     });
 
+    it("an export without a declared period has no authoritative end: no month-end holding, gap warning", async () => {
+      // Opening-day EUR row (start proven), a January USD 50 purchase from the pool, a February report.
+      const januaryRows = [
+        buy("31/12/2025 12:00:00", "OR-TESTCOV0", "10.00", "0", "EUR"),
+        buy("10/01/2026 10:00:00", "OR-TESTCOV2", "50.00", "0"),
+      ];
+      const sim = await simulateLightyearYear({
+        statementCsv: lightyearStatementCsv(januaryRows), gainsCsv: null,
+        from: "2026-02-01", to: "2026-02-28", lightyearAccount: "TESTACCT1", opening, accounts: ACCOUNTS,
+        ecb: { fetch: rateFetch("1"), today: () => "2026-10-31", now: () => new Date("2026-10-31T08:00:00Z"), cache: new Map() },
+      });
+      expect(sim.monthEnds).toEqual([]);
+      expect(sim.warnings.some(warning => warning.includes("[usd_pool_statement_gap]") && warning.includes("month-end"))).toBe(true);
+    });
+
     it("an export covering the opening through the report end books the purchase and reports USD 50 / €50", async () => {
       const sim = await run({ from: "2026-01-01", to: "2026-02-28" });
       expect(sim.journals.map(journal => journal.document_number)).toEqual(["LY:OR-TESTCOV1"]);

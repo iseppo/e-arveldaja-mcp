@@ -4345,10 +4345,14 @@ const VAT_AMOUNT_LABEL_TOKEN_RE = /(?<![\p{L}\p{N}-])(?:käibemaks|km|vat|tax)(?
 // "ilma KM", "without VAT", "excl. VAT", "incl. VAT", "sisaldab käibemaksu": not a VAT amount label.
 const VAT_LABEL_QUALIFIER_BEFORE_RE = /(?:ilma|without|excl\.?|excluding|ex\.?|incl\.?|including|sisaldab)\s*$/i;
 
+// The amount directly after a VAT-amount label, with only separators between. A rate
+// ("KM 24%") or any other text after the label makes it an annotation: nothing is excluded.
+const VAT_LABEL_DIRECT_AMOUNT_RE = /^(?:[\s:€]|eur(?![\p{L}\p{N}]))*\d[\d\s.,]*?\d(?![\d%]|[.,]\d|\s*%)/iu;
+
 /**
- * A net-labelled row's amounts minus those printed after a standalone VAT label, up to the
- * row's next net label ("Netosumma 162,45  Käibemaks 30,02" gives 162,45). A value printed
- * in both places is kept; a row without such a VAT label keeps every amount.
+ * A net-labelled row's amounts minus the one printed directly after a standalone VAT label
+ * ("Netosumma 162,45  Käibemaks 30,02" gives 162,45). A value printed in both places is
+ * kept; a row without such a label-amount pair keeps every amount.
  */
 function amountsOutsideVatLabelSegments(line: string, amounts: readonly number[], documentContext: string): number[] {
   const netLabels = [...line.matchAll(new RegExp(RECEIPT_NET_LABEL_RE.source, "gi"))]
@@ -4359,7 +4363,10 @@ function amountsOutsideVatLabelSegments(line: string, amounts: readonly number[]
     const start = match.index;
     if (netLabels.some(label => start >= label.start && start < label.end)) continue;
     if (VAT_LABEL_QUALIFIER_BEFORE_RE.test(line.slice(0, start))) continue;
-    const end = netLabels.find(label => label.start > start)?.start ?? line.length;
+    const labelEnd = start + match[0].length;
+    const direct = VAT_LABEL_DIRECT_AMOUNT_RE.exec(line.slice(labelEnd));
+    if (!direct) continue;
+    const end = labelEnd + direct[0].length;
     scoped = scoped.slice(0, start) + " ".repeat(end - start) + scoped.slice(end);
     blanked = true;
   }

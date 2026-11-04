@@ -122,6 +122,15 @@ describe("mixed VAT rates are read as a breakdown (#5c)", () => {
     expect(prepareReceiptInvoiceItems(vatContext, extracted, suggestion, "Haldus").ok).toBe(false);
   });
 
+  it.each(["Netosumma (KM 24%) 100,00", "Netosumma (VAT 24%) 100,00"])(
+    "a VAT-rate annotation on a net row (%s) keeps its contradicting net: still held",
+    row => {
+      const extracted = extractedOf([...breakdownText().split("\n"), row].join("\n"));
+      expect(extracted.amount_consistency_issues?.length ?? 0).toBeGreaterThan(0);
+      expect(prepareReceiptInvoiceItems(vatContext, extracted, suggestion, "Haldus").ok).toBe(false);
+    },
+  );
+
   it("a single-rate invoice with a Käibemaksuta label still reads that label as its net", () => {
     const extracted = extractedOf(["Pood OÜ", "Arve nr 55", "Arve kuupäev 07.10.2026", "Käibemaksuta 100,00", "Käibemaks 24% 24,00", "Kokku 124,00"].join("\n"));
     expect(extracted).toMatchObject({ total_net: 100, total_vat: 24, total_gross: 124 });
