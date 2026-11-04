@@ -2,6 +2,7 @@ import type { Config } from "./config.js";
 import { createAuthHeaders } from "./auth.js";
 import { wrapUntrustedOcr } from "./mcp-json.js";
 import { buildConnectionFingerprint } from "./connection-fingerprint.js";
+import { AUTH_BRAKE, AuthBrake, probeApiHealth, type ApiHealth } from "./api-health.js";
 
 export type HttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 
@@ -35,6 +36,18 @@ export class HttpError extends Error {
     args?: Record<string, unknown>;
     why: string;
   }>;
+  /**
+   * Set on 401 / 5xx / network failures from the unauthenticated health probe
+   * (`src/api-health.ts`): "healthy" = the API answers normally, so the failure
+   * is specific to this request/credentials; "rejecting_all" / "unreachable" =
+   * the API fails every request right now (outage or IP block).
+   */
+  readonly api_health?: ApiHealth;
+  readonly probe_status?: number | "network" | null;
+  readonly probe_checked_at?: string;
+  /** `"auth_cooldown"`: refused locally by the consecutive-401 brake, nothing sent. */
+  readonly code?: "auth_cooldown";
+  readonly cooldown_seconds_remaining?: number;
 
   constructor(
     message: string,
@@ -46,6 +59,11 @@ export class HttpError extends Error {
       recovery_hint?: string;
       upstream_not_found?: boolean;
       next_actions?: Array<{ tool: string; args?: Record<string, unknown>; why: string }>;
+      api_health?: ApiHealth;
+      probe_status?: number | "network" | null;
+      probe_checked_at?: string;
+      code?: "auth_cooldown";
+      cooldown_seconds_remaining?: number;
     },
   ) {
     super(message);
@@ -61,6 +79,13 @@ export class HttpError extends Error {
     }
     if (options?.next_actions !== undefined) {
       this.next_actions = options.next_actions;
+    }
+    if (options?.api_health !== undefined) this.api_health = options.api_health;
+    if (options?.probe_status !== undefined) this.probe_status = options.probe_status;
+    if (options?.probe_checked_at !== undefined) this.probe_checked_at = options.probe_checked_at;
+    if (options?.code !== undefined) this.code = options.code;
+    if (options?.cooldown_seconds_remaining !== undefined) {
+      this.cooldown_seconds_remaining = options.cooldown_seconds_remaining;
     }
   }
 }
@@ -87,6 +112,19 @@ export interface RequestOptions {
 }
 
 const MAX_RETRIES = 3;
+
+const UNAUTHORIZED_TROUBLESHOOTING =
+  `\n\nTroubleshooting 401 Unauthorized:\n` +
+  `  1. Is the API key downloaded and configured? Check apikey*.txt or environment variables.\n` +
+  `  2. Is this machine's public IP address allowed in e-arveldaja API settings?\n` +
+  `     Find the current public IP locally (for example, open https://api.ipify.org in your browser) ` +
+  `and add it to: e-arveldaja → Seaded → API võtmed → Lubatud IP-aadressid\n` +
+  `     Multiple IP addresses can be added, separated by ;`;
+
+const API_DOWN_ADVICE =
+  "The e-arveldaja API is rejecting or failing every request right now, including unauthenticated ones. " +
+  "This is likely a RIK outage or a temporary block of this machine's IP address. " +
+  "The credentials are probably fine — do not change them; retry later.";
 const INITIAL_RETRY_DELAY_MS = 1_000;
 
 export class HttpClient {
@@ -96,6 +134,7 @@ export class HttpClient {
   private lastRequest = Promise.resolve();
   private nextAllowedAt = 0;
   private readonly minIntervalMs = 100; // Max ~10 req/sec
+  private readonly authBrake = new AuthBrake();
 
   constructor(
     private config: Config,
@@ -326,7 +365,79 @@ export class HttpClient {
     );
   }
 
+  /**
+   * Sends the request, guarded by the consecutive-401 brake. A 401, 5xx or
+   * network failure is enriched with one rate-limited health probe of the same
+   * server; the probe never changes whether or how the request failed.
+   */
   async request<T = unknown>(path: string, options: RequestOptions = {}): Promise<T> {
+    const method = options.method ?? "GET";
+    const remainingMs = this.authBrake.remainingMs();
+    if (remainingMs > 0) {
+      const seconds = Math.ceil(remainingMs / 1000);
+      throw new HttpError(
+        `API request refused locally: ${method} ${path} → auth_cooldown (${seconds} s remaining). ` +
+          `This connection got ${AUTH_BRAKE.threshold} consecutive 401 Unauthorized answers; further requests are ` +
+          `paused because repeated failed authentications can trigger a server-side lockout. Nothing was sent.`,
+        401,
+        method,
+        path,
+        {
+          code: "auth_cooldown",
+          cooldown_seconds_remaining: seconds,
+          recovery_hint: `Wait ${seconds} s before retrying; do not loop over connections or retry in a tight loop.`,
+        },
+      );
+    }
+    let result: T;
+    try {
+      result = await this.sendRequest<T>(path, options);
+    } catch (error) {
+      if (!(error instanceof HttpError)) throw error;
+      if (error.status === 401) this.authBrake.recordUnauthorized();
+      throw await this.withApiHealth(error);
+    }
+    this.authBrake.recordSuccess();
+    return result;
+  }
+
+  private async withApiHealth(error: HttpError): Promise<HttpError> {
+    const status = error.status;
+    const probed = status === 401 || status === "network" || status >= 500;
+    if (!probed) return error;
+    let outcome: Awaited<ReturnType<typeof probeApiHealth>> | undefined;
+    try {
+      outcome = await probeApiHealth(this.apiBaseUrl);
+    } catch {
+      outcome = undefined;
+    }
+    const apiDown = outcome?.api_health === "rejecting_all" || outcome?.api_health === "unreachable";
+    let message = error.message;
+    let recovery_hint = error.recovery_hint;
+    let next_actions = error.next_actions;
+    if (status === 401) {
+      message += apiDown ? `\n\n${API_DOWN_ADVICE}` : UNAUTHORIZED_TROUBLESHOOTING;
+    }
+    if (apiDown) {
+      recovery_hint = API_DOWN_ADVICE;
+      next_actions = undefined;
+    }
+    try {
+      return new HttpError(message, status, error.method, error.path, {
+        upstream_detail: error.upstream_detail,
+        recovery_hint,
+        upstream_not_found: error.upstream_not_found === true,
+        next_actions,
+        api_health: outcome?.api_health ?? "unknown",
+        probe_status: outcome?.probe_status ?? null,
+        ...(outcome ? { probe_checked_at: outcome.checked_at } : {}),
+      });
+    } catch {
+      return error;
+    }
+  }
+
+  private async sendRequest<T>(path: string, options: RequestOptions): Promise<T> {
     const { method = "GET", body, params } = options;
 
     // Build full URL: baseUrl already includes /v1
@@ -430,15 +541,8 @@ export class HttpClient {
             // Non-JSON error body — don't expose raw text
           }
 
-          if (response.status === 401) {
-            errorMessage += `\n\nTroubleshooting 401 Unauthorized:\n` +
-              `  1. Is the API key downloaded and configured? Check apikey*.txt or environment variables.\n` +
-              `  2. Is this machine's public IP address allowed in e-arveldaja API settings?\n` +
-              `     Find the current public IP locally (for example, open https://api.ipify.org in your browser) ` +
-              `and add it to: e-arveldaja → Seaded → API võtmed → Lubatud IP-aadressid\n` +
-              `     Multiple IP addresses can be added, separated by ;`;
-          }
-
+          // 401 troubleshooting text is added by request() once the health
+          // probe says whether the API is up (credentials) or down (outage).
           throw new HttpError(errorMessage, response.status, method, path, {
             upstream_detail: upstreamDetail,
             ...(upstreamNotFound ? { upstream_not_found: true } : {}),
