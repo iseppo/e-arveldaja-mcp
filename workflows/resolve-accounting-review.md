@@ -38,7 +38,7 @@ For owner-paid expense receipts:
 
 For CAMT journal reviews (`review_type: "camt_journal_review"`):
 - Compare the named journal with the statement row. If it books the row and the owner confirms, continue with `action: "prepare_action"` (see the `prepare-accounting-review-action` workflow, "CAMT journal reviews the owner has checked"), so later imports do not raise it again; nothing is booked.
-- If the movement is not booked yet, create the transaction manually after approval.
+- If the movement is not booked yet (the named journal is another payment), never use `prepare_action` for it: that acknowledgement records that the journal books this row, the opposite decision.<!-- E_ARVELDAJA_FEATURE_START:standard --> Create the missing transaction inline after approval with `create_transaction` (as in the **Import CAMT** workflow).<!-- E_ARVELDAJA_FEATURE_END:standard --><!-- E_ARVELDAJA_FEATURE_START:guided --> This profile cannot create it: keep the item unresolved and route it to the `standard` or `full` profile (`EARVELDAJA_PROFILE`).<!-- E_ARVELDAJA_FEATURE_END:guided -->
 
 ### Step 3: Keep the interaction minimal
 
@@ -47,4 +47,4 @@ For CAMT journal reviews (`review_type: "camt_journal_review"`):
 
 ### Step 4: When the review item is already understood
 
-If the next step is clear, continue with `continue_accounting_workflow` and `action: "prepare_action"` instead of inventing your own action plan.
+If the next step is clear, continue with `continue_accounting_workflow` and `action: "prepare_action"` instead of inventing your own action plan — for a CAMT journal review only after the owner has confirmed that the existing journal books this movement.

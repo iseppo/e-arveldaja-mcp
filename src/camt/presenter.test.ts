@@ -239,7 +239,9 @@ describe("CAMT journal reviews and automatic matches in the compact summary", ()
     const native = summary.warnings?.find(w => w.code === "camt_native_import_match");
     expect(native?.item_id).toBe("9001");
     expect(native?.message).toContain("journal 9101");
-    expect(native?.message).toContain("If wrong (a different movement): correct or delete transaction 9001, then re-run the preview.");
+    expect(native?.message).toContain("A different movement does not make transaction 9001 wrong: keep it if it books another real movement and book this row separately;");
+    expect(native?.message).toContain("correct or delete transaction 9001 only once it is shown to be erroneous or a duplicate, then re-run the preview.");
+    expect(native?.message).not.toMatch(/different movement\): correct or delete/);
   });
 });
 

@@ -18,6 +18,7 @@ import {
   type ResolveSupplierNameConfirmationPayload,
   type ResolveSupplierNotFoundPayload,
   type ResolveSupplierRefusalPayload,
+  type ResolveSupplierReviewPayload,
   type ResolveSupplierSelfMatchPayload,
   type SuggestBookingPayload,
   type ValidateInvoiceDataPayload,
@@ -26,7 +27,7 @@ import { sha256Hex } from "./receipt-inbox-files.js";
 import { wrapUntrustedOcr, MAX_UNTRUSTED_TEXT_CHARS, UNTRUSTED_OCR_START_PREFIX } from "../mcp-json.js";
 import { parseToolPayload } from "../__fixtures__/mcp-response.js";
 import { ESTONIAN_VAT_METADATA, vatSourceById } from "../estonian-tax-rules.js";
-import { ARIREGISTER_AUTOCOMPLETE_TELIA } from "../__fixtures__/ariregister-autocomplete.js";
+import { ARIREGISTER_AUTOCOMPLETE_DELETED, ARIREGISTER_AUTOCOMPLETE_TELIA } from "../__fixtures__/ariregister-autocomplete.js";
 import { toolMetadataText } from "../__fixtures__/tool-metadata.js";
 import { textHazardSignals } from "./document-text-hazards.js";
 import { LEADER_CELL_LINES, TEXT_HAZARD_EXPECTED, parseOfLines, textHazardParse, type TextHazardFixture } from "../__fixtures__/document-reading/text-hazard-parses.js";
@@ -1754,6 +1755,58 @@ describe("resolve_supplier self-supplier guard", () => {
 
     expect(payload.found).toBe(true);
     expect(payload.match_type).toBe("vat_no");
+  });
+});
+
+// The resolver's manual-review holds (deleted registry company, deactivated
+// client, ambiguous / conflicting identity) reach the caller as a review
+// payload, never as ordinary "not found, set auto_create" guidance.
+describe("resolve_supplier manual-review holds", () => {
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  it("a company deleted from the business register (status K) comes back as a review hold and creates nothing", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      headers: { get: () => "256" },
+      text: () => Promise.resolve(JSON.stringify(ARIREGISTER_AUTOCOMPLETE_DELETED)),
+    }));
+    const create = vi.fn();
+    const { handler } = setupPdfWorkflowTool("resolve_supplier", {
+      clients: { listAll: vi.fn().mockResolvedValue([]), create },
+      readonly: { getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }) },
+    });
+
+    for (const autoCreate of [false, true]) {
+      const text = (await handler({ reg_code: "10234957", auto_create: autoCreate })).content[0]!.text;
+      const res = parseToolPayload<ResolveSupplierReviewPayload>(text);
+      expect(res).toMatchObject({ found: false, created: false, requires_manual_review: true });
+      expect(res.reason).toContain("deleted from the Estonian business register (status K)");
+      expect(res.registry_data?.status).toBe("K");
+      expect(res.suggestion).not.toContain("auto_create=true");
+      expect(text).not.toContain("Client not found");
+    }
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("a registry-code hit on a deactivated client names it for reactivation instead of offering a new supplier", async () => {
+    const create = vi.fn();
+    const { handler } = setupPdfWorkflowTool("resolve_supplier", {
+      clients: {
+        listAll: vi.fn().mockResolvedValue([
+          { id: 41, name: "Vana Tarnija OÜ", code: "10234957", is_deleted: false, is_active: false, deactivated_date: "2026-01-31" },
+        ]),
+        create,
+      },
+      readonly: { getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }) },
+    });
+
+    const res = parseToolPayload<ResolveSupplierReviewPayload>(
+      (await handler({ reg_code: "10234957", auto_create: true })).content[0]!.text,
+    );
+    expect(res).toMatchObject({ found: false, created: false, requires_manual_review: true, code: "supplier_client_deactivated" });
+    expect(res.reason).toContain("deactivated client (id 41)");
+    expect(res.suggestion).toContain("reactivate_client");
+    expect(create).not.toHaveBeenCalled();
   });
 });
 

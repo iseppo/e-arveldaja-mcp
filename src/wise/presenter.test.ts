@@ -208,12 +208,15 @@ describe("renderWiseImportCompact — automatic matches", () => {
     expect(summary.counts).toMatchObject({ skipped: 7, duplicates: 1, auto_matched: 6, errors: 0 });
     const untagged = summary.warnings?.filter(w => w.code === "wise_untagged_ledger_unique") ?? [];
     expect(untagged.map(w => w.item_id)).toEqual(["CARD_TRANSACTION-0", "CARD_TRANSACTION-1", "CARD_TRANSACTION-2"]);
-    expect(untagged[0]!.message).toContain("If wrong: if it is a different movement, correct or delete transaction 500, then re-run the preview.");
+    expect(untagged[0]!.message).toContain("A different movement does not make transaction 500 wrong: keep it if it books another real movement and book this row separately;");
+    expect(untagged[0]!.message).toContain("correct or delete transaction 500 only once it is shown to be erroneous or a duplicate, then re-run the preview.");
+    expect(untagged[0]!.message).not.toMatch(/different movement, correct or delete/);
     expect(summary.warnings?.find(w => w.code === "wise_untagged_ledger_unique_more")?.message)
       .toMatch(/^1 more wise_untagged_ledger_unique item\(s\) not shown; .*get_execution_plan_page.*PLAN-HANDLE-XYZ.*exclusions/);
     const legacy = summary.warnings?.filter(w => w.code === "wise_transfer_journal_unique_legacy") ?? [];
     expect(legacy.map(w => w.message.split(":")[0])).toEqual(["Row not created", "Fee row not created"]);
-    expect(legacy[0]!.message).toContain("correct or delete journal 7100");
+    expect(legacy[0]!.message).toContain("keep it if it books another real movement and book this row separately;");
+    expect(legacy[0]!.message).toContain("correct or delete journal 7100 only once it is shown to be erroneous or a duplicate");
   });
 
   it("keeps automatic matches and counts every omission when 90 ownership reviews push the summary over the budget", () => {

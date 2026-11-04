@@ -129,8 +129,9 @@ describe("setup prompts handle secrets (core prompt review 2026-10-30)", () => {
     const steps = [
       "Keep the source `apikey*.txt` in place until the restarted server is proven to use the stored credential:",
       "1. If `EARVELDAJA_API_KEY_FILE` is set in the MCP launch configuration or environment, remove it there first",
-      "2. Restart the MCP server with the source file still in place.",
-      "3. Verify the stored credential the import reported (`env_file`, `storage_scope`, `target`; `list_stored_credentials` shows the stored inventory) and make one authenticated read that returns the intended company's data.",
+      "2. Before restarting, record the stored credential the import reported (`env_file`, `storage_scope`, `target`) and, while it is still advertised, the stored inventory from `list_stored_credentials`",
+      "Then restart the MCP server with the source file still in place.",
+      "3. After the restart, refresh the tool list. Use `list_stored_credentials` only if it is advertised; otherwise check the recorded `env_file` / `storage_scope` / `target`. Either way, make one authenticated read that returns the intended company's data.",
       "A successful restart or a non-empty `list_connections` is not proof",
       "4. Only then suggest moving the `apikey*.txt` out of the working directory or deleting it.",
       "If the stored credential's use cannot be established, keep the file",
@@ -166,5 +167,56 @@ describe("reconcile-bank duplicate and document-reference handling (fix review 2
     }
     expect(standard).toContain("`result.document_reference_candidates`");
     expect(guided).toContain("`document_reference_candidate` warnings");
+  });
+});
+
+describe("astra prompt review 2026-11-04", () => {
+  it("never deletes a stored entry just because the owner says an automatic match is a different movement", () => {
+    for (const name of ["import-camt", "import-wise"]) {
+      for (const profile of ["standard", "guided"] as const) {
+        const body = render(name, profile);
+        expect(body, `${name}/${profile}`).toContain("that alone does not make the stored transaction");
+        expect(body, `${name}/${profile}`).toContain("never delete or change it on that basis");
+        expect(body, `${name}/${profile}`).toContain("only once it is shown to be erroneous or a duplicate");
+        expect(body, `${name}/${profile}`).not.toContain("the undo is to correct or delete");
+      }
+    }
+    expect(render("import-camt", "guided")).not.toContain("create_transaction");
+  });
+
+  it("books a foreign-currency GL confirm at the EUR base amount and keeps a guided single-ID lookup from inferring no match", () => {
+    expect(render("reconcile-bank", "standard"))
+      .toContain("The distribution `amount` is the transaction amount only for a EUR transaction (`cl_currencies_id` EUR).");
+    const guided = render("reconcile-bank", "guided");
+    expect(guided).toContain("never report \"no match\" from its absence");
+    expect(guided).not.toContain("If no match exists for that transaction, report that and stop.");
+  });
+
+  it("checks the registration of already-attached receipts on guided and reads their invoice id from the right place", () => {
+    expect(render("receipt-batch", "guided")).toContain("neither proves the invoice is registered");
+    const standard = render("receipt-batch", "standard");
+    expect(standard).toContain("`result.results[].already_attached_to.invoice_id`");
+    expect(standard).toContain("`result.already_booked.ids`");
+  });
+
+  it("new-supplier re-checks final identifiers and stops on review holds and deactivated clients", () => {
+    const body = render("new-supplier", "standard");
+    expect(body).toContain("First re-check duplicates with the final identifiers");
+    expect(body).toContain("`requires_manual_review: true`: nothing was created and this is NOT an ordinary not-found result");
+    expect(body).toContain("`registry_data.status: \"K\"`");
+    expect(body).toContain("call `reactivate_client` with its ID");
+    expect(body.indexOf("First re-check duplicates")).toBeLessThan(body.indexOf("present one approval card"));
+  });
+
+  it("a CAMT journal review for another payment is never acknowledged, and guided keeps it open", () => {
+    const guided = render("resolve-accounting-review", "guided");
+    expect(guided).toContain("never use `prepare_action` for it");
+    expect(guided).toContain("keep the item unresolved");
+    expect(guided).not.toContain("create_transaction");
+    expect(render("resolve-accounting-review", "standard")).toContain("`create_transaction`");
+  });
+
+  it("month-end describes missing-document counts as attachment-only", () => {
+    expect(render("month-end-close", "guided")).toContain("The counts are attachment-only");
   });
 });

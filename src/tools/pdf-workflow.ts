@@ -437,6 +437,22 @@ export type ResolveSupplierCreatedPayload = {
   registry_data?: ResolveSupplierRegistryData | null;
 };
 
+/**
+ * resolve_supplier: the resolver held the result for manual review (company
+ * deleted from the business register, deactivated client, ambiguous or
+ * conflicting identity). Nothing was created.
+ */
+export type ResolveSupplierReviewPayload = {
+  found: false;
+  created: false;
+  requires_manual_review: true;
+  code?: "supplier_client_deactivated";
+  match_type?: "strong_identifier_conflict";
+  reason?: string;
+  registry_data?: ResolveSupplierRegistryData | null;
+  suggestion: string;
+};
+
 export type ResolveSupplierNotFoundPayload = {
   found: false;
   created: false;
@@ -450,6 +466,7 @@ export type ResolveSupplierPayload =
   | ResolveSupplierNameConfirmationPayload
   | ResolveSupplierFoundPayload
   | ResolveSupplierCreatedPayload
+  | ResolveSupplierReviewPayload
   | ResolveSupplierNotFoundPayload;
 
 /**
@@ -783,6 +800,27 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext, run
               suggestion:
                 "The supplied registry code / VAT number matches the active company's own identifiers — refusing to resolve or create a supplier that is the buyer itself. Re-check the supplier fields extracted from the invoice header before booking.",
             } satisfies ResolveSupplierSelfMatchPayload),
+          }],
+        };
+      }
+
+      if (resolution.requires_manual_review) {
+        const deactivated = resolution.code === "supplier_client_deactivated";
+        return {
+          content: [{
+            type: "text",
+            text: toMcpJson({
+              found: false,
+              created: false,
+              requires_manual_review: true,
+              ...(deactivated ? { code: "supplier_client_deactivated" as const } : {}),
+              ...(resolution.match_type === "strong_identifier_conflict" ? { match_type: "strong_identifier_conflict" as const } : {}),
+              ...(resolution.reason !== undefined ? { reason: resolution.reason } : {}),
+              ...(resolution.registry_data !== undefined ? { registry_data: renderRegistryDataForDisplay(resolution.registry_data) } : {}),
+              suggestion: deactivated
+                ? "Nothing was created. The matching client is deactivated: after the user approves, reactivate it with reactivate_client and re-read it. Never create a replacement supplier for it."
+                : "Nothing was created. Explain the reason to the user and resolve the supplier's identity or registry status before creating or booking anything; auto_create does not lift this hold.",
+            } satisfies ResolveSupplierReviewPayload),
           }],
         };
       }

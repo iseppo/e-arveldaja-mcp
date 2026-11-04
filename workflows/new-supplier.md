@@ -36,7 +36,9 @@ If registry code provided: call `find_client_by_code`:
 If name provided: call `search_client`:
 - `name`: the supplier name
 
-For a registry-code hit, first rule out that the code is this company's own (for example the buyer's code read from an invoice header): call `resolve_supplier` with `reg_code` and `auto_create: false`. If it returns `self_match_blocked: true`, the code belongs to the active company itself — do not accept the hit as the supplier; tell the user, get the supplier's real registry code, and start again from step 1. Otherwise the hit is authoritative — show the existing client details and stop. Do not create a duplicate.
+For a registry-code hit, first rule out that the code is this company's own (for example the buyer's code read from an invoice header): call `resolve_supplier` with `reg_code` and `auto_create: false`. If it returns `self_match_blocked: true`, the code belongs to the active company itself — do not accept the hit as the supplier; tell the user, get the supplier's real registry code, and start again from step 1. If `resolve_supplier` returns `requires_manual_review: true` instead, follow its step 3 branch. Otherwise the hit is authoritative — show the existing client details and stop. Do not create a duplicate.
+
+A hit with `is_active: false` or a `deactivated_date` is a deactivated client: it is still that supplier, not a free slot. Never create a replacement for it; tell the user, and after approval call `reactivate_client` with its ID, re-read it with `get_client` and stop.
 
 For name-based search, treat any hit as a candidate, not a decision: show the matched client(s) to the user and ask whether one of them is the same supplier. If the user confirms the match, stop and do not create a duplicate. Otherwise continue to step 3 to register the new supplier.
 
@@ -51,6 +53,7 @@ Call `resolve_supplier`:
 Branch on the result before anything else:
 - `found: true`: the supplier already exists (it can match a stored name that step 2's search missed, e.g. `OpenAI Inc` for `OpenAI, Inc.`). Show the returned `client` and its `match_type`. A registry-code or VAT match is the same supplier — stop and do not create a duplicate. For a name-based match, ask the user whether it is the same supplier; if yes, stop and do not create a duplicate. Continue to step 4 only when the user says it is a different supplier, and name that existing client on the step-5 approval card.
 - `self_match_blocked: true`: the registry code or VAT number is the active company's own. Nothing can be created with it; ask the user for the supplier's real identifiers and start again from step 1.
+- `requires_manual_review: true`: nothing was created and this is NOT an ordinary not-found result — stop before any approval card and explain the `reason`. With `code: "supplier_client_deactivated"` the supplier exists as a deactivated client: offer the reactivation from step 2, never a new client. With `registry_data.status: "K"` the company is deleted from the business register: tell the user, and continue only once the user has resolved the identity/status concern (for example the correct, live registry code). Otherwise (ambiguous or conflicting identity) resolve which existing client or legal entity is meant with the user first.
 
 For Estonian registry codes, the tool queries the business registry (äriregister.rik.ee) for the official company name and address. Show this data to the user for review. There is no registry lookup for foreign suppliers — use the details the user or the invoice provides, and remember the foreign identity attestation above.
 
@@ -69,10 +72,12 @@ Ask the user for any details to add:
 
 ## Step 5: Preview and ask for approval
 
+First re-check duplicates with the final identifiers: call `resolve_supplier` again with `auto_create: false` and every identifier now known (`name`, `reg_code`, `vat_no`, `iban`, `country`), and apply the step 3 branches again — a VAT number or IBAN added in step 4 can match an existing supplier the name missed. Repeat this whenever an identifying detail changes.
+
 Before creating anything, present one approval card:
 - supplier name
 - registry code and country
-- duplicate-check result (step 2 and step 3), including any existing client the user said is a different supplier
+- duplicate-check result (step 2, step 3 and the final re-check), including any existing client the user said is a different supplier
 - registry/address data being used
 - bank account, VAT number, email, phone, and address fields that will be stored
 - side effect: create one supplier client record in e-arveldaja
