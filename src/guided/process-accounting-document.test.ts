@@ -13,6 +13,7 @@ import { FILE_REFERENCE_OPERATIONS } from "../file-reference-store.js";
 import { parseMcpResponse } from "../mcp-json.js";
 import { InvoiceCreationError } from "../api/purchase-invoices.api.js";
 import { installLegacyDraftReadback } from "../__fixtures__/document-reading/legacy-draft.js";
+import { cacheRegistryName, clearRegistryNameCache } from "../receipts/registry-name-cache.js";
 
 vi.mock("../audit-log.js", () => ({ logAudit: vi.fn() }));
 vi.mock("../document-parser.js", () => ({ parseDocument: vi.fn() }));
@@ -141,6 +142,30 @@ describe("process_accounting_document", () => {
     expect(text).not.toContain("resolve_supplier");
     expect(text).not.toContain("create_purchase_invoice_from_pdf");
     expect(text).not.toContain("parseMcpResponse");
+  });
+
+  it("prepare carries the business-register note, sandboxed, and keeps the extracted supplier (review 2026-11-04 MINOR 4)", async () => {
+    // The register names another company for the printed code; that company is printed without a role label.
+    cacheRegistryName(REG_CODE, "Näidis Stuudio OÜ");
+    mockedParseDocument.mockResolvedValue({
+      text: ["Näidis Finants AS", `Reg. nr ${REG_CODE}`, "Näidis Stuudio OÜ", "Arve INV-1", "Summa 12.00 EUR"].join("\n"),
+      pageCount: 1, ocrPartialFailure: false, result: { pages: [{ pageNum: 1, textItems: [] }] },
+    } as unknown as Awaited<ReturnType<typeof parseDocument>>);
+    try {
+      const { path } = writeTempPdf();
+      const { api, handler } = setup({ clientRows: [], purchaseInvoiceRows: [] });
+      const payload = parseToolPayload<ProcessAccountingDocumentPreviewPayload>((await handler({ mode: "prepare", file_path: path })).content[0]!.text);
+      const notes = payload.summary.extraction.extraction_notes ?? [];
+      const registryNote = notes.find(note => note.includes("Näidis Stuudio OÜ"));
+      expect(registryNote).toContain(`registry code ${REG_CODE}`);
+      expect(registryNote).toMatch(/^<<UNTRUSTED_OCR_START:([0-9a-f]+)>>\n[^]*\n<<UNTRUSTED_OCR_END:\1>>$/);
+      expect(payload.summary.extraction.supplier_name).toContain("Näidis Finants AS");
+      expect(payload.summary.extraction.supplier_reg_code).toBe(REG_CODE);
+      expect(api.clients.create).not.toHaveBeenCalled();
+      expect(api.purchaseInvoices.createAndSetTotals).not.toHaveBeenCalled();
+    } finally {
+      clearRegistryNameCache();
+    }
   });
 
   it("booking-binding prepare refuses totals createAndSetTotals would refuse (purchase_totals_mismatch, no handle)", async () => {

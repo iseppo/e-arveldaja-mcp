@@ -2491,14 +2491,16 @@ function extractAmountsFromTextWithMetadata(text: string): ExtractedAmountsWithM
     }
 
     // A net-labelled summary row. Only a positively identified item row is
-    // left out: its own money immediately followed by its own exempt marker
-    // ("Remondifond … 17.70 0.00 KM-ta 17.70", the #5c item line). Any other
-    // money before the label ("Ettemaks 10,00 Netosumma 200,00") keeps it.
+    // left out: its net, a zero VAT and its own exempt marker, then the same
+    // amount as its gross ("Remondifond … 17.70 0.00 KM-ta 17.70", the #5c
+    // item line). Any other money before the label ("Ettemaks 10,00 KM-ta
+    // 200,00") keeps it, and every amount on the row is a candidate
+    // ("Netosumma 100,00 Vahesumma 162,45" keeps 100,00).
     const netLabel = classified.hasNetLikeLabel ? RECEIPT_NET_LABEL_RE.exec(classified.line) : null;
     const isExemptItemRow = netLabel !== null && MIXED_VAT_EXEMPT_ITEM_MARKER_RE.test(netLabel[0]) &&
-      MIXED_VAT_MONEY_IMMEDIATELY_BEFORE_RE.test(classified.line.slice(0, netLabel.index));
+      isExemptItemRowAround(classified.line.slice(0, netLabel.index), classified.line.slice(netLabel.index + netLabel[0].length));
     if (!classified.blockedAsReference && netLabel && classified.amounts.length > 0 && !isExemptItemRow) {
-      netLabelAmounts.push(Math.max(...classified.amounts));
+      netLabelAmounts.push(...classified.amounts);
     }
 
     if (
@@ -4332,7 +4334,15 @@ const MIXED_VAT_RATED_LINE_RE = new RegExp(String.raw`(?:^|\s)käibemaksuga\s*(\
 const MIXED_VAT_MONEY_BEFORE_RE = /\d[.,]\d{2}(?!\d)/;
 // An item line's exempt marker directly after its own money ("17.70 0.00 KM-ta").
 const MIXED_VAT_EXEMPT_ITEM_MARKER_RE = /^(?:km-ta|\(km-ta\)|käibemaksuta)$/i;
-const MIXED_VAT_MONEY_IMMEDIATELY_BEFORE_RE = /\d[.,]\d{2}\s*$/;
+const MIXED_VAT_ITEM_NET_ZERO_VAT_BEFORE_RE = /(?:^|\s)(\d+[.,]\d{2})\s+0[.,]00\s*$/;
+const MIXED_VAT_ITEM_GROSS_AFTER_RE = /^\s*(?:€|eur)?\s*(\d+[.,]\d{2})\s*(?:€|eur)?\s*$/i;
+
+/** An exempt item row around its marker: "17.70 0.00" before it and the same 17.70 as the row's only figure after it. */
+function isExemptItemRowAround(before: string, after: string): boolean {
+  const net = MIXED_VAT_ITEM_NET_ZERO_VAT_BEFORE_RE.exec(before)?.[1];
+  const gross = MIXED_VAT_ITEM_GROSS_AFTER_RE.exec(after)?.[1];
+  return net !== undefined && gross !== undefined && net.replace(",", ".") === gross.replace(",", ".");
+}
 
 /**
  * A per-rate VAT breakdown printed under an invoice (#5c): a non-taxed subtotal line, one or more

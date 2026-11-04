@@ -15,6 +15,7 @@ import { logAudit } from "../audit-log.js";
 import { isProjectTransaction } from "../transaction-status.js";
 import { signedBankTransactionDirection } from "../bank-transaction-direction.js";
 import { isNotFoundHttpError } from "../http-client.js";
+import { isLiveClient } from "../api/clients.api.js";
 import type { AccountDimension, BankAccount, Journal } from "../types/api.js";
 import { BookingGuard } from "../booking-guard.js";
 import { normalizeCompanyName } from "../company-name.js";
@@ -194,6 +195,8 @@ export interface ApplyClassificationGroupResult {
   status: "applied" | "skipped" | "dry_run_preview" | "failed";
   notes: string[];
   transactions: number[];
+  /** An account_distribution group: its rows are confirmed straight to a GL account; no purchase invoice is created. */
+  direct_confirmation?: true;
   created_invoice_ids?: number[];
   linked_transaction_ids?: number[];
   partial_mutations?: PartialClassificationMutation[];
@@ -492,14 +495,17 @@ function historyLookup(history: CounterpartyBookingHistory, transaction: Transac
  * counterparty (two or more, identified by client, IBAN or legal form — never by
  * name alone) went straight to one account that is not another own bank account.
  * The row itself must be EUR (the distribution carries the row's own amount) and
- * have a client to book under (its own, or the history's single client).
+ * have a client to book under (its own, or the history's single client) that
+ * exists in the freshly read client list and is live (not deleted or deactivated).
  */
-function historyApplicable(history: CounterpartyHistorySuggestion, transaction: Transaction): boolean {
+function historyApplicable(history: CounterpartyHistorySuggestion, transaction: Transaction, clients: readonly Client[]): boolean {
+  const clientsId = transaction.clients_id ?? history.clients_id;
   return history.consistent &&
     history.own_bank_account !== true &&
     history.identity !== "name_only" &&
     (transaction.cl_currencies_id ?? "EUR").trim().toUpperCase() === "EUR" &&
-    (transaction.clients_id ?? history.clients_id) != null;
+    clientsId != null &&
+    clients.some(client => client.id === clientsId && isLiveClient(client));
 }
 
 /** The distribution a plan-bound apply confirms the row with, re-derived from fresh history. */
@@ -514,9 +520,11 @@ interface HistoryDistribution {
   last_journal_ids: number[];
 }
 
-function historyDistributionFor(history: CounterpartyBookingHistory, transaction: Transaction): HistoryDistribution | undefined {
+function historyDistributionFor(
+  history: CounterpartyBookingHistory, transaction: Transaction, clients: readonly Client[],
+): HistoryDistribution | undefined {
   const suggestion = historyLookup(history, transaction).suggestion;
-  if (!suggestion || !historyApplicable(suggestion, transaction)) return undefined;
+  if (!suggestion || !historyApplicable(suggestion, transaction, clients)) return undefined;
   const clientsId = (transaction.clients_id ?? suggestion.clients_id)!;
   return {
     account_id: suggestion.account_id,
@@ -897,6 +905,7 @@ class ClassificationOperationsImpl implements ClassificationOperations {
       status,
       notes,
       transactions: transactionIds,
+      direct_confirmation: true,
       ...(dryRun ? {} : { linked_transaction_ids: linkedTransactionIds }),
     };
   }
@@ -991,7 +1000,7 @@ class ClassificationOperationsImpl implements ClassificationOperations {
         // A consistent history is offered for the plan-bound apply; anything
         // weaker (a recent run over a mixed past, a name-only or own-bank match)
         // stays a review-only hint.
-        const applicable = group.transactions.every(transaction => historyApplicable(history, transaction));
+        const applicable = group.transactions.every(transaction => historyApplicable(history, transaction, clients));
         suggestion = historyBookingSuggestion(history, accounts, applicable);
         applyMode = applicable ? "account_distribution" : "review_only";
       } else if (
@@ -1182,7 +1191,7 @@ class ClassificationOperationsImpl implements ClassificationOperations {
             for (const transaction of distributionRows) {
               const distribution = existingInvoiceMatch(transaction, openSales, openPurchases) || ruleDecided.has(transaction.id!)
                 ? undefined
-                : historyDistributionFor(history, transaction);
+                : historyDistributionFor(history, transaction, clients);
               if (distribution) historyDistributions.set(transaction.id!, distribution);
               historyCheck[String(transaction.id)] = distribution ? { ...distribution } : null;
             }

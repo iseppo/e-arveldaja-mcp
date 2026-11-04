@@ -73,6 +73,27 @@ describe("mixed VAT rates are read as a breakdown (#5c)", () => {
     expect(prepared.ok).toBe(false);
   });
 
+  it.each([
+    ["an exempt marker after other money (Ettemaks 10,00 KM-ta 200,00)", "Ettemaks 10,00 KM-ta 200,00", 8],
+    ["an exempt marker after other money (Ettemaks 10,00 KM-ta 200,00)", "Ettemaks 10,00 KM-ta 200,00", 11],
+    ["a second net label on the same row (Netosumma 100,00 Vahesumma 162,45)", "Netosumma 100,00      Vahesumma 162,45", 8],
+    ["a second net label on the same row (Netosumma 100,00 Vahesumma 162,45)", "Netosumma 100,00      Vahesumma 162,45", 11],
+  ])("%s keeps the conflicting printed net and holds (row %#)", (_what, row, at) => {
+    const lines = breakdownText().split("\n");
+    const extracted = extractedOf([...lines.slice(0, at), row, ...lines.slice(at)].join("\n"));
+    expect(extracted.mixed_vat_rates?.proven).toBe(true);
+    expect(extracted.amount_consistency_issues).toEqual(expect.arrayContaining(["vat_rate_implausible"]));
+    const prepared = prepareReceiptInvoiceItems(vatContext, extracted, suggestion, "Haldus");
+    expect(prepared.ok).toBe(false);
+  });
+
+  it("an item row is excluded only with item-row evidence: net, zero VAT, the marker and the same gross", () => {
+    const lines = breakdownText().split("\n");
+    const extracted = extractedOf([...lines.slice(0, 8), "Prügivedu      m²   59.00   0.1000   5.90   0.00   KM-ta  5.90", ...lines.slice(8)].join("\n"));
+    expect(extracted.mixed_vat_rates?.proven).toBe(true);
+    expect(extracted.amount_consistency_issues).toBeUndefined();
+  });
+
   it("a labelled net equal to the computed taxable net is explained by the breakdown", () => {
     const lines = breakdownText().split("\n");
     const extracted = extractedOf([...lines.slice(0, 11), "Netosumma 162,45", ...lines.slice(11)].join("\n"));
@@ -121,6 +142,28 @@ describe("a proven mixed-rate receipt is booked one item per rate (#5c)", () => 
       if (prepared.ok) continue;
       expect(prepared.notes.join(" ")).toContain("mixed_vat_rate_review");
     }
+  });
+
+  it.each([
+    "Ettemaks 10,00 KM-ta 200,00",
+    "Netosumma 100,00      Vahesumma 162,45",
+  ])("execute with a contradicting printed net (%s) writes nothing", async (row) => {
+    const lines = breakdownText().split("\n");
+    const extracted = extractedOf([...lines.slice(0, 8), row, ...lines.slice(8)].join("\n"));
+    const client = {
+      cacheNamespace: `mixed-vat-held-${Math.random()}`, connectionFingerprint: "mixed-vat", apiBaseUrl: "https://fake.invalid",
+      post: vi.fn(), patch: vi.fn(), request: vi.fn(),
+      get: vi.fn(async () => ({ current_page: 1, total_pages: 1, items: [] })),
+    };
+    const api = { purchaseInvoices: new PurchaseInvoicesApi(client as never), journals: { listAll: vi.fn().mockResolvedValue([]), invalidateListCache: vi.fn() } };
+    const snapshot = { file: { name: "arve.pdf", path: "/tmp/arve.pdf", extension: ".pdf", file_type: "pdf" }, bytes: Buffer.from("synthetic"), sha256: sha256Hex(Buffer.from("synthetic")) };
+    const supplier = { found: true, client: { id: 1702990, name: "Näidise tn 1 korteriühistu" } };
+
+    const result = await createAndMaybeMatchPurchaseInvoice(api as never, vatContext, snapshot as never, extracted, supplier as never, suggestion, [], "create_and_confirm", false, new Set());
+    expect(result.created_invoice).toBeUndefined();
+    expect(client.post).not.toHaveBeenCalled();
+    expect(client.patch).not.toHaveBeenCalled();
+    expect(client.request).not.toHaveBeenCalled();
   });
 
   it("execute: POST carries both items without residue, PATCH puts 155.15 on the last item, the readback is accepted", async () => {
