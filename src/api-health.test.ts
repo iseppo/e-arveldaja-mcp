@@ -342,7 +342,7 @@ describe("401 brake shared per API server", () => {
     // need no rate-limit wait, so 10 ms suffices and the 1 s delay is not reached).
     const others = [0, 1, 2].map(i => clientFor(LIVE, i).get("/clients").catch((error: unknown) => error as HttpError));
     await vi.advanceTimersByTimeAsync(10);
-    expect((await Promise.all(others)).map(e => e.status)).toEqual([401, 401, 401]);
+    expect((await Promise.all(others)).map(e => (e as HttpError).status)).toEqual([401, 401, 401]);
     expect(fetchMock).toHaveBeenCalledTimes(4);
 
     await vi.runAllTimersAsync();
