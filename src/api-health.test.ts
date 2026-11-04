@@ -117,7 +117,7 @@ describe("failure advice comes from the failing request alone", () => {
   });
 });
 
-describe("consecutive-401 brake shared per API server", () => {
+describe("401 brake shared per API server", () => {
   it("3×401 on one connection trips it and refuses the next request locally without sending it", async () => {
     const fetchMock = vi.fn(async () => json(401));
     vi.stubGlobal("fetch", fetchMock);
@@ -234,8 +234,27 @@ describe("consecutive-401 brake shared per API server", () => {
     expect(fetchMock).toHaveBeenCalledTimes(5);
   });
 
-  it("a success on any connection to the server resets the streak", async () => {
+  it("a success resets only that connection's own 401 history", async () => {
     const answers = [401, 401, 200, 401, 401];
+    const fetchMock = vi.fn(async () => json(answers.shift() ?? 500, { ok: true }));
+    vi.stubGlobal("fetch", fetchMock);
+    const a = clientFor(LIVE, 0);
+
+    await rejectionOf(a.get("/clients"));
+    await rejectionOf(a.get("/clients"));
+    const ok = a.get("/clients");
+    await vi.runAllTimersAsync();
+    await expect(ok).resolves.toEqual({ ok: true });
+    await rejectionOf(a.get("/clients"));
+    const fifth = await rejectionOf(a.get("/clients"));
+
+    expect(fifth.code).toBeUndefined();
+    expect(fifth.status).toBe(401);
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+  });
+
+  it("a success on another connection does not clear a stale connection's 401s", async () => {
+    const answers = [401, 401, 200, 401];
     const fetchMock = vi.fn(async () => json(answers.shift() ?? 500, { ok: true }));
     vi.stubGlobal("fetch", fetchMock);
     const a = clientFor(LIVE, 0);
@@ -247,11 +266,91 @@ describe("consecutive-401 brake shared per API server", () => {
     await vi.runAllTimersAsync();
     await expect(ok).resolves.toEqual({ ok: true });
     await rejectionOf(a.get("/clients"));
-    const fifth = await rejectionOf(a.get("/clients"));
 
-    expect(fifth.code).toBeUndefined();
-    expect(fifth.status).toBe(401);
-    expect(fetchMock).toHaveBeenCalledTimes(5);
+    expect((await rejectionOf(b.get("/clients"))).code).toBe("auth_cooldown");
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+
+  it("interleaved A→401, B→401, C→200 cycles still trip the brake", async () => {
+    const fetchMock = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      const key = String((init?.headers as Record<string, string>)["X-AUTH-KEY"] ?? "");
+      return key.startsWith("healthy") ? json(200, { ok: true }) : json(401);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const a = clientFor(LIVE, 0);
+    const b = clientFor(LIVE, 1);
+    const c = new HttpClient({ ...configFor(LIVE, "key-2"), apiPublicValue: "healthy" }, "connection:2");
+
+    await rejectionOf(a.get("/clients"));
+    await rejectionOf(b.get("/clients"));
+    const ok = c.get("/clients");
+    await vi.runAllTimersAsync();
+    await expect(ok).resolves.toEqual({ ok: true });
+    await rejectionOf(a.get("/clients"));
+
+    for (const client of [a, b, c]) {
+      const refused = await rejectionOf(client.get("/clients"));
+      expect(refused.code).toBe("auth_cooldown");
+      expect(refused.distinct_connections_401).toBe(2);
+    }
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+
+  it("requests queued for their rate-limit turn are refused once the brake trips, without being sent", async () => {
+    const fetchMock = vi.fn(async () => json(401));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new HttpClient(configFor(LIVE));
+
+    const settled = Array.from({ length: 6 }, () => client.get("/clients").then(
+      () => { throw new Error("expected rejection"); },
+      (error: unknown) => error as HttpError,
+    ));
+    await vi.runAllTimersAsync();
+    const errors = await Promise.all(settled);
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(errors.slice(0, 3).map(e => e.code)).toEqual([undefined, undefined, undefined]);
+    for (const refused of errors.slice(3)) {
+      expect(refused).toBeInstanceOf(HttpError);
+      expect(refused.code).toBe("auth_cooldown");
+      expect(refused.cooldown_seconds_remaining).toBeGreaterThan(0);
+      expect(refused.distinct_connections_401).toBe(1);
+      expect(refused.message).not.toContain("Troubleshooting 401 Unauthorized");
+    }
+    // The local refusals were not counted as upstream 401s: the cooldown still
+    // carries the one connection's three real 401s and ends 60 s after the third.
+    const [state] = getAuthBrakeStates();
+    expect(state?.distinct_connections_401).toBe(1);
+  });
+
+  it("a retry delayed by 429 is refused if the brake tripped during the delay", async () => {
+    const fetchMock = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      const key = String((init?.headers as Record<string, string>)["X-AUTH-KEY"] ?? "");
+      return key.startsWith("throttled") ? json(429) : json(401);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const throttled = new HttpClient({ ...configFor(LIVE, "key-9"), apiPublicValue: "throttled" }, "connection:9");
+
+    const retrying = throttled.get("/clients").then(
+      () => { throw new Error("expected rejection"); },
+      (error: unknown) => error as HttpError,
+    );
+    // Let the first attempt get its 429 and start the 1 s retry delay.
+    await vi.advanceTimersByTimeAsync(10);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // Three other connections get 401 while the retry sleeps (fresh clients
+    // need no rate-limit wait, so 10 ms suffices and the 1 s delay is not reached).
+    const others = [0, 1, 2].map(i => clientFor(LIVE, i).get("/clients").catch((error: unknown) => error as HttpError));
+    await vi.advanceTimersByTimeAsync(10);
+    expect((await Promise.all(others)).map(e => e.status)).toEqual([401, 401, 401]);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+
+    await vi.runAllTimersAsync();
+    const refused = await retrying;
+    expect(refused).toBeInstanceOf(HttpError);
+    expect(refused.code).toBe("auth_cooldown");
+    expect(refused.distinct_connections_401).toBe(3);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
   });
 
   it("401s spread over more than 60 s do not trip the brake", async () => {
@@ -300,6 +399,16 @@ describe("consecutive-401 brake shared per API server", () => {
     expect(fetchMock.mock.calls.length).toBe(callsBefore);
 
     vi.setSystemTime(new Date("2026-11-04T10:01:01Z"));
+    expect(getServerStatus({ version: "1.0.0", profile: "standard" }).auth_brakes).toBeUndefined();
+  });
+
+  it("get_server_status drops a sub-threshold 401 streak once its 60 s window has passed", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => json(401)));
+    await rejectionOf(clientFor(LIVE, 0).get("/clients"));
+    expect(getAuthBrakeStates()).toEqual([{ server: LIVE, cooldown_until: null, distinct_connections_401: 1 }]);
+
+    vi.setSystemTime(new Date("2026-11-04T10:01:01Z"));
+    expect(getAuthBrakeStates()).toEqual([]);
     expect(getServerStatus({ version: "1.0.0", profile: "standard" }).auth_brakes).toBeUndefined();
   });
 });

@@ -33,7 +33,7 @@ export interface ServerStatus {
   readonly profile: string;
   readonly active_notices: readonly ActiveNotice[];
   /**
-   * Per-server 401 brakes that are cooling down or hold a 401 streak (present
+   * Per-server 401 brakes that are cooling down or hold unexpired 401s (present
    * only then). In-memory state — no network.
    */
   readonly auth_brakes?: readonly AuthBrakeState[];

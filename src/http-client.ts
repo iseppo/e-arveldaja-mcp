@@ -366,45 +366,55 @@ export class HttpClient {
   }
 
   /**
-   * Sends the request, guarded by the per-server consecutive-401 brake. A 401,
-   * 5xx or network failure gets advice derived from that failure alone; no
-   * other request is ever sent.
+   * Sends the request, guarded by the per-server 401 brake. A 401, 5xx or
+   * network failure gets advice derived from that failure alone; no other
+   * request is ever sent.
    */
   async request<T = unknown>(path: string, options: RequestOptions = {}): Promise<T> {
-    const method = options.method ?? "GET";
-    const remainingMs = this.authBrake.remainingMs();
-    if (remainingMs > 0) {
-      const seconds = Math.ceil(remainingMs / 1000);
-      const connections = this.authBrake.distinctConnections401;
-      const scope = connections >= 2
-        ? `${connections} different connections got 401 Unauthorized from this API server within ` +
-          `${AUTH_BRAKE.windowMs / 1000} s, which points to a server- or IP-side problem, not one stale API key.`
-        : `${AUTH_BRAKE.threshold} consecutive 401 Unauthorized answers came from this API server on one connection.`;
-      throw new HttpError(
-        `API request refused locally: ${method} ${path} → auth_cooldown (${seconds} s remaining). ` +
-          `${scope} Further requests to this server are paused on every connection, because repeated failed ` +
-          `authentications can trigger a server-side lockout. Nothing was sent.`,
-        401,
-        method,
-        path,
-        {
-          code: "auth_cooldown",
-          cooldown_seconds_remaining: seconds,
-          distinct_connections_401: connections,
-          recovery_hint: `Wait ${seconds} s before retrying; do not loop over connections or retry in a tight loop.`,
-        },
-      );
-    }
+    this.assertAuthBrakeOpen(options.method ?? "GET", path);
     let result: T;
     try {
       result = await this.sendRequest<T>(path, options);
     } catch (error) {
       if (!(error instanceof HttpError)) throw error;
+      // A local refusal is not an upstream 401: don't count it, keep its metadata.
+      if (error.code === "auth_cooldown") throw error;
       if (error.status === 401) this.authBrake.recordUnauthorized(this.cacheNamespace);
       throw HttpClient.enrichFailure(error);
     }
-    this.authBrake.recordSuccess();
+    this.authBrake.recordSuccess(this.cacheNamespace);
     return result;
+  }
+
+  /**
+   * Refuses locally while the server's 401 brake is cooling down. Checked when
+   * a request starts and again immediately before every fetch, so a request
+   * queued for its rate-limit turn or sleeping before a retry cannot slip past
+   * a cooldown another request tripped meanwhile.
+   */
+  private assertAuthBrakeOpen(method: HttpMethod, path: string): void {
+    const remainingMs = this.authBrake.remainingMs();
+    if (remainingMs <= 0) return;
+    const seconds = Math.ceil(remainingMs / 1000);
+    const connections = this.authBrake.distinctConnections401;
+    const scope = connections >= 2
+      ? `${connections} different connections got 401 Unauthorized from this API server within ` +
+        `${AUTH_BRAKE.windowMs / 1000} s, which points to a server- or IP-side problem, not one stale API key.`
+      : `${AUTH_BRAKE.threshold} consecutive 401 Unauthorized answers came from this API server on one connection.`;
+    throw new HttpError(
+      `API request refused locally: ${method} ${path} → auth_cooldown (${seconds} s remaining). ` +
+        `${scope} Further requests to this server are paused on every connection, because repeated failed ` +
+        `authentications can trigger a server-side lockout. Nothing was sent.`,
+      401,
+      method,
+      path,
+      {
+        code: "auth_cooldown",
+        cooldown_seconds_remaining: seconds,
+        distinct_connections_401: connections,
+        recovery_hint: `Wait ${seconds} s before retrying; do not loop over connections or retry in a tight loop.`,
+      },
+    );
   }
 
   /** Advice for a 401, 5xx or network failure, derived from the failure alone. */
@@ -462,6 +472,7 @@ export class HttpClient {
 
       await this.waitForRateLimitTurn();
       this.assertRequestAllowed();
+      this.assertAuthBrakeOpen(method, path);
 
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 60_000);
@@ -532,8 +543,8 @@ export class HttpClient {
             // Non-JSON error body — don't expose raw text
           }
 
-          // 401 troubleshooting text is added by request() once the health
-          // probe says whether the API is up (credentials) or down (outage).
+          // 401 troubleshooting text and 5xx outage advice are added by
+          // request() from this failure alone.
           throw new HttpError(errorMessage, response.status, method, path, {
             upstream_detail: upstreamDetail,
             ...(upstreamNotFound ? { upstream_not_found: true } : {}),
