@@ -138,7 +138,7 @@ Capability condition for `guided`: inspect the connected MCP server's advertised
 Call `run_accounting_report` with report="missing_documents", `date_from`: YYYY-MM-01 and `date_to`: the last day of the month.
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:guided -->
 
-Report the per-section counts of confirmed records without an attached source document — purchase invoices, manual journals, and directly booked bank transactions alike (RPS requires a source document on every entry); list the returned rows, and call again with `detail: "full"` when a section is `truncated`.
+Report the per-section counts of records without their own directly attached document — purchase invoices, manual journals, and bank transactions (RPS requires a source document on every entry); list the returned rows, and call again with `detail: "full"` when a section is `truncated`. The counts are attachment-only: the journal and transaction sections can include drafts (PROJECT rows) and bank payments linked to an invoice whose own document carries the evidence. Check the linked invoice before calling a source document missing, and never suggest attaching a duplicate copy to such a payment.
 
 ## Step 5: Compute financial statements
 

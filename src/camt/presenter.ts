@@ -717,7 +717,9 @@ export function renderCamtImportCompact(input: CamtCompactInput): CamtImportComp
       ...(transactionId !== undefined ? { item_id: String(transactionId) } : {}),
       code: "camt_native_import_match",
       message: `The ${row.amount} row on ${row.date} was not created: automatic match (camt_native_import_match) to transaction ${transactionId} `
-        + `that e-arveldaja's own bank import created (journal ${journalId}). If wrong (a different movement): correct or delete transaction ${transactionId}, then re-run the preview.`,
+        + `that e-arveldaja's own bank import created (journal ${journalId}). A different movement does not make transaction ${transactionId} wrong: `
+        + "keep it if it books another real movement and book this row separately; "
+        + `correct or delete transaction ${transactionId} only once it is shown to be erroneous or a duplicate, then re-run the preview.`,
     };
   }), moreHint));
 

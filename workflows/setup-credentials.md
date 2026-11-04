@@ -101,8 +101,8 @@ If import succeeds, report:
 
 Keep the source `apikey*.txt` in place until the restarted server is proven to use the stored credential:
 1. If `EARVELDAJA_API_KEY_FILE` is set in the MCP launch configuration or environment, remove it there first: while it is set it takes precedence over the stored `.env` credential, and startup fails once that file is moved or deleted.
-2. Restart the MCP server with the source file still in place.
-3. Verify the stored credential the import reported (`env_file`, `storage_scope`, `target`; `list_stored_credentials` shows the stored inventory) and make one authenticated read that returns the intended company's data. A successful restart or a non-empty `list_connections` is not proof: while the file stays in the working directory, the server can still be reading it directly.
+2. Before restarting, record the stored credential the import reported (`env_file`, `storage_scope`, `target`) and, while it is still advertised, the stored inventory from `list_stored_credentials`: after the restart a configured `standard` server hides the credential tools by default and the guided profiles never have them. Then restart the MCP server with the source file still in place.
+3. After the restart, refresh the tool list. Use `list_stored_credentials` only if it is advertised; otherwise check the recorded `env_file` / `storage_scope` / `target`. Either way, make one authenticated read that returns the intended company's data. A successful restart or a non-empty `list_connections` is not proof: while the file stays in the working directory, the server can still be reading it directly.
 4. Only then suggest moving the `apikey*.txt` out of the working directory or deleting it.
 
 If the stored credential's use cannot be established, keep the file and tell the user why.

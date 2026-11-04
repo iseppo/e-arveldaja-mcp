@@ -628,13 +628,13 @@ function autoMatchWarning(entry: WiseSkippedEntry & { auto_match: NonNullable<Wi
   const target = transactionId !== undefined
     ? `stored confirmed transaction ${transactionId} on this Wise account`
     : `inter-account journal ${journalId}`;
-  const undo = transactionId !== undefined
-    ? `if it is a different movement, correct or delete transaction ${transactionId}`
-    : `if the journal is not this transfer, correct or delete journal ${journalId}`;
+  const stored = transactionId !== undefined ? `transaction ${transactionId}` : `journal ${journalId}`;
   return {
     item_id: entry.wise_id,
     code,
-    message: `${what} not created: automatic match (${code}) to ${target}. If wrong: ${undo}, then re-run the preview.`,
+    message: `${what} not created: automatic match (${code}) to ${target}. `
+      + `A different movement does not make ${stored} wrong: keep it if it books another real movement and book this row separately; `
+      + `correct or delete ${stored} only once it is shown to be erroneous or a duplicate, then re-run the preview.`,
   };
 }
 
