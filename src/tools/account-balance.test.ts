@@ -572,6 +572,29 @@ describe("compute_account_dimension_balances tool — unmapped opening-balance d
     expect(warnings.join(" ")).not.toMatch(/import_opening|paste|fallback/i);
   });
 
+  it("still discloses the unattributed opening when date_from is after it (its amount is in the opening figures)", async () => {
+    seedApiOpening({
+      openingDate: "2024-12-12",
+      accounts: [{ code: String(ACCOUNT_ID), debit: 1000, credit: 0 }],
+    });
+    const api = {
+      journals: { listAllWithPostings: vi.fn().mockResolvedValue(withApiOpening([])) },
+      readonly: {
+        getAccount: vi.fn().mockResolvedValue(D_ACCOUNT),
+        getAccounts: vi.fn().mockResolvedValue([makeAccount(ACCOUNT_ID, "D", "Varad", "Pank", "Bank")]),
+        getAccountDimensions: vi.fn().mockResolvedValue([DIM_A, DIM_B]),
+      },
+    } as unknown as Parameters<typeof registerAccountBalanceTools>[1];
+    registerAccountBalanceTools({} as Parameters<typeof registerAccountBalanceTools>[0], api);
+    const handler = capturedHandlers["compute_account_dimension_balances"]!;
+
+    const data = parseToolPayload<AccountDimensionBalancesPayload>(
+      (await handler({ account_id: ACCOUNT_ID, date_from: "2025-01-01" })).content[0]!.text,
+    );
+
+    expect(data.warnings.join(" ")).toMatch(/Partial dimension attribution: API INITIAL includes 1000\.00 EUR/);
+  });
+
   it("compute_account_balance warns that an unattributed opening balance is outside a dimension-scoped figure", async () => {
     seedApiOpening(
       {

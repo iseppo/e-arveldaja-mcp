@@ -555,7 +555,9 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
 
       const dimensionWarnings = drafts.warning ? [drafts.warning] : [];
       if (opening) {
-        const unattributedWarning = unattributedOpeningBalanceWarning(opening, account_id, date_from, date_to);
+        // No lower bound: an INITIAL before date_from still feeds every row's
+        // opening_balance_at_date_from and closing_balance.
+        const unattributedWarning = unattributedOpeningBalanceWarning(opening, account_id, undefined, date_to);
         if (unattributedWarning) {
           let unattributedRaw = 0;
           for (const p of opening.journal.postings) {
