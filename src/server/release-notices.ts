@@ -4,6 +4,8 @@
 // never in unrelated sessions/flows. These are first-party release text, not
 // external/OCR content, so callers emit them UNWRAPPED (no wrapUntrustedOcr).
 
+import { getLastApiHealthProbes, type ApiHealthStatusEntry } from "../api-health.js";
+
 export type ReleaseFlow = "camt" | "wise" | "bank";
 export type ReleaseSeverity = "info" | "warning";
 
@@ -30,6 +32,11 @@ export interface ServerStatus {
   readonly version: string;
   readonly profile: string;
   readonly active_notices: readonly ActiveNotice[];
+  /**
+   * Last cached API health-probe outcome per server (present only after a
+   * failed API request triggered a probe). Read from the cache — no network.
+   */
+  readonly api_health_probes?: readonly ApiHealthStatusEntry[];
 }
 
 export const RELEASE_NOTICES: readonly ReleaseNotice[] = Object.freeze([
@@ -72,9 +79,11 @@ export function getActiveNotices(now: Date = new Date()): ActiveNotice[] {
 }
 
 export function getServerStatus(input: { version: string; profile: string; now?: Date }): ServerStatus {
+  const probes = getLastApiHealthProbes();
   return {
     version: input.version,
     profile: input.profile,
     active_notices: getActiveNotices(input.now ?? new Date()),
+    ...(probes.length > 0 ? { api_health_probes: probes } : {}),
   };
 }

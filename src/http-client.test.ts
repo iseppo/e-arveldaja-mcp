@@ -1,5 +1,6 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { HttpClient, HttpError, isNotFoundHttpError } from "./http-client.js";
+import { resetApiHealthProbes } from "./api-health.js";
 
 const config = {
   apiKeyId: "test-key-id",
@@ -8,7 +9,16 @@ const config = {
   baseUrl: "https://rmp-api.rik.ee/v1",
 };
 
+/** fetch calls made for the API request itself (excludes the health probe). */
+function apiCalls(fetchMock: Mock): unknown[][] {
+  return fetchMock.mock.calls.filter(([url]) => !String(url).endsWith("/openapi.yaml"));
+}
+
 describe("HttpClient", () => {
+  beforeEach(() => {
+    resetApiHealthProbes();
+  });
+
   afterEach(() => {
     vi.useRealTimers();
     vi.restoreAllMocks();
@@ -80,7 +90,7 @@ describe("HttpClient", () => {
     // message, which for some failures (invalid header value) echoes the
     // offending value and could leak the auth public value / signature.
     expect(caughtError!.message).toMatch(/API request failed: POST \/transactions → network error: TypeError/);
-    expect(fetchMock).toHaveBeenCalledTimes(1); // no retry for POST
+    expect(apiCalls(fetchMock)).toHaveLength(1); // no retry for POST
   });
 
   it("does not leak a raw fetch error message (only the error name/code)", async () => {
@@ -107,7 +117,7 @@ describe("HttpClient", () => {
 
     const client = new HttpClient(config);
     await client.patch("/transactions/5/register", {}).catch(() => {});
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(apiCalls(fetchMock)).toHaveLength(1);
   });
 
   it("does not retry DELETE mutations after network errors", async () => {
@@ -116,7 +126,7 @@ describe("HttpClient", () => {
 
     const client = new HttpClient(config);
     await client.delete("/transactions/5").catch(() => {});
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(apiCalls(fetchMock)).toHaveLength(1);
   });
 
   it("still retries idempotent PUT requests after network errors", async () => {
@@ -158,7 +168,7 @@ describe("HttpClient", () => {
       expect(e.message).toBe("API request failed: POST /transactions → 502");
       expect(e.upstream_detail).toMatch(/^<<UNTRUSTED_OCR_START:[0-9a-f]+>>\ntemporary failure\n<<UNTRUSTED_OCR_END:[0-9a-f]+>>$/);
     }
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(apiCalls(fetchMock)).toHaveLength(1);
   });
 
   it("retries POST requests on 429 responses", async () => {
@@ -183,13 +193,14 @@ describe("HttpClient", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
-  it("keeps 401 troubleshooting local without extra outbound lookups", async () => {
+  it("keeps 401 troubleshooting local: the only extra request is the same-server health probe", async () => {
     vi.useFakeTimers();
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify({ messages: ["Unauthorized"] }), {
         status: 401,
         headers: { "content-type": "application/json" },
-      }));
+      }))
+      .mockResolvedValueOnce(new Response("openapi: 3.0.0", { status: 200 }));
     vi.stubGlobal("fetch", fetchMock);
 
     const client = new HttpClient(config);
@@ -199,7 +210,10 @@ describe("HttpClient", () => {
     await vi.runAllTimersAsync();
 
     await expectation;
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual([
+      "https://rmp-api.rik.ee/v1/clients",
+      "https://rmp-api.rik.ee/v1/openapi.yaml",
+    ]);
   });
 
   it.each([

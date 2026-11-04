@@ -2,8 +2,8 @@
   "profile": "full",
   "measurement": {
     "toolCount": 148,
-    "toolsListBytes": 184037,
-    "descriptionsBytes": 27725,
+    "toolsListBytes": 184094,
+    "descriptionsBytes": 27782,
     "inputSchemasBytes": 120582,
     "largestTool": {
       "name": "import_wise_transactions",
@@ -42,7 +42,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Report the running e-arveldaja MCP server version, the active tool profile, and any active point-of-use release notices. Read-only; needs no credentials.",
+      "description": "Report the running e-arveldaja MCP server version, the active tool profile, any active point-of-use release notices, and the last API health-probe outcome (cached; no API call). Read-only; needs no credentials.",
       "execution": {
         "taskSupport": "forbidden"
       },
