@@ -1161,7 +1161,7 @@ export async function limitedVatTaxNote(
     title: status === "none"
       ? "Välismaa teenus — võimalik piiratud maksukohustuslase registreerimiskohustus"
       : status === "unknown"
-        ? "Ettevõtte käibemaksustaatust ei saa lugeda"
+        ? "Ettevõtte käibemaksustaatus ei ole teada"
         : "Välismaa teenus — kuulub igakuisesse piiratud maksukohustuslase arvestusse",
     detail,
     basis: "KMS § 21 lg 1; KMS § 10 lg 5; KMS § 25 lg 1",

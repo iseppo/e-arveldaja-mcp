@@ -66,7 +66,8 @@ const SECTIONS: readonly LimitedVatGuidanceSection[] = [
     title: "Pärast registreerimist",
     paragraphs: [
       "Anna saadud number välismaa tarnijatele (nende arveldusliideses maksunumbri väljale), et nad lõpetaksid käibemaksu lisamise.",
-      "Märgi see staatus ka selles serveris: limited_vat mode \"set_status\" status \"limited\" koos effective_from kuupäevaga (omaniku kinnitusega). Siis ei käsitle server ettevõtet täieliku käibemaksukohustuslasena: ostuarvetel sisendkäibemaksu maha ei arvata ja pöördmaksustamise sisendrida ei teki. Müügiarvetele ära lisa käibemaksu.",
+      "Kui number on e-arveldajas olemas, kontrollib server EMTA avalikust KMKR päringust ise, kas see on piiratud või täieliku käibemaksukohustuslase number, ja võtab registreerimise kuupäeva staatuse alguseks; vaata limited_vat mode \"status\". Piiratud maksukohustuslasena ei käsitle server ettevõtet täieliku käibemaksukohustuslasena: ostuarvetel sisendkäibemaksu maha ei arvata ja pöördmaksustamise sisendrida ei teki. Müügiarvetele ära lisa käibemaksu.",
+      "Kui EMTA päring ei õnnestu või ei näita täpselt üht kehtivat registreeringut, keeldub käibemaksust sõltuv broneerimine, kuni päring õnnestub või omanik kinnitab staatuse: limited_vat mode \"set_status\" status \"limited\" koos effective_from kuupäevaga (või \"full\"). Omaniku kinnitus kehtib selle KMKR numbri kohta ja on EMTA päringust ülimuslik.",
     ],
   },
   {

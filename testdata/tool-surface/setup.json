@@ -2,8 +2,8 @@
   "profile": "setup",
   "measurement": {
     "toolCount": 131,
-    "toolsListBytes": 152289,
-    "descriptionsBytes": 22699,
+    "toolsListBytes": 152444,
+    "descriptionsBytes": 22854,
     "inputSchemasBytes": 98031,
     "largestTool": {
       "name": "import_wise_transactions",
@@ -4663,7 +4663,7 @@
         "openWorldHint": false,
         "readOnlyHint": false
       },
-      "description": "Limited taxpayer (piiratud maksukohustuslane, KMS § 21): a non-VAT company buying foreign services such as cloud/SaaS/API. mode guide = Estonian guidance (why, how to register, monthly routine); status = the company VAT status (none/limited/full) and, for none, foreign-service candidates in the books; set_status = store the status (preview → owner approval → execute:true + plan_handle); month = dry run for YYYY-MM (foreign invoices by service date, ECB rates, VAT per cost account, KMD figures), then execute:true + plan_handle creates and confirms journal PKM-YYYY-MM after owner approval. Never files the KMD.",
+      "description": "Limited taxpayer (piiratud maksukohustuslane, KMS § 21): a non-VAT company buying foreign services such as cloud/SaaS/API. mode guide = Estonian guidance (why, how to register, monthly routine); status = the company VAT status (none/limited/full/unknown) with its source (owner setting or EMTA's public KMKR query) and, for none, foreign-service candidates in the books; set_status = store the owner's status for the current VAT number, overriding EMTA; needed when EMTA cannot settle it (preview → owner approval → execute:true + plan_handle); month = dry run for YYYY-MM (foreign invoices by service date, ECB rates, VAT per cost account, KMD figures), then execute:true + plan_handle creates and confirms journal PKM-YYYY-MM after owner approval. Never files the KMD.",
       "execution": {
         "taskSupport": "forbidden"
       },
