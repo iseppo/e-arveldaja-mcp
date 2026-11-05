@@ -312,7 +312,7 @@ export function computeDividendCapacity(input: DividendCapacityInput): DividendC
   // Verified EUR: every posting feeding a calculation must be EUR or carry base_amount.
   const unverified: Array<{ journal_id: number | null; effective_date: string; account: number; currency: string }> = [];
   for (const j of live) {
-    if (preReportDraft(j) && !livePostings(j).some(p => inAllEq(p.accounts_id))) continue;
+    if (preReportDraft(j) && !livePostings(j).some(p => inAllEq(p.accounts_id) || protectedAccounts.has(p.accounts_id))) continue;
     for (const p of livePostings(j)) {
       if (inChecked(p.accounts_id) && isUnverified(j, p)) {
         unverified.push({ journal_id: j.id ?? null, effective_date: j.effective_date, account: p.accounts_id, currency: p.cl_currencies_id ?? j.cl_currencies_id ?? "" });
@@ -321,9 +321,15 @@ export function computeDividendCapacity(input: DividendCapacityInput): DividendC
   }
   if (unverified.length > 0) holds.push({ code: "dividend_amount_unverified", postings: unverified });
 
-  // Pre-report drafts: neutral reclassifications (ΔEQ = 0 and ΔNA = 0) are fine.
-  const heldDrafts = live.filter(j =>
-    preReportDraft(j) && livePostings(j).some(p => inAllEq(p.accounts_id)) && (delta(j, inEq) !== 0 || delta(j, inNa) !== 0));
+  // Pre-report drafts: only a reclassification neutral for lg 1, net assets
+  // AND the floor (ΔEQ = 0, ΔNA = 0, no posting on a protected account — the
+  // RIK result entry, the 2970 → 2960 transfer) is fine.
+  const heldDrafts = live.filter(j => {
+    if (!preReportDraft(j)) return false;
+    const postings = livePostings(j);
+    if (!postings.some(p => inAllEq(p.accounts_id) || protectedAccounts.has(p.accounts_id))) return false;
+    return delta(j, inEq) !== 0 || delta(j, inNa) !== 0 || postings.some(p => protectedAccounts.has(p.accounts_id));
+  });
   if (heldDrafts.length > 0) {
     holds.push({ code: "pre_report_equity_draft", journals: heldDrafts.map(identity) });
   }

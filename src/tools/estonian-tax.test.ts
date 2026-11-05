@@ -458,9 +458,11 @@ describe("prepare_dividend_package", () => {
     });
 
     expect(isError(result)).toBe(true);
-    const r = result as { content: Array<{ text: string }> };
-    expect(r.content[0].text).toContain("Account validation failed");
-    expect(r.content[0].text).toContain("Income-tax expense account");
+    const data = parseToolPayload<DividendPackagePayload>((result as { content: Array<{ text: string }> }).content[0]!.text);
+    expect(data.error_code).toBe("dividend_target_invalid");
+    expect(data.details!.join(" ")).toContain("Income-tax expense account 8900 not found");
+    expect(data.diagnostic).toMatchObject({ income_tax_expense_account: 8900 });
+    expect(data.compliance_notes).toHaveLength(2);
   });
 
   // -------------------------------------------------------------------------
@@ -1230,8 +1232,12 @@ describe("prepare_dividend_package", () => {
     });
 
     expect(isError(result)).toBe(true);
-    const r = result as { content: Array<{ text: string }> };
-    expect(r.content[0].text).toContain("Account validation failed");
+    const data = parseToolPayload<DividendPackagePayload>((result as { content: Array<{ text: string }> }).content[0]!.text);
+    expect(data.error_code).toBe("dividend_target_invalid");
+    expect(data.details!.join(" ")).toContain("Tax payable account 2656 not found");
+    expect(data.diagnostic).toMatchObject({ tax_payable_account: 2656 });
+    expect(data.compliance_notes).toHaveLength(2);
+    expect(vi.mocked(api.journals.create)).not.toHaveBeenCalled();
   });
 
   // -------------------------------------------------------------------------
@@ -1292,6 +1298,7 @@ describe("prepare_dividend_package", () => {
         const data = parseToolPayload<DividendPackagePayload>((result as { content: Array<{ text: string }> }).content[0]!.text);
         expect(data.error_code).toBe("dividend_target_invalid");
         expect(data.details!.join(" ")).toContain(text);
+        expect(data.compliance_notes).toHaveLength(2);
       }
     }
     expect(vi.mocked(api.journals.create)).not.toHaveBeenCalled();
@@ -1306,7 +1313,34 @@ describe("prepare_dividend_package", () => {
       net_dividend: 1000, shareholder_client_id: 1, effective_date: "2026-06-01", retained_earnings_account: 2961,
     });
     expect(isError(result)).toBe(true);
-    expect((result as { content: Array<{ text: string }> }).content[0]!.text).toContain("is inactive");
+    const data = parseToolPayload<DividendPackagePayload>((result as { content: Array<{ text: string }> }).content[0]!.text);
+    expect(data.error_code).toBe("dividend_target_invalid");
+    expect(data.details!.join(" ")).toContain("is inactive");
+    expect(data.diagnostic).toMatchObject({ retained_earnings_account: 2961 });
+    expect(data.compliance_notes).toHaveLength(2);
+    expect(vi.mocked(api.journals.create)).not.toHaveBeenCalled();
+  });
+
+  it("refuses a missing or inactive dividend-payable override with the same structured refusal, on preview and create", async () => {
+    const accounts = [...makeStandardAccounts(), makeAccount(2651, "C", "Kohustused", "Vana dividendivõlg", "Old payable", { is_valid: false })];
+    api = makeApi(makeHealthyJournals(), accounts);
+    const mock = makeMockServer();
+    registerEstonianTaxTools(mock.server, api);
+    for (const [account, text] of [[2651, "is inactive"], [2659, "not found"]] as const) {
+      for (const dry_run of [true, false]) {
+        for (const force of [false, true]) {
+          const result = await mock.tools.get("prepare_dividend_package")!({
+            net_dividend: 1000, shareholder_client_id: 1, effective_date: "2026-06-01", dividend_payable_account: account, dry_run, force,
+          });
+          expect(isError(result)).toBe(true);
+          const data = parseToolPayload<DividendPackagePayload>((result as { content: Array<{ text: string }> }).content[0]!.text);
+          expect(data.error_code).toBe("dividend_target_invalid");
+          expect(data.details!.join(" ")).toContain(`Dividend payable account ${account}`);
+          expect(data.details!.join(" ")).toContain(text);
+          expect(data.diagnostic).toMatchObject({ dividend_payable_account: account });
+        }
+      }
+    }
     expect(vi.mocked(api.journals.create)).not.toHaveBeenCalled();
   });
 
@@ -2139,6 +2173,7 @@ describe("prepare_dividend_package approved-report anchor", () => {
       const { isError: failed, data } = await call({ approved_report_year: year, dry_run, force: true });
       expect(failed).toBe(true);
       expect(data.error_code).toBe("approved_report_year_out_of_range");
+      expect(data.compliance_notes).toHaveLength(2);
     }
     expect(api.journals.listAllWithPostings).not.toHaveBeenCalled();
     expect(api.journals.create).not.toHaveBeenCalled();
@@ -2161,6 +2196,43 @@ describe("prepare_dividend_package approved-report anchor", () => {
       rikTransfer("2025-12-31", 20000, 52, { registered: false }),
     ]);
     expect(neutral.distributable_profit).toBe(25000);
+  });
+
+  it("holds a pre-report draft that moves a voluntary reserve into the statutory reserve (floor not neutral)", async () => {
+    const journals = [
+      makeJournal("2023-01-01", [makePosting(1000, "D", 2500), makePosting(2900, "C", 2500)], { id: 1 }),
+      pair(2, "2024-01-01", 1000, 2960, 25000),
+      pair(3, "2024-02-01", 1000, 2950, 5000),
+      pair(53, "2025-12-31", 2950, 2940, 5000, { registered: false }),
+    ];
+    const { api, call } = setup(journals);
+    for (const dry_run of [true, false]) {
+      for (const force of [false, true]) {
+        const { isError: failed, data } = await call({
+          approved_retained_earnings: 25000, approved_profit_for_year: 0, net_dividend: 23400, dry_run, force,
+        });
+        expect(failed).toBe(true);
+        expect(data.error_code).toBe("pre_report_equity_draft");
+        expect(data.holds).toEqual([{ code: "pre_report_equity_draft", journals: [{ journal_id: 53, document_number: null, effective_date: "2025-12-31" }] }]);
+        expect(data.maximum_distributable).toBeUndefined();
+      }
+    }
+    expect(api.journals.create).not.toHaveBeenCalled();
+    expect(mockedLogAudit).not.toHaveBeenCalled();
+  });
+
+  it("includes the compliance notes on every refusal and hold", async () => {
+    const holdCall = await setup(books()).call({ approved_profit_for_year: 19000 });
+    const missing = await setup(books()).call({ approved_report_year: undefined });
+    const year = await setup(books()).call({ approved_report_year: 2026 });
+    const target = await setup(books()).call({ income_tax_expense_account: 5000 });
+    const zero = await setup(books()).call({ net_dividend: 0 });
+    for (const { isError: failed, data } of [holdCall, missing, year, target, zero]) {
+      expect(failed).toBe(true);
+      expect(data.compliance_notes, String(data.error)).toEqual([
+        expect.stringContaining("ÄS § 157 lg 1"), expect.stringContaining("TSD lisal 7"),
+      ]);
+    }
   });
 
   it("a future registered dividend 10 000 + CIT 2 820.51: lg 1 15 000; lg 2 reserves 12 820.51", async () => {

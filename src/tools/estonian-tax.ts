@@ -715,6 +715,16 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
     },
     { ...create, title: "Prepare Dividend Distribution" },
     async ({ net_dividend: rawNetDividend, shareholder_client_id, effective_date, approved_report_year, approved_retained_earnings, approved_profit_for_year, ledger_difference_acknowledged, retained_earnings_account, dividend_payable_account, tax_payable_account, income_tax_expense_account, share_capital_account, restricted_reserve_accounts, force, dry_run = true }) => {
+      // Estonian CIT rate on dividends: date-keyed per TuMS § 50
+      // (20/80 pre-2025, 22/78 from 2025-01-01).
+      const citRate = getCitRateForDate(effective_date);
+      // Statutory prerequisites the ledger cannot prove — surfaced on every
+      // path (refused, held, blocked, dry-run, executed, duplicate) so the
+      // operator confirms them.
+      const complianceNotes = [
+        "ÄS § 157 lg 1: väljamakse eeldab KINNITATUD majandusaasta aruannet ja kasumi jaotamise otsust. Kontrolli, et mõlemad on olemas, ja lisa osanike otsus kandele (attach_document, entity_type='journal').",
+        `TuMS § 50: dividendi tulumaks (${citRate.formatted}) deklareeritakse TSD lisal 7 ja tasutakse väljamakse kuule järgneva kuu 10. kuupäevaks.`,
+      ];
       // Reject non-positive dividends up front — a zero or negative net
       // would otherwise compute gross=0 and book an empty journal with
       // zero-amount postings, which is noise on the ledger and passes
@@ -722,6 +732,7 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
       if (!(rawNetDividend > 0)) {
         return toolError({
           error: "net_dividend must be > 0",
+          compliance_notes: complianceNotes,
           hint: "Pass a positive EUR amount to distribute.",
         });
       }
@@ -734,6 +745,7 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
       if (!(net_dividend > 0)) {
         return toolError({
           error: "net_dividend rounds to 0.00 EUR",
+          compliance_notes: complianceNotes,
           hint: "Pass a net dividend of at least 0.01 EUR.",
         });
       }
@@ -770,13 +782,32 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
       const restrictedReserveAccounts = restricted_reserve_accounts
         ? [...new Set(restricted_reserve_accounts)]
         : resolveRestrictedReserveAccounts(accounts);
-      const accountErrors = validateAccounts(accounts, [
+      const targetDiagnostic = {
+        retained_earnings_account: retainedAccount,
+        income_tax_expense_account: incomeTaxExpenseAccount,
+        dividend_payable_account: payableAccount,
+        tax_payable_account: taxAccount,
+        share_capital_account: shareCapitalAccount,
+      };
+      const targetAccountErrors = validateAccounts(accounts, [
         { id: retainedAccount, label: "Retained earnings account" },
         { id: payableAccount, label: "Dividend payable account" },
         { id: taxAccount, label: "Tax payable account" },
         { id: incomeTaxExpenseAccount, label: "Income-tax expense account" },
         { id: shareCapitalAccount, label: "Share capital account" },
       ]);
+      // Missing or inactive targets: same structured refusal as role-invalid ones.
+      if (targetAccountErrors.length > 0) {
+        return toolError({
+          error: `dividend_target_invalid: ${targetAccountErrors.join(" ")}`,
+          error_code: "dividend_target_invalid",
+          details: targetAccountErrors,
+          diagnostic: targetDiagnostic,
+          compliance_notes: complianceNotes,
+          hint: "Use list_accounts to find the correct, active account numbers, or omit the override to use the standard account.",
+        });
+      }
+      const accountErrors: string[] = [];
       // Explicit reserve overrides are only READ (their balance raises the
       // § 157 lg 2 floor), never posted to — so validate existence only. A
       // funded-but-deactivated statutory reserve must still be accepted, exactly
@@ -792,6 +823,7 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
         return toolError({
           error: "Account validation failed",
           details: accountErrors,
+          compliance_notes: complianceNotes,
           hint: "Use list_accounts to find correct account numbers.",
         });
       }
@@ -811,13 +843,8 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
           error: `dividend_target_invalid: ${targetProblems.join(" ")}`,
           error_code: "dividend_target_invalid",
           details: targetProblems,
-          diagnostic: {
-            retained_earnings_account: retainedAccount,
-            income_tax_expense_account: incomeTaxExpenseAccount,
-            dividend_payable_account: payableAccount,
-            tax_payable_account: taxAccount,
-            share_capital_account: shareCapitalAccount,
-          },
+          diagnostic: targetDiagnostic,
+          compliance_notes: complianceNotes,
           hint:
             "Use the standard accounts (omit the override) or pass an account that really plays that role. A custom result account " +
             "is set once in the accounting rules (annual report: current year profit account), not through this tool's override.",
@@ -829,14 +856,12 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
           return toolError({
             error: yearProblem,
             error_code: "approved_report_year_out_of_range",
+            compliance_notes: complianceNotes,
             hint: "Pass the year of the last annual report the shareholders approved: the year before the dividend year, or two years before when last year's report is not approved yet.",
           });
         }
       }
 
-      // Estonian CIT rate on dividends: date-keyed per TuMS § 50
-      // (20/80 pre-2025, 22/78 from 2025-01-01).
-      const citRate = getCitRateForDate(effective_date);
       const cit = dividendCit(net_dividend, citRate);
       const grossDividend = roundMoney(net_dividend + cit);
 
@@ -906,13 +931,6 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
         note: "Only the net dividend drains retained earnings; the CIT is booked as income-tax expense (P&L 'Tulumaks').",
       };
       const shareholderEcho = { id: shareholder_client_id, name: wrapUntrustedOcr(shareholderName) };
-
-      // Statutory prerequisites the ledger cannot prove — surfaced on every
-      // path (blocked, dry-run, executed, duplicate) so the operator confirms them.
-      const complianceNotes = [
-        "ÄS § 157 lg 1: väljamakse eeldab KINNITATUD majandusaasta aruannet ja kasumi jaotamise otsust. Kontrolli, et mõlemad on olemas, ja lisa osanike otsus kandele (attach_document, entity_type='journal').",
-        `TuMS § 50: dividendi tulumaks (${citRate.formatted}) deklareeritakse TSD lisal 7 ja tasutakse väljamakse kuule järgneva kuu 10. kuupäevaks.`,
-      ];
 
       const loadExistingPostings = async (journalId: number, known?: Posting[]): Promise<Posting[] | undefined> => {
         if (known && known.length > 0) return known;
