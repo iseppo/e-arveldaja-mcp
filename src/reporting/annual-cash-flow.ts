@@ -2,7 +2,7 @@ import type { Account, Journal, Posting } from "../types/api.js";
 import type { CashFlowEvidence } from "./cash-flow-evidence.js";
 import { roundMoney } from "../money.js";
 import { isYearEndClosingJournal } from "../year-end-closing-journal.js";
-import { resolveDividendPayableAccount, resolveDividendCitPayableAccount } from "../account-resolution.js";
+import { resolveDividendPayableAccount, resolveDividendCitPayableAccount, resolveCurrentYearProfitAccount } from "../account-resolution.js";
 
 export type CashCategory = "operating" | "investing" | "financing" | "fx" | "unclassified";
 interface Components { profit: number; depreciation: number; working_capital: number }
@@ -15,7 +15,7 @@ interface Movement { journal_id: number | null; posting_ids: number[]; category:
 interface Adjustment { journal_id: number | null; posting_ids: number[]; kind: "non_cash" | "non_operating" | "unresolved" | "opening_position"; components: Components; adjustment: number; source_ids: number[]; reason: string; component_slices: ComponentSlice[] }
 interface Input {
   accounts: Account[]; journals: Journal[]; dateFrom: string; dateTo: string;
-  baseOperating?: number; calculatedResultAccount?: number;
+  baseOperating?: number; calculatedResultAccount?: number; currentYearProfitAccount?: number;
   categoryRule?: (accountId: number) => "operating" | "investing" | "financing" | undefined;
   evidence?: CashFlowEvidence;
 }
@@ -36,6 +36,7 @@ export function calculateAnnualCashFlow(input: Input) {
   const cash = new Set(input.accounts.filter(isCashFlowCashAccount).map(a=>a.id));
   const dividend = resolveDividendPayableAccount(input.accounts), cit = resolveDividendCitPayableAccount(input.accounts);
   const year = Number(input.dateFrom.slice(0,4));
+  const currentYearProfit = input.currentYearProfitAccount ?? resolveCurrentYearProfitAccount(input.accounts);
   const sourceRows: Adjustment[] = [], movements: Movement[] = [];
   const issues: Array<{ journal_id:number|null; reason:string }> = [];
   const consumed = new Map<string,number>(), usedItems = new Set<string>();
@@ -64,7 +65,7 @@ export function calculateAnnualCashFlow(input: Input) {
   };
   const components = (j:Journal,p:Posting): ComponentSlice => {
     const a=chart.get(p.accounts_id), n=signed(p), id=p.accounts_id;
-    const pl = a && (a.account_type_est==="Tulud" || a.account_type_est==="Kulud") && id !== (input.calculatedResultAccount??9000) && !isYearEndClosingJournal(j,year);
+    const pl = a && (a.account_type_est==="Tulud" || a.account_type_est==="Kulud") && id !== (input.calculatedResultAccount??9000) && !isYearEndClosingJournal(j,year,currentYearProfit);
     const assetWC = a?.account_type_est==="Varad" && range(id,1200,1699);
     const liabilityWC = a?.account_type_est==="Kohustused" && (range(id,2300,2399)||range(id,2500,2799));
     return { posting_id:p.id??null,posting_index:j.postings.indexOf(p),account_id:id,profit:pl?-n:0,

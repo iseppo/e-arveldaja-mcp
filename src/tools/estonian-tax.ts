@@ -933,21 +933,28 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
         const currentYearProfitAccount = resolveCurrentYearProfitAccount(accounts, getCurrentYearProfitAccountRule());
         const calculatedResultAccount = resolveCalculatedResultAccount(accounts);
         const registeredAsOf = (j: Journal) =>
-          j.registered === true && j.effective_date <= effective_date && !isYearEndClosingJournal(j, distributionYear) &&
+          j.registered === true && j.effective_date <= effective_date && !isYearEndClosingJournal(j, distributionYear, currentYearProfitAccount) &&
           !isYearEndResultEntry(j, distributionYear, { calculatedResult: calculatedResultAccount, currentYearProfit: currentYearProfitAccount });
         const retainedBalance = roundMoney(sumCreditMinusDebit(allJournals, id => id === retainedAccount, registeredAsOf));
         const closedPriorYearResult = currentYearProfitAccount === retainedAccount
           ? 0
           : roundMoney(sumCreditMinusDebit(allJournals, id => id === currentYearProfitAccount, registeredAsOf));
         const plAccountIds = new Set(accounts
-          .filter(a => a.account_type_est === "Tulud" || a.account_type_est === "Kulud")
+          .filter(a => (a.account_type_est === "Tulud" || a.account_type_est === "Kulud") && a.id !== calculatedResultAccount)
           .map(a => a.id));
-        plAccountIds.add(calculatedResultAccount);
-        const unclosedPriorYearPL = roundMoney(sumCreditMinusDebit(
-          allJournals,
-          id => plAccountIds.has(id),
-          j => j.registered === true && j.effective_date < distributionYearStart,
-        ));
+        // 9000 is summed over the same window as 2970 (registeredAsOf): both
+        // legs of a prior-year result entry booked late inside the
+        // distribution year (e.g. 2025's D 9000 / K 2970 dated 2026-01-05)
+        // then count together, so its 2970 credit is cancelled by its 9000
+        // debit instead of adding to the still-open prior-year P&L.
+        const unclosedPriorYearPL = roundMoney(
+          sumCreditMinusDebit(
+            allJournals,
+            id => plAccountIds.has(id),
+            j => j.registered === true && j.effective_date < distributionYearStart,
+          ) +
+          sumCreditMinusDebit(allJournals, id => id === calculatedResultAccount, registeredAsOf),
+        );
         const lg1Accounts = new Set([retainedAccount, currentYearProfitAccount]);
 
         // Unconfirmed (PROJECT) dividend drafts: this tool creates its journals

@@ -3,7 +3,11 @@ import type { Journal } from "./types/api.js";
 /**
  * True for a LEGACY year-end closing journal (YECL-YYYY, dated YYYY-12-31) that
  * older execute_year_end_close versions booked to zero every Tulud/Kulud
- * account into 2970 (replaced by the RIK two-entry method below).
+ * account into 2970 (replaced by the RIK two-entry method below). A journal
+ * found only by its title ("aasta lõppkanne YYYY" / "year-end close YYYY")
+ * must also post to the current-year-result account: a close zeroes P&L into
+ * it, while an ordinary accrual journal with such a title does not and stays
+ * in the P&L.
  * Without `year` the year is derived from the journal's own effective_date, so
  * a P&L spanning several years excludes every closing journal it covers.
  * Balance-sheet style reports must keep these journals: for them the close is
@@ -11,8 +15,9 @@ import type { Journal } from "./types/api.js";
  * use it without an import cycle.
  */
 export function isYearEndClosingJournal(
-  journal: Pick<Journal, "document_number" | "effective_date" | "title">,
-  year?: number,
+  journal: Pick<Journal, "document_number" | "effective_date" | "title" | "postings">,
+  year: number | undefined,
+  currentYearProfitAccount: number,
 ): boolean {
   let targetYear: number;
 
@@ -30,8 +35,8 @@ export function isYearEndClosingJournal(
   if (journal.document_number === `YECL-${targetYear}`) return true;
 
   const title = journal.title?.toLocaleLowerCase("et-EE") ?? "";
-  return title.includes(`aasta lõppkanne ${targetYear}`) ||
-    title.includes(`year-end close ${targetYear}`);
+  return (title.includes(`aasta lõppkanne ${targetYear}`) || title.includes(`year-end close ${targetYear}`)) &&
+    (journal.postings ?? []).some((posting) => !posting.is_deleted && posting.accounts_id === currentYearProfitAccount);
 }
 
 // ---------------------------------------------------------------------------

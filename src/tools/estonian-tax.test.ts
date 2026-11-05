@@ -2074,6 +2074,16 @@ describe("prepare_dividend_package remediation", () => {
     expect(afterTransfer.components).toMatchObject({ retained_earnings_balance: 25000, closed_prior_year_result: 0, unclosed_prior_year_profit_and_loss: 0 });
   });
 
+  it("RIK counts a closed 2025 profit once when its result entry is booked late inside the distribution year", async () => {
+    const onDate = await lg1([...base(5000), profit2025, rikResult2025], "2026-03-01");
+    const lateResult2025 = makeJournal("2026-01-05", [makePosting(9000, "D", 20000), makePosting(2970, "C", 20000)]);
+    const late = await lg1([...base(5000), profit2025, lateResult2025], "2026-03-01");
+
+    expect(onDate.balance_before).toBe(25000);
+    expect(late.balance_before).toBe(onDate.balance_before);
+    expect(late.components).toMatchObject({ closed_prior_year_result: 20000, unclosed_prior_year_profit_and_loss: 0 });
+  });
+
   it("RIK operator practice (only D 2970 / K 2960, no 9000 entry) counts the year once", async () => {
     // Booked either on 1 Dec of the closed year or during the distribution year.
     for (const date of ["2025-12-01", "2026-05-01"]) {

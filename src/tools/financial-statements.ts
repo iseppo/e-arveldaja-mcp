@@ -16,7 +16,8 @@ import { daysPastDue, getMonthLastDay } from "../date-utils.js";
 import { parseStrictMonth, validateOptionalStrictDate, validateOptionalStrictDateRange } from "../strict-date.js";
 import { toolError } from "../tool-error.js";
 import { isYearEndClosingJournal } from "../year-end-closing-journal.js";
-import { resolveCalculatedResultAccount } from "../account-resolution.js";
+import { resolveCalculatedResultAccount, resolveCurrentYearProfitAccount } from "../account-resolution.js";
+import { getCurrentYearProfitAccountRule } from "../accounting-rules.js";
 import type {
   BalanceSheetResult,
   MonthEndDueList,
@@ -250,12 +251,13 @@ export async function computeProfitAndLossReport(
 ): Promise<Omit<ProfitAndLossResult, "report">> {
   const [{ journals, opening }, accounts] = await Promise.all([loadJournalsWithOpeningBalance(api), api.readonly.getAccounts()]);
   const calculatedResultAccount = resolveCalculatedResultAccount(accounts);
+  const currentYearProfitAccount = resolveCurrentYearProfitAccount(accounts, getCurrentYearProfitAccountRule());
   const excludedClosing = new Set<number | undefined>();
   const allBalances = await computeAllBalances(api, dateFrom, dateTo, {
     preloadedAccounts: accounts,
     preloadedJournals: journals,
     journalFilter: journal => {
-      if (!isYearEndClosingJournal(journal)) return true;
+      if (!isYearEndClosingJournal(journal, undefined, currentYearProfitAccount)) return true;
       excludedClosing.add(journal.id);
       return false;
     },
