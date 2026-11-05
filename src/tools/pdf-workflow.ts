@@ -20,7 +20,6 @@ import { draftReadbackMismatches } from "../documents/purchase-draft-verificatio
 import { issuePurchaseInvoiceConfirmPlan } from "../purchase-invoice-confirm-plan.js";
 import { contentMatchesExtension, resolveFileInput, sanitizeUploadFileName } from "../file-validation.js";
 import { applyPurchaseVatDefaultsAndValidateDimensions, getPurchaseArticlesWithVat, refuseNonVatItemsWithVatFields } from "./purchase-vat-defaults.js";
-import { detectDuplicatePurchaseInvoice } from "./document-audit.js";
 import { isStrictDate } from "../strict-date.js";
 import { toolError } from "../tool-error.js";
 import { roundMoney } from "../money.js";
