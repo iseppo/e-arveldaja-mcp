@@ -281,7 +281,7 @@ The assistant proposes RIK's two closing entries (31 Dec result to 2970, 1 Jan t
 
 > "Prepare a dividend package for 5000 EUR"
 
-The assistant will compute the 22/78 corporate income tax, check retained earnings sufficiency and net assets against share capital (ÄS §157), and create the journal entry with correct postings.
+The assistant asks for the two figures of your last approved annual report (retained earnings and profit for the year), checks them against the books, subtracts what has been distributed since, computes the 22/78 corporate income tax, checks net assets against share capital and reserves (ÄS §157), and creates the journal entry with correct postings.
 
 > "Reimburse my business expense of 45.50 EUR from Bolt"
 
