@@ -56,7 +56,6 @@ import { legacyTruncatedCamtMarkerHint } from "../../camt/duplicate-identity.js"
 import { matchScore, getInvoiceMatchEligibility, buildSuggestedDistribution, comparableTransactionAmount, sameAmountToTheCent, isAmbiguousForeignInvoiceBase, type MatchCandidate } from "./match-score.js";
 import { hasMeaningfulComparableAmount, resolveOneSidedTransferAmount, transactionCurrency } from "./amount-resolution.js";
 import {
-  counterpartyIbanOf,
   COUNTERPARTY_IBAN_NOT_REGISTERED,
   ONE_SIDED_MIN_CONFIDENCE,
   hasUnverifiableCamtMarker,
@@ -68,6 +67,7 @@ import {
   transferReferencesOf,
   unverifiedMarkerTransferClaim,
   getTransferPairCompatibility,
+  evaluateTransferPair,
   camtInstructionIdOf,
   wiseReferenceInstructionIdOf,
   getSameTypeReciprocalEvidence,
@@ -1061,87 +1061,26 @@ export async function runInterAccountMatching(
 
     for (const txIn of incoming) {
       if (!txIn.id || consumedTxIds.has(txIn.id)) continue;
-      if (txOut.accounts_dimensions_id === txIn.accounts_dimensions_id) continue;
-      // A trusted `x=i` leg is a proven external payment, on either side.
-      if (isCamtCounterpartyIbanOmitted(txOut) || isCamtCounterpartyIbanOmitted(txIn)) continue;
 
-      const compatibility = getTransferPairCompatibility(txOut, txIn, maxGap);
-      if (!compatibility) continue;
-
-      let confidence = compatibility.confidence;
-      const reasons = [...compatibility.reasons];
-      const txOutComparableAmount = compatibility.txAComparableAmount;
-      const conflictingComparableAmounts = compatibility.conflictingComparableAmounts;
-
-      const outCounterpartyIban = counterpartyIbanOf(txOut);
-      const inCounterpartyIban = counterpartyIbanOf(txIn);
-      const inAccountIban = dimensionToIban.get(txIn.accounts_dimensions_id) ?? "";
-      const outAccountIban = dimensionToIban.get(txOut.accounts_dimensions_id) ?? "";
-
-      if (conflictingComparableAmounts) {
+      const evaluation = evaluateTransferPair(txOut, txIn, lookups, maxGap);
+      if (evaluation.kind === "conflicting_amounts") {
         const txOutOneSided = inferOneSidedTransfer(txOut, lookups, oneSidedInferenceCache);
         const txInOneSided = inferOneSidedTransfer(txIn, lookups, oneSidedInferenceCache);
         const mutuallyConsistentOneSidedTargets =
           txOutOneSided.targetDimension === txIn.accounts_dimensions_id &&
           txInOneSided.targetDimension === txOut.accounts_dimensions_id;
         if (mutuallyConsistentOneSidedTargets) {
-          reportBlockedPair(txOut, txIn, compatibility.confidence, "conflicting_transfer_amounts");
+          reportBlockedPair(txOut, txIn, evaluation.confidence, "conflicting_transfer_amounts");
         }
         continue;
       }
-
-      // A counterparty IBAN naming a *different* own account contradicts this
-      // pairing, and an incoming row from a known third-party IBAN is a real
-      // receipt, not a transfer mirror leg — pairing would delete it.
-      // An IBAN may back several own accounts, so veto only when none of them
-      // is the candidate's account.
-      const outCounterpartyDims = outCounterpartyIban ? ownIbanToDimension.get(outCounterpartyIban) : undefined;
-      const inCounterpartyDims = inCounterpartyIban ? ownIbanToDimension.get(inCounterpartyIban) : undefined;
-      if (outCounterpartyDims && !outCounterpartyDims.has(txIn.accounts_dimensions_id)) continue;
-      if (inCounterpartyDims && !inCounterpartyDims.has(txOut.accounts_dimensions_id)) continue;
-      if (!hasMirrorOwnOriginEvidence(txIn, txOut, lookups)) continue;
-
-      const hasOutgoingIbanMatchesIncomingAccount =
-        Boolean(outCounterpartyIban && outCounterpartyIban === inAccountIban);
-      const hasIncomingIbanMatchesOutgoingAccount =
-        Boolean(inCounterpartyIban && inCounterpartyIban === outAccountIban);
-      const hasOutgoingCounterpartyIsOwnAccount =
-        Boolean(outCounterpartyIban && ownIbanToDimension.has(outCounterpartyIban));
-      const hasIncomingCounterpartyIsOwnAccount =
-        Boolean(inCounterpartyIban && ownIbanToDimension.has(inCounterpartyIban));
-
-      if (hasOutgoingIbanMatchesIncomingAccount) {
-        confidence += 30;
-        reasons.push("outgoing_iban_matches_incoming_account");
-      }
-      if (hasIncomingIbanMatchesOutgoingAccount) {
-        confidence += 30;
-        reasons.push("incoming_iban_matches_outgoing_account");
-      }
-
-      if (hasOutgoingCounterpartyIsOwnAccount && confidence <= 60) {
-        confidence += 15;
-        reasons.push("outgoing_counterparty_is_own_account");
-      }
-      if (hasIncomingCounterpartyIsOwnAccount && confidence <= 60) {
-        confidence += 15;
-        reasons.push("incoming_counterparty_is_own_account");
-      }
-
-      const hasCounterpartySignal =
-        hasOutgoingIbanMatchesIncomingAccount ||
-        hasIncomingIbanMatchesOutgoingAccount ||
-        hasOutgoingCounterpartyIsOwnAccount ||
-        hasIncomingCounterpartyIsOwnAccount;
-      if (!hasCounterpartySignal) continue;
-
-      if (confidence < 50) continue;
+      if (evaluation.kind !== "admitted") continue;
 
       candidates.push({
         txIn,
-        confidence: Math.min(confidence, 100),
-        reasons,
-        comparableAmount: txOutComparableAmount,
+        confidence: evaluation.confidence,
+        reasons: evaluation.reasons,
+        comparableAmount: evaluation.comparableAmount,
       });
     }
 
@@ -2019,10 +1958,15 @@ export async function executeInterAccount(
       const compatibility = getTransferPairCompatibility(source, mirror, action.pairEvidence.maxDateGap);
       if (!compatibility || compatibility.conflictingComparableAmounts || !sameAmountToTheCent(compatibility.txAComparableAmount, action.distributionAmount)) return false;
       if (action.pairEvidence.kind === "same_type") return !!getSameTypeReciprocalEvidence(source, mirror, sourceInference, inferOneSidedTransfer(mirror, lookups, new Map()), mapping.dimensionToIban);
-      const origin = hasMirrorOwnOriginEvidence(mirror, source, lookups);
-      const sourceIban = counterpartyIbanOf(source);
-      return !!origin && (sourceInference.targetDimension === mirror.accounts_dimensions_id
-        || !!(sourceIban && mapping.ownIbanToDimension.get(sourceIban)?.has(mirror.accounts_dimensions_id!)));
+      // Re-run the Phase-1 admission predicate itself on the fresh rows. A
+      // kept incoming leg (sourceSide "D") is the pair's incoming side.
+      const keptIncoming = action.pairEvidence.sourceSide === "D";
+      const [txOut, txIn] = keptIncoming ? [mirror, source] : [source, mirror];
+      if (bankTransactionDirection(txIn) !== "incoming" || bankTransactionDirection(txOut) === "incoming") return false;
+      if (hasUnverifiableCamtMarker(txOut) || hasUnverifiableCamtMarker(txIn)) return false;
+      if (keptIncoming && verifiedCamtDirection(txIn) !== "incoming") return false;
+      const evaluation = evaluateTransferPair(txOut, txIn, lookups, action.pairEvidence.maxDateGap);
+      return evaluation.kind === "admitted" && sameAmountToTheCent(evaluation.comparableAmount, action.distributionAmount);
     };
     const verifyTransferMaterial = async (source: Transaction) => {
       const expected = sourceExpected();

@@ -1374,6 +1374,47 @@ describe("bank_reconciliation plan binding", () => {
     });
   });
 
+  describe("execute re-verifies the dry run's pair admission", () => {
+    // Three own accounts: the kept row's own counterparty identity (company
+    // name, no IBAN) cannot single out the target, so the pair is admitted only
+    // on the other row naming the kept row's account IBAN.
+    const threeAccounts = [
+      ...iaBankAccounts,
+      { id: 3, account_name_est: "SEB", account_no: "EE333", iban_code: "EE333", accounts_dimensions_id: 300 },
+    ];
+    const pooledPair = (keepSide: "outgoing" | "incoming" = "outgoing") => [
+      { id: 50, status: "PROJECT", is_deleted: false, type: "C", amount: 250, date: "2026-03-21", accounts_dimensions_id: 100, bank_account_no: keepSide === "outgoing" ? null : "EE222", bank_account_name: "Test OÜ", clients_id: 99 },
+      camtSigned({ id: 51, status: "PROJECT", is_deleted: false, type: "D", description: "[e-arveldaja-mcp:camt dir=CRDT sig=abc123abc123abcd]", amount: 250, date: "2026-03-21", accounts_dimensions_id: 200, bank_account_no: keepSide === "outgoing" ? "EE111" : null, bank_account_name: "Test OÜ", clients_id: 99 }),
+    ];
+
+    for (const keepSide of ["outgoing", "incoming"] as const) {
+      it(`keep_side ${keepSide}: a dry-run-approved pair from a pooled source executes`, async () => {
+        const { handler, api } = setupInterAccountTool({ transactions: pooledPair(keepSide), bankAccounts: threeAccounts });
+        const dry = parseToolPayload<ReconInterAccountPayload>((await handler({ execute: false, keep_side: keepSide })).content[0]!.text);
+        expect(dry.pairs).toHaveLength(1);
+        expect(dry.pairs[0]!.match_reasons).toContain(keepSide === "outgoing" ? "incoming_iban_matches_outgoing_account" : "outgoing_iban_matches_incoming_account");
+
+        const done = parseToolPayload<ReconInterAccountPayload>((await handler({ execute: true, keep_side: keepSide, plan_handle: dry.plan_handle })).content[0]!.text);
+        expect(done.execution.execution_report!.status).toBe("completed");
+        expect(api.transactions.confirm).toHaveBeenCalledWith(keepSide === "incoming" ? 51 : 50, expect.any(Array), expect.any(Object));
+        expect(api.transactions.delete).toHaveBeenCalledWith(keepSide === "incoming" ? 50 : 51);
+      });
+    }
+
+    it("a pair whose incoming row now names another own account drifts", async () => {
+      const { handler, api } = setupInterAccountTool({ transactions: pooledPair(), bankAccounts: threeAccounts });
+      const dry = parseToolPayload<ReconInterAccountPayload>((await handler({ execute: false })).content[0]!.text);
+      expect(dry.pairs).toHaveLength(1);
+      const rows = await api.transactions.listAll() as Array<{ id: number; bank_account_no: string | null }>;
+      rows.find(row => row.id === 51)!.bank_account_no = "EE333";
+
+      const done = parseToolPayload<ReconPlanErrorPayload>((await handler({ execute: true, plan_handle: dry.plan_handle })).content[0]!.text);
+      expect(done.category).toBe("plan_drift");
+      expect(api.transactions.confirm).not.toHaveBeenCalled();
+      expect(api.transactions.delete).not.toHaveBeenCalled();
+    });
+  });
+
   it("inter-account: execute requires the handle and books the company-client fix as its own command", async () => {
     const { handler, api } = setupInterAccountTool({
       transactions: [
