@@ -364,12 +364,15 @@ async function runWiseImport(
   // Journals are read for every transfer CSV (counterpart evidence, Lane B and
   // the Wise-side holds), and when a confirmed untagged row on the Wise account
   // shares a date with a statement row: its registration journal may prove its
-  // direction (wise_untagged_ledger_unique). The snapshot is digest-bound.
+  // direction (wise_untagged_ledger_unique). Otherwise they are read after the
+  // first projection when it plans a main create (below). The snapshot is
+  // digest-bound.
   const eligibleDates = new Set(eligible.map(wiseRowDate));
   const untaggedLookalikePossible = existingTx.some(tx =>
     tx.status === "CONFIRMED" && tx.accounts_dimensions_id === accounts_dimensions_id &&
     !tx.description?.startsWith("WISE:") && eligibleDates.has(tx.date));
-  const journalSnapshot: Journal[] = hintedRows.length > 0 || untaggedLookalikePossible
+  const journalsReadUpFront = hintedRows.length > 0 || untaggedLookalikePossible;
+  let journalSnapshot: Journal[] = journalsReadUpFront
     ? await api.journals.listAllWithPostings()
     : [];
 
@@ -591,6 +594,14 @@ async function runWiseImport(
     clientResolutions,
   };
   let projected = projectWiseCommands(projectionInput);
+  // A planned main create (e.g. a card row) may already be booked by a manual
+  // journal labelled with its Wise ID (exact-label pass): read the journals and
+  // re-project. Same condition on dry run and execute, so the digest agrees.
+  if (!journalsReadUpFront && projected.commands.some(command => command.action === "main_create")) {
+    journalSnapshot = await api.journals.listAllWithPostings();
+    projectionInput.journalSnapshot = journalSnapshot;
+    projected = projectWiseCommands(projectionInput);
+  }
 
   // Fee dimension and Wise client are resolved only when a fee row survives
   // dedup, so a fully imported re-run never needs (or fails on) them.
@@ -735,7 +746,7 @@ async function runWiseImport(
     const storedApprovedIds = Array.isArray(storedPrivate?.approved_transfer_ids)
       ? (storedPrivate!.approved_transfer_ids as PlanData[]).filter((value): value is string => typeof value === "string")
       : undefined;
-    if (!storedApprovedIds || !orderedIdsEqual(approvedTransferIds, storedApprovedIds)) {
+    if (!storedApprovedIds || !orderedIdsEqual([...approvedTransferIds].sort(), [...storedApprovedIds].sort())) {
       return { ok: false, failure: { kind: "ownership_reapproval_required" } };
     }
     try {
