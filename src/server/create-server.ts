@@ -428,7 +428,9 @@ export async function createMcpServer(
       }
       try {
         return await invocationStorage.run(snapshot, async () => {
-          if (!setupMode) {
+          // get_server_status is in-memory only (and reports the 401 brake),
+          // so it must never send a request itself.
+          if (!setupMode && toolName !== "get_server_status") {
             await auditResolver.ensureAuditLogLabelResolved(snapshot.index);
           }
           const runInExtra = extra

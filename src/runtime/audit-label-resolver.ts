@@ -10,6 +10,14 @@ export function normalizeAuditCompanyName(companyName: string | null | undefined
   return normalized || null;
 }
 
+/**
+ * After a failed company-name lookup the connection is not retried for this
+ * long. Without it a stale key fired one hidden GET /invoice_info per tool call
+ * (even credential-free ones), and three such 401s within 60 s tripped the
+ * per-server 401 brake that also blocks healthy connections.
+ */
+export const AUDIT_LABEL_FAILURE_RETRY_MS = 5 * 60_000;
+
 export interface AuditLabelResolver {
   /** Recompute + apply audit-log labels from the currently-resolved company names. */
   applyAuditLogLabels(): void;
@@ -32,14 +40,17 @@ export function createAuditLabelResolver(opts: {
   allConfigs: readonly NamedConfig[];
   connectionContexts: ApiContext[];
   setupMode: boolean;
+  now?: () => number;
 }): AuditLabelResolver {
   const { allConfigs, connectionContexts, setupMode } = opts;
+  const now = opts.now ?? Date.now;
   const resolvedAuditCompanyNames = new Map<number, string | null>();
   allConfigs.forEach((config, index) => {
     const verifiedCompanyName = normalizeAuditCompanyName(config.verifiedCompanyName);
     if (verifiedCompanyName) resolvedAuditCompanyNames.set(index, verifiedCompanyName);
   });
   const auditLabelResolutionPromises = new Map<number, Promise<void>>();
+  const failedResolutionAt = new Map<number, number>();
 
   function applyAuditLogLabels(): void {
     const labels = buildAuditLogLabels(allConfigs.map((config, index) => ({
@@ -61,6 +72,8 @@ export function createAuditLabelResolver(opts: {
   async function ensureAuditLogLabelResolved(index: number): Promise<void> {
     if (setupMode || index < 0 || index >= connectionContexts.length) return;
     if (resolvedAuditCompanyNames.has(index)) return;
+    const failedAt = failedResolutionAt.get(index);
+    if (failedAt !== undefined && now() - failedAt < AUDIT_LABEL_FAILURE_RETRY_MS) return;
 
     const existing = auditLabelResolutionPromises.get(index);
     if (existing) {
@@ -73,6 +86,7 @@ export function createAuditLabelResolver(opts: {
         const invoiceInfo = await connectionContexts[index]!.readonly.getInvoiceInfo();
         const hadPrevious = resolvedAuditCompanyNames.has(index);
         const previousCompanyName = resolvedAuditCompanyNames.get(index);
+        failedResolutionAt.delete(index);
         resolvedAuditCompanyNames.set(index, normalizeAuditCompanyName(invoiceInfo.invoice_company_name));
         try {
           applyAuditLogLabels();
@@ -85,6 +99,7 @@ export function createAuditLabelResolver(opts: {
           throw error;
         }
       } catch (error) {
+        failedResolutionAt.set(index, now());
         log(
           "warning",
           `Failed to resolve audit log company name for connection "${allConfigs[index]!.name}": ` +
