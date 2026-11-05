@@ -4,6 +4,7 @@ import type { ApiContext } from "../tools/crud-tools.js";
 import type { RuntimeSafetyContext } from "../runtime-safety-context.js";
 import type { ExecutionPlanInput, PlanData, PlanRecord } from "../plan-store.js";
 import { canonicalPlanJson, stripUndefinedDeep } from "../tools/camt-plan.js";
+import { DEFAULT_LIABILITY_ACCOUNT } from "../accounting-defaults.js";
 import type { Account, PurchaseInvoiceItem, Transaction } from "../types/api.js";
 import { reportProgress } from "../progress.js";
 import { wrapUntrustedOcr } from "../mcp-json.js";
@@ -860,7 +861,7 @@ async function processSingleReceipt(
     // The booking actually written must be the approved one: supplier history
     // can change within this execution (an earlier receipt of the same
     // supplier was just booked) and pick other accounts or VAT treatment.
-    const livePreparedBooking = preparedBookingSnapshot(preparedAmounts, extracted, context);
+    const livePreparedBooking = preparedBookingSnapshot(preparedAmounts, extracted, bookingSuggestion, context);
     if (options.approvedPreparedBooking !== undefined &&
         canonicalPlanJson(livePreparedBooking) !== canonicalPlanJson(options.approvedPreparedBooking)) {
       return {
@@ -1272,28 +1273,25 @@ function preparedBookingOf(
 ): PlanData {
   if (result.status !== "dry_run_preview" || !result.extracted || !result.booking_suggestion) return null;
   const prepared = prepareReceiptInvoiceItems(context, result.extracted, result.booking_suggestion, result.extracted.description ?? "Receipt expense");
-  return preparedBookingSnapshot(prepared, result.extracted, context);
+  return preparedBookingSnapshot(prepared, result.extracted, result.booking_suggestion, context);
 }
 
+/**
+ * The effective creation model the receipt writer sends: every prepared row
+ * field (accounts, articles, VAT fields), the liability account and totals.
+ */
 function preparedBookingSnapshot(
   prepared: ReturnType<typeof prepareReceiptInvoiceItems>,
   extracted: ExtractedReceiptFields,
+  bookingSuggestion: Pick<BookingSuggestion, "suggested_liability_account_id">,
   context: Pick<ReceiptProcessingContext, "isVatRegistered">,
 ): PlanData {
   if (!prepared.ok) return { held: true };
   return stripUndefinedDeep({
     gross_total: prepared.grossTotal,
     vat_total: context.isVatRegistered ? extracted.total_vat ?? null : 0,
-    items: prepared.items.map(item => ({
-      purchase_accounts_id: item.purchase_accounts_id ?? null,
-      purchase_accounts_dimensions_id: item.purchase_accounts_dimensions_id ?? null,
-      total_net_price: item.total_net_price ?? null,
-      vat_rate_dropdown: item.vat_rate_dropdown ?? null,
-      vat_accounts_id: item.vat_accounts_id ?? null,
-      cl_vat_articles_id: item.cl_vat_articles_id ?? null,
-      reversed_vat_id: item.reversed_vat_id ?? null,
-      project_no_vat_gross_price: item.project_no_vat_gross_price ?? null,
-    })),
+    liability_accounts_id: bookingSuggestion.suggested_liability_account_id ?? DEFAULT_LIABILITY_ACCOUNT,
+    items: prepared.items,
   }) as unknown as PlanData;
 }
 

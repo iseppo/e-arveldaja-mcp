@@ -10,6 +10,7 @@ import { decodeInvoiceStatusCritical } from "../../api/critical-codecs.js";
 import { toolResponse } from "../../tool-response.js";
 import { lifecycleHandler } from "./lifecycle-handler.js";
 import { DEFAULT_LIABILITY_ACCOUNT } from "../../accounting-defaults.js";
+import { roundMoney } from "../../money.js";
 import { applyListView, viewParam } from "../../list-views.js";
 import {
   applyPurchaseItemStructuralDefaults,
@@ -277,8 +278,10 @@ export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext,
       const gateItems = callerSuppliedItems
         ? (parsed.items as PurchaseInvoiceItem[]).map(item => {
             const stored = item.id !== undefined ? current.items?.find(row => row.id === item.id) : undefined;
+            // Effective net, as the gate predicts it: unit price × quantity when total_net_price is absent.
+            const effectiveNet = (row: PurchaseInvoiceItem) => row.total_net_price ?? roundMoney((row.unit_net_price ?? 0) * (row.amount ?? 1));
             const unchanged = stored !== undefined
-              && (stored.total_net_price ?? null) === (item.total_net_price ?? null)
+              && effectiveNet(stored) === effectiveNet(item)
               && (stored.vat_rate_dropdown ?? null) === (item.vat_rate_dropdown ?? null)
               && (stored.project_no_vat_gross_price ?? null) === (item.project_no_vat_gross_price ?? null);
             const { vat_amount: _copied, ...rest } = item;

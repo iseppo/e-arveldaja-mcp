@@ -1768,6 +1768,21 @@ describe("update_* post-confirmation audit lock", () => {
     expect(update).toHaveBeenCalledTimes(1);
   });
 
+  it("update_purchase_invoice treats a quantity edit as a changed row when the net comes from unit price × quantity", async () => {
+    const update = vi.fn().mockResolvedValue({ code: 200, messages: [] });
+    const stored = [
+      { id: 1, custom_title: "Ordinary", cl_purchase_articles_id: 66, purchase_accounts_id: 7910, unit_net_price: 100, amount: 1, vat_rate_dropdown: "24", vat_amount: 24 },
+      { id: 2, custom_title: "Reverse", cl_purchase_articles_id: 66, purchase_accounts_id: 7910, total_net_price: 50, vat_rate_dropdown: "24", vat_amount: 12, reversed_vat_id: 1 },
+    ];
+    const { handler } = getCrudToolHarness("update_purchase_invoice", {
+      readonly: purchaseUpdateReadonly(),
+      purchaseInvoices: { get: vi.fn().mockResolvedValue({ id: 7, status: "PROJECT", vat_price: 24, gross_price: 174, items: stored }), update },
+    });
+    // The ordinary row's quantity doubles (no total_net_price): its copied vat_amount (24) is stale, the header VAT 48 is right.
+    await handler({ id: 7, data: { vat_price: 48, gross_price: 298, items: [{ ...stored[0], amount: 2 }, stored[1]] } });
+    expect(update).toHaveBeenCalledTimes(1);
+  });
+
   // GitHub #62: create_purchase_invoice defaults cl_fringe_benefits_id (NOT NULL
   // in the API) but update did not, so the create payload 500'd on update.
   it("update_purchase_invoice defaults cl_fringe_benefits_id/amount on caller items like create does", async () => {

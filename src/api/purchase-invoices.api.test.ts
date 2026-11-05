@@ -710,6 +710,15 @@ describe("previewPurchaseInvoiceTotals — createAndSetTotals rules before any w
       expect(previewPurchaseInvoiceTotals({ ...baseData, items: [item(0.03, "24")] } as never, 0.005, undefined, true)).toMatchObject({ ok: true, gross: 0.04 });
     });
 
+    it("rounds each header amount half-up before the cent comparison (4.19 + 1.005 → 5.20; −0.03 + −0.005 → −0.04)", () => {
+      expect(previewPurchaseInvoiceTotals({ ...baseData, items: [item(4.19, "24")] } as never, 1.005, undefined, true)).toMatchObject({ ok: true, gross: 5.2 });
+      expect(previewPurchaseInvoiceTotals({ ...baseData, items: [item(4.19, "24")] } as never, 1.005, 5.2, true)).toMatchObject({ ok: true, gross: 5.2 });
+      expect(previewPurchaseInvoiceTotals({ ...baseData, items: [item(4.19, "24")] } as never, 1.005, 5.19, true)).toMatchObject({ ok: false, code: "purchase_totals_mismatch" });
+      expect(previewPurchaseInvoiceTotals({ ...baseData, items: [item(-0.03, "24")] } as never, -0.005, undefined, true)).toMatchObject({ ok: true, gross: -0.04 });
+      expect(previewPurchaseInvoiceTotals({ ...baseData, items: [item(-0.03, "24")] } as never, -0.005, -0.04, true)).toMatchObject({ ok: true, gross: -0.04 });
+      expect(previewPurchaseInvoiceTotals({ ...baseData, items: [item(-0.03, "24")] } as never, -0.005, -0.03, true)).toMatchObject({ ok: false, code: "purchase_totals_mismatch" });
+    });
+
     it("a reverse-charge item with a charged header VAT (V 24 / G 124) is refused before create", async () => {
       await expectRefusedBeforeCreate(
         { ...baseData, items: [item(100, "24", { reversed_vat_id: 1 })] },

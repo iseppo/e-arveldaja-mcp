@@ -300,15 +300,16 @@ export function resolvePurchaseInvoiceTotals(input: {
   // Invoice-level gross: VAT-registered (and non-deductible) = item net + invoice
   // VAT; folded = the sum of the items' gross (net + folded VAT). An explicit
   // gross must equal it to the cent.
-  // Compared in whole cents: each amount is rounded to cents before summing.
-  const cents = (value: number) => Math.round(value * 100);
+  // Compared in whole cents: each amount is rounded half-up (sign-symmetric,
+  // roundMoney) to cents before summing, so 1.005 counts as 1.01.
+  const cents = (value: number) => Math.round(roundMoney(value) * 100);
   const foldedItemGross = hasItems
     ? items.reduce((sum, item, index) =>
       sum + cents(item.project_no_vat_gross_price ?? roundMoney((itemAmounts[index]?.net ?? 0) + (itemAmounts[index]?.vat ?? 0))), 0) / 100
     : roundMoney(itemNet + itemVat);
   const expectedGross = isVatRegistered ? (cents(itemNet) + cents(vat)) / 100 : foldedItemGross;
   const gross = grossPrice !== undefined ? grossPrice : expectedGross;
-  if (hasItems && grossPrice !== undefined && Math.round(grossPrice * 100) !== Math.round(expectedGross * 100)) {
+  if (hasItems && grossPrice !== undefined && cents(grossPrice) !== cents(expectedGross)) {
     return {
       ok: false,
       code: "purchase_totals_mismatch",
