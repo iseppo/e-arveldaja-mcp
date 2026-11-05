@@ -455,7 +455,9 @@ describe("process_accounting_document", () => {
       plan_handle: prepared.summary.plan_handle,
       source_sha256: sha256,
       ...bookingArgs(),
-      gross_price: 9999,
+      // A drift that still closes arithmetically (net + VAT = gross) reaches the drift compare.
+      vat_price: 2.01,
+      gross_price: 12.01,
     });
     expect(drifted.isError).toBe(true);
     expect(parse(drifted).category).toBe("plan_drift");

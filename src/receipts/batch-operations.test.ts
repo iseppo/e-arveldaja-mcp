@@ -400,6 +400,56 @@ describe("P01 bound supplier identity and public pager", () => {
 
   const outgoing = { id: 42, status: "PROJECT", is_deleted: false, type: "C", amount: 124, base_amount: 124, date: "2026-03-20", accounts_dimensions_id: 100, clients_id: 9, bank_account_name: "Supplier OU", cl_currencies_id: "EUR", description: "WISE:PAY invoice INV-1 [source_direction=OUT]" };
 
+  it("stops a same-supplier second receipt as plan_drift when the first one's booking changes its history-derived rows mid-run", async () => {
+    vi.mocked(readdir).mockResolvedValue([{ name: "first.pdf", isFile: () => true }, { name: "second.pdf", isFile: () => true }] as never);
+    const fields = { supplier_name: "Supplier OU", invoice_date: "2026-03-20", total_net: 100, total_vat: 24, total_gross: 124, currency: "EUR", raw_text: "ignored", description: "Service" };
+    // Every pass extracts first.pdf, then second.pdf.
+    let extractCalls = 0;
+    vi.mocked(extractReceiptFieldsFromText).mockImplementation((() => (extractCalls++ % 2 === 1
+      ? { ...fields, invoice_number: "INV-TWO", invoice_date: "2026-03-05", total_net: 50, total_vat: 12, total_gross: 62 }
+      : { ...fields, invoice_number: "INV-ONE" })) as never);
+    const { api, spies } = makeApi();
+    // Supplier history: before any create in this run the supplier's rows post VAT on the cost account
+    // (7910/7910/11); once the first receipt is booked, its row (5230/1510/1) becomes the latest history.
+    vi.mocked(suggestBookingInternal).mockImplementation((async () => spies.createAndSetTotals.mock.calls.length === 0
+      ? { item: { custom_title: "Service", amount: 1, total_net_price: 100, cl_purchase_articles_id: 502, purchase_accounts_id: 7910, vat_rate_dropdown: "24", vat_accounts_id: 7910, cl_vat_articles_id: 11 }, source: "supplier_history" }
+      : { item: { custom_title: "Service", amount: 1, total_net_price: 100, cl_purchase_articles_id: 501, purchase_accounts_id: 5230, vat_rate_dropdown: "24", vat_accounts_id: 1510, cl_vat_articles_id: 1 }, source: "supplier_history" }) as never);
+    const ops = makeOperations(api);
+    const dry = await ops.runBatch({ ...baseRun, executionMode: "dry_run", dryRun: true });
+    if (!dry.ok) throw new Error(dry.error.code);
+    expect(dry.value.results.map(result => result.status)).toEqual(["dry_run_preview", "dry_run_preview"]);
+    const executed = await ops.runBatch({ ...baseRun, executionMode: "create_and_confirm", dryRun: false, approvedManifest: dry.value.manifest, planHandle: dry.value.planHandles!.create_and_confirm });
+    if (!executed.ok) throw new Error(executed.error.code);
+    expect(spies.createAndSetTotals).toHaveBeenCalledTimes(1);
+    expect(spies.createAndSetTotals.mock.calls[0]![0].items[0]).toMatchObject({ purchase_accounts_id: 7910, vat_accounts_id: 7910 });
+    expect(executed.value.results[1]).toMatchObject({ status: "failed", error: expect.stringMatching(/^plan_drift/) });
+  });
+
+  it.each([
+    ["liability account", { suggested_liability_account_id: 2310 }, { suggested_liability_account_id: 2315 }, {}, {}],
+    ["purchase article", {}, {}, { cl_purchase_articles_id: 502 }, { cl_purchase_articles_id: 501 }],
+  ])("stops a same-supplier second receipt as plan_drift when only its %s changes mid-run", async (_label, topBefore, topAfter, itemBefore, itemAfter) => {
+    vi.mocked(readdir).mockResolvedValue([{ name: "first.pdf", isFile: () => true }, { name: "second.pdf", isFile: () => true }] as never);
+    const fields = { supplier_name: "Supplier OU", invoice_date: "2026-03-20", total_net: 100, total_vat: 24, total_gross: 124, currency: "EUR", raw_text: "ignored", description: "Service" };
+    let extractCalls = 0;
+    vi.mocked(extractReceiptFieldsFromText).mockImplementation((() => (extractCalls++ % 2 === 1
+      ? { ...fields, invoice_number: "INV-TWO", invoice_date: "2026-03-05", total_net: 50, total_vat: 12, total_gross: 62 }
+      : { ...fields, invoice_number: "INV-ONE" })) as never);
+    const { api, spies } = makeApi();
+    const item = { custom_title: "Service", amount: 1, total_net_price: 100, cl_purchase_articles_id: 502, purchase_accounts_id: 5230, vat_rate_dropdown: "24", vat_accounts_id: 1510, cl_vat_articles_id: 1 };
+    vi.mocked(suggestBookingInternal).mockImplementation((async () => spies.createAndSetTotals.mock.calls.length === 0
+      ? { ...topBefore, item: { ...item, ...itemBefore }, source: "supplier_history" }
+      : { ...topAfter, item: { ...item, ...itemAfter }, source: "supplier_history" }) as never);
+    const ops = makeOperations(api);
+    const dry = await ops.runBatch({ ...baseRun, executionMode: "dry_run", dryRun: true });
+    if (!dry.ok) throw new Error(dry.error.code);
+    expect(dry.value.results.map(result => result.status)).toEqual(["dry_run_preview", "dry_run_preview"]);
+    const executed = await ops.runBatch({ ...baseRun, executionMode: "create_and_confirm", dryRun: false, approvedManifest: dry.value.manifest, planHandle: dry.value.planHandles!.create_and_confirm });
+    if (!executed.ok) throw new Error(executed.error.code);
+    expect(spies.createAndSetTotals).toHaveBeenCalledTimes(1);
+    expect(executed.value.results[1]).toMatchObject({ status: "failed", error: expect.stringMatching(/^plan_drift/) });
+  });
+
   it("keeps two receipts' supplier, source and payment effects distinct", async () => {
     vi.mocked(readdir).mockResolvedValue([{ name: "first.pdf", isFile: () => true }, { name: "second.pdf", isFile: () => true }] as never);
     const fields = { supplier_name: "Supplier OU", invoice_date: "2026-03-20", total_net: 100, total_vat: 24, total_gross: 124, currency: "EUR", raw_text: "ignored", description: "Service" };
@@ -416,6 +466,24 @@ describe("P01 bound supplier identity and public pager", () => {
     expect(rows).toHaveLength(2);
     expect(rows[0]).toMatchObject({ relative_path: "first.pdf", supplier_client_id: 7, invoice_number: "INV-ONE", bank_confirmation: { transaction_id: 42, client_transition: null, distribution: { invoice_reference: "receipt:0:future_purchase_invoice", amount: 124 } } });
     expect(rows[1]).toMatchObject({ relative_path: "second.pdf", supplier_client_id: 8, invoice_number: "INV-TWO", bank_confirmation: { transaction_id: 43, client_transition: { from: null, to: 8 }, distribution: { invoice_reference: "receipt:1:future_purchase_invoice", amount: 124 } } });
+  });
+
+  it.each([
+    ["full → none", { vat_number: "EE123456789" }, { vat_number: null }],
+    ["none → full", { vat_number: null }, { vat_number: "EE123456789" }],
+  ])("a company VAT status change between preview and execute (%s) is plan_drift with zero writes", async (_label, before, after) => {
+    vi.mocked(extractReceiptFieldsFromText).mockReturnValue({ supplier_name: "Supplier OU", invoice_number: "INV-VAT", invoice_date: "2026-03-20", total_net: 100, total_vat: 24, total_gross: 124, currency: "EUR", raw_text: "ignored", description: "Service" } as never);
+    const { api, spies } = makeApi();
+    const getVatInfo = (api as unknown as { readonly: Record<string, ReturnType<typeof vi.fn>> }).readonly.getVatInfo!;
+    getVatInfo.mockResolvedValue(before);
+    const ops = makeOperations(api);
+    const dry = await ops.runBatch({ ...baseRun, executionMode: "dry_run", dryRun: true });
+    if (!dry.ok) throw new Error(dry.error.code);
+    expect(dry.value.results[0]).toMatchObject({ status: "dry_run_preview" });
+    getVatInfo.mockResolvedValue(after);
+    const outcome = await ops.runBatch({ ...baseRun, executionMode: "create", dryRun: false, approvedManifest: dry.value.manifest, planHandle: dry.value.planHandles!.create });
+    expect(outcome).toMatchObject({ ok: false, error: { code: "plan_drift" } });
+    expect(spies.createAndSetTotals).not.toHaveBeenCalled();
   });
 
   it("#3 processes a byte-identical receipt copy once: the copy is skipped with duplicate_file_of and never booked", async () => {

@@ -59,7 +59,6 @@ import {
   deriveAutoBookedNetAmount,
   deriveAutoBookedVatPrice,
   getAutoBookedVatConfig,
-  getBookingSuggestionVatConfig,
 } from "../tools/receipt-extraction.js";
 import { buildClassificationReviewGuidance } from "../estonian-accounting-guidance.js";
 import { DEFAULT_ACCOUNTS_RECEIVABLE, DEFAULT_LIABILITY_ACCOUNT } from "../accounting-defaults.js";
@@ -731,12 +730,12 @@ class ClassificationOperationsImpl implements ClassificationOperations {
           continue;
         }
         const article = context.purchaseArticlesWithVat.find(item => item.id === resolved.suggestion.purchase_article_id);
-        const vatConfig = getBookingSuggestionVatConfig({
+        const vatConfig = getAutoBookedVatConfig(context.isVatRegistered, {
           item: {
             vat_rate_dropdown: resolved.suggestion.vat_rate_dropdown,
             reversed_vat_id: resolved.suggestion.reversed_vat_id,
           } as PurchaseInvoiceItem,
-        }) ?? getAutoBookedVatConfig();
+        });
         const netAmount = deriveAutoBookedNetAmount(grossAmount, vatConfig);
         const purchaseItem = applyPurchaseVatDefaults(
           context.purchaseArticlesWithVat,
@@ -1427,12 +1426,15 @@ class ClassificationOperationsImpl implements ClassificationOperations {
           }
 
           const article = purchaseArticlesWithVat.find(item => item.id === resolved.suggestion.purchase_article_id);
-          const vatConfig = getBookingSuggestionVatConfig({
+          const vatConfig = getAutoBookedVatConfig(isVatRegistered, {
             item: {
               vat_rate_dropdown: resolved.suggestion.vat_rate_dropdown,
               reversed_vat_id: resolved.suggestion.reversed_vat_id,
             } as PurchaseInvoiceItem,
-          }) ?? getAutoBookedVatConfig();
+          });
+          if (!isVatRegistered && resolved.suggestion.reversed_vat_id !== undefined && resolved.suggestion.reversed_vat_id !== null) {
+            notes.push(`Transaction ${transaction.id}: reverse charge from supplier history was not applied — the company is not fully VAT-registered (no input-VAT deduction).`);
+          }
           const netAmount = deriveAutoBookedNetAmount(grossAmount, vatConfig);
           const purchaseItem = applyPurchaseVatDefaults(
             purchaseArticlesWithVat,

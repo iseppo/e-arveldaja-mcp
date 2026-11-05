@@ -203,6 +203,43 @@ export function proveNonDeductibleInvoice(
   return { ok: true, rate };
 }
 
+const isReverseChargeItem = (item: PurchaseInvoiceItem) => item.reversed_vat_id !== undefined && item.reversed_vat_id !== null;
+
+/**
+ * The reverse-charge gate of a draft before it is written or registered:
+ * - a company that is not fully VAT-registered (none / limited) never carries
+ *   `reversed_vat_id` (no reverse-charge input leg);
+ * - for a VAT-registered company the invoice VAT must be the VAT of the
+ *   ordinary (not reverse-charge) rows, within the 1-cent-per-row residue: a
+ *   reverse-charge row under a charged invoice VAT counts the VAT twice.
+ * Undefined when the invoice passes. Row VAT is the read-back `vat_amount`,
+ * else predicted (override gross − net, else net × rate).
+ */
+export function reverseChargeRegisterRefusal(
+  invoice: { vat_price?: number | null; items?: readonly PurchaseInvoiceItem[] | null },
+  isVatRegistered: boolean,
+): string | undefined {
+  const items = invoice.items ?? [];
+  if (!items.some(isReverseChargeItem)) return undefined;
+  if (!isVatRegistered) {
+    return "a row carries reverse charge (reversed_vat_id) but the company is not fully VAT-registered (no reverse-charge input VAT)";
+  }
+  const chargedVat = roundMoney(items.reduce((sum, item) => {
+    if (isReverseChargeItem(item)) return sum;
+    if (typeof item.vat_amount === "number") return sum + item.vat_amount;
+    const net = item.total_net_price ?? roundMoney((item.unit_net_price ?? 0) * (item.amount ?? 1));
+    return sum + (item.project_no_vat_gross_price != null
+      ? roundMoney(item.project_no_vat_gross_price - net)
+      : roundMoney(net * parseVatRateDropdown(item.vat_rate_dropdown) / 100));
+  }, 0));
+  const invoiceVat = invoice.vat_price ?? 0;
+  if (Math.abs(roundMoney(invoiceVat - chargedVat)) > roundMoney(0.01 * items.length) + 1e-9) {
+    return `reverse-charge rows with a charged invoice VAT ${invoiceVat} (the ordinary rows carry VAT ${chargedVat}); ` +
+      "a reverse-charge row's VAT is self-assessed, never charged by the supplier";
+  }
+  return undefined;
+}
+
 /**
  * The register gate (P4) of a non-VAT invoice: undefined when no item carries
  * a VAT account (folded, today's form), else the proof's refusal reason, if any.
@@ -233,6 +270,9 @@ export function validateNonVatItem(item: PurchaseInvoiceItem): string[] {
   }
   if (vatRateDropdown !== undefined && vatRateDropdown !== "-") {
     errors.push('vat_rate_dropdown must be absent or "-"');
+  }
+  if (item.reversed_vat_id !== undefined && item.reversed_vat_id !== null) {
+    errors.push("reversed_vat_id must be absent (a company that is not fully VAT-registered has no reverse-charge input VAT)");
   }
   if (item.vat_accounts_id !== undefined && item.vat_accounts_id !== null && item.vat_accounts_id === item.purchase_accounts_id) {
     errors.push("the non-deductible form (VAT on the cost account) also needs vat_accounts_dimensions_id equal to purchase_accounts_dimensions_id, " +
@@ -362,6 +402,8 @@ export function applyPurchaseVatDefaults(
     if (options.allowNonDeductible === true && isNonDeductibleVatItem(merged)) return merged;
     delete merged.vat_accounts_id;
     delete merged.vat_accounts_dimensions_id;
+    // No reverse-charge input leg without full VAT registration (none / limited).
+    delete merged.reversed_vat_id;
     merged.cl_vat_articles_id = 11;
     merged.vat_rate_dropdown = "-";
     return merged;

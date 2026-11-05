@@ -4,6 +4,7 @@ import type { ApiContext } from "../tools/crud-tools.js";
 import type { RuntimeSafetyContext } from "../runtime-safety-context.js";
 import type { ExecutionPlanInput, PlanData, PlanRecord } from "../plan-store.js";
 import { canonicalPlanJson, stripUndefinedDeep } from "../tools/camt-plan.js";
+import { DEFAULT_LIABILITY_ACCOUNT } from "../accounting-defaults.js";
 import type { Account, PurchaseInvoiceItem, Transaction } from "../types/api.js";
 import { reportProgress } from "../progress.js";
 import { wrapUntrustedOcr } from "../mcp-json.js";
@@ -371,6 +372,8 @@ interface ProcessSingleReceiptOptions {
   findAttached?: (snapshot: ReceiptFileSnapshot, invoiceNumber: string | undefined) => Promise<AttachedInvoice | undefined>;
   /** Mutation pass: the create command the reviewed plan approved for this file. */
   approvedCreate?: ApprovedCreateCommand;
+  /** Mutation pass: the prepared rows + totals the reviewed plan approved for this file (preparedBookingOf). */
+  approvedPreparedBooking?: PlanData;
   /** Mutation pass: the approved legal identity of a prospective (not yet existing) supplier. */
   approvedSupplierIdentity?: string;
   /** Mutation pass: supplier clients this execution created, by approved legal identity. */
@@ -869,6 +872,22 @@ async function processSingleReceipt(
     ) {
       liveCreate.supplier_client_id = null;
     }
+    // The booking actually written must be the approved one: supplier history
+    // can change within this execution (an earlier receipt of the same
+    // supplier was just booked) and pick other accounts or VAT treatment.
+    const livePreparedBooking = preparedBookingSnapshot(preparedAmounts, extracted, bookingSuggestion, context);
+    if (options.approvedPreparedBooking !== undefined &&
+        canonicalPlanJson(livePreparedBooking) !== canonicalPlanJson(options.approvedPreparedBooking)) {
+      return {
+        file,
+        classification,
+        status: "failed",
+        extracted,
+        supplier_resolution: supplierResolution,
+        notes: [...notes, "plan_drift: this file's booking rows (accounts, VAT treatment or totals) differ from the reviewed plan; nothing was written for it. Re-run the dry run."],
+        error: "plan_drift: booking rows differ from the reviewed plan",
+      };
+    }
     if (options.approvedCreate !== undefined &&
         canonicalPlanJson(liveCreate as unknown as PlanData) !==
           canonicalPlanJson(options.approvedCreate as unknown as PlanData)) {
@@ -1149,7 +1168,9 @@ class ReceiptBatchOperationsImpl implements ReceiptBatchOperations {
             consumedTransactionIds,
             previousResults: results,
             findAttached,
-            ...(approved !== undefined && approved.status === "dry_run_preview" ? { approvedCreate: createCommandOf(approved) } : {}),
+            ...(approved !== undefined && approved.status === "dry_run_preview"
+              ? { approvedCreate: createCommandOf(approved), approvedPreparedBooking: preparedBookingOf(approved, context) }
+              : {}),
             ...(approvedSupplierIdentity !== undefined ? { approvedSupplierIdentity, createdSupplierClientIds } : {}),
           }));
           const createdClientId = processed.supplier_resolution?.created ? processed.supplier_resolution.client?.id : undefined;
@@ -1190,7 +1211,7 @@ class ReceiptBatchOperationsImpl implements ReceiptBatchOperations {
         // `create` approval can never be replayed as `create_and_confirm`.
         const results = await runLoop("dry_run", true, false, { backfill: true });
         const mintHandle = (effect: ReceiptBatchExecutionMode): string => {
-          const fingerprint = computeBatchFingerprint(results, input, snapshot, bankTransactions, effect);
+          const fingerprint = computeBatchFingerprint(results, input, snapshot, bankTransactions, effect, context);
           const reviews = receiptEffectReviews(fingerprint);
           const planInput: ExecutionPlanInput = {
             normalizedArgs: fingerprint,
@@ -1234,7 +1255,7 @@ class ReceiptBatchOperationsImpl implements ReceiptBatchOperations {
       // rule, supplier/article/account/dimension, or live bank transaction all
       // change this fingerprint.
       const projection = await runLoop("dry_run", true, false, { backfill: false });
-      const freshFingerprint = computeBatchFingerprint(projection, input, snapshot, bankTransactions, input.executionMode);
+      const freshFingerprint = computeBatchFingerprint(projection, input, snapshot, bankTransactions, input.executionMode, context);
 
       let storedPlan;
       try {
@@ -1259,6 +1280,35 @@ class ReceiptBatchOperationsImpl implements ReceiptBatchOperations {
   }
 }
 
+/** The prepared invoice rows + totals of a previewed receipt (null when the row is not created). */
+function preparedBookingOf(
+  result: ReceiptBatchFileResult,
+  context: Pick<ReceiptProcessingContext, "isVatRegistered" | "purchaseArticlesWithVat">,
+): PlanData {
+  if (result.status !== "dry_run_preview" || !result.extracted || !result.booking_suggestion) return null;
+  const prepared = prepareReceiptInvoiceItems(context, result.extracted, result.booking_suggestion, result.extracted.description ?? "Receipt expense");
+  return preparedBookingSnapshot(prepared, result.extracted, result.booking_suggestion, context);
+}
+
+/**
+ * The effective creation model the receipt writer sends: every prepared row
+ * field (accounts, articles, VAT fields), the liability account and totals.
+ */
+function preparedBookingSnapshot(
+  prepared: ReturnType<typeof prepareReceiptInvoiceItems>,
+  extracted: ExtractedReceiptFields,
+  bookingSuggestion: Pick<BookingSuggestion, "suggested_liability_account_id">,
+  context: Pick<ReceiptProcessingContext, "isVatRegistered">,
+): PlanData {
+  if (!prepared.ok) return { held: true };
+  return stripUndefinedDeep({
+    gross_total: prepared.grossTotal,
+    vat_total: context.isVatRegistered ? extracted.total_vat ?? null : 0,
+    liability_accounts_id: bookingSuggestion.suggested_liability_account_id ?? DEFAULT_LIABILITY_ACCOUNT,
+    items: prepared.items,
+  }) as unknown as PlanData;
+}
+
 /**
  * P0-3 canonical drift fingerprint of a receipt batch. Binds — for ONE execution
  * effect — the manifest (file bytes), folder identity, bank dimension, every date
@@ -1273,6 +1323,7 @@ function computeBatchFingerprint(
   snapshot: { manifest: { relative_path: string; sha256: string }[]; files: ReceiptFileSnapshot[] },
   bankTransactions: Transaction[],
   effect: ReceiptBatchExecutionMode,
+  context: Pick<ReceiptProcessingContext, "isVatRegistered" | "purchaseArticlesWithVat" | "companyVatStatus">,
 ): PlanRecord {
   const files: PlanData[] = results.map((result, index) => {
     // Bind the row to the actual snapshotted path, never a basename or sorted
@@ -1328,12 +1379,17 @@ function computeBatchFingerprint(
             reversed_vat_id: result.booking_suggestion.item?.reversed_vat_id ?? null,
           }
         : null,
+      // The effective VAT treatment the create would write: the prepared rows
+      // and totals (folded gross vs net + input VAT, reverse charge), so a VAT
+      // status change between preview and execute is plan drift.
+      prepared_booking: preparedBookingOf(result, context),
     });
   });
   const bankTx: PlanData[] = bankTransactions.map(tx => stripUndefinedDeep(snapshotBankTransaction(tx)) as unknown as PlanData);
   return stripUndefinedDeep({
     schema: "receipt_batch_v1",
     execution_effect: effect,
+    company_vat_status: context.companyVatStatus ?? (context.isVatRegistered ? "full" : "none"),
     folder: input.resolvedFolderPath,
     accounts_dimensions_id: input.accountsDimensionsId,
     date_from: input.dateFrom ?? null,

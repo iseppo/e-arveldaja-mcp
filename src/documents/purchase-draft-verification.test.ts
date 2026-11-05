@@ -58,10 +58,20 @@ describe("shared purchase draft evidence", () => {
     expect(draftReadbackMismatches({ ...ignored, items: [{ ...ignored.items[0], vat_amount: 115.95 }] }, residueModel, totals, true)).toContain("items[0].vat_amount");
     // Without a residue there is nothing to ignore.
     expect(draftReadbackMismatches({ ...draft, items: [{ ...draft.items[0], vat_amount: 24.01 }] }, model, { vatPrice: 24, grossPrice: 124 }, true)).toContain("items[0].vat_amount");
-    // A reverse-charge row skips the totals tolerance upstream: a gap wider than one cent per line is never a residue.
+    // A reverse-charge row's self-assessed VAT is no residue: explicit 0 / 100 sends no override, and the row reads
+    // back its own VAT (net × rate, no override); any other row VAT is still a mismatch.
     const reverseModel = { ...model, items: [{ ...model.items[0], reversed_vat_id: 1, total_net_price: 100 }] };
     const reverseDraft = { ...draft, vat_price: 0, gross_price: 100, base_vat_price: 0, base_gross_price: 100, items: [{ ...draft.items[0], reversed_vat_id: 1, vat_amount: 24, project_no_vat_gross_price: null }] };
-    expect(draftReadbackMismatches(reverseDraft, reverseModel, { vatPrice: 0, grossPrice: 100 }, true)).toContain("items[0].vat_amount");
+    expect(draftReadbackMismatches(reverseDraft, reverseModel, { vatPrice: 0, grossPrice: 100 }, true)).toEqual([]);
+    expect(draftReadbackMismatches({ ...reverseDraft, items: [{ ...reverseDraft.items[0], vat_amount: 0, project_no_vat_gross_price: 100 }] }, reverseModel, { vatPrice: 0, grossPrice: 100 }, true))
+      .toContain("items[0].vat_amount");
+    // Mixed ordinary 100 + reverse-charge 50 at explicit VAT 24 / gross 174: both rows read back their own VAT.
+    const mixedModel = { ...model, items: [{ ...model.items[0], total_net_price: 100 }, { ...model.items[0], reversed_vat_id: 1, total_net_price: 50 }] };
+    const mixedDraft = { ...draft, net_price: 150, vat_price: 24, gross_price: 174, base_net_price: 150, base_vat_price: 24, base_gross_price: 174, items: [
+      { ...draft.items[0], total_net_price: 100, base_total_net_price: 100, vat_amount: 24, project_no_vat_gross_price: null },
+      { ...draft.items[0], reversed_vat_id: 1, total_net_price: 50, base_total_net_price: 50, vat_amount: 12, project_no_vat_gross_price: null },
+    ] };
+    expect(draftReadbackMismatches(mixedDraft, mixedModel, { vatPrice: 24, grossPrice: 174 }, true)).toEqual([]);
     // Only a VAT-registered company: the same readback shape on a non-VAT company is a mismatch.
     expect(draftReadbackMismatches(ignored, residueModel, totals, false)).not.toEqual([]);
     // Only the last row: a first row reading the same shape is still compared normally.
