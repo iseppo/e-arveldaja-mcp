@@ -65,6 +65,37 @@ describe("purchase intake FIFO", () => {
       .toEqual({ kind: "number", invoiceIds: [] });
   });
 
+  it("an existing AUTO- placeholder invoice never takes the other-number amount/date match", async () => {
+    const api = apiFor("auto-existing");
+    api.purchaseInvoices.listAll.mockResolvedValue([
+      { id: 11, clients_id: 4242, number: "AUTO-TX-5", gross_price: 124, create_date: "2026-03-15", cl_currencies_id: "EUR", status: "CONFIRMED" },
+    ]);
+    expect(await scanPurchaseIntakeDuplicates(api, { supplierClientId: 4242, invoiceNumber: "INV-1023", grossPrice: 124, invoiceDate: "2026-03-15", currency: "EUR" }))
+      .toEqual({ kind: "number", invoiceIds: [] });
+  });
+
+  it("a signed credit-note gross takes the other-number match", async () => {
+    const api = apiFor("credit-note");
+    api.purchaseInvoices.listAll.mockResolvedValue([
+      { id: 15, clients_id: 4242, number: "KR-1O", gross_price: -124, create_date: "2026-03-15", cl_currencies_id: "EUR", status: "CONFIRMED" },
+    ]);
+    expect(await scanPurchaseIntakeDuplicates(api, { supplierClientId: 4242, invoiceNumber: "KR-10", grossPrice: -124, invoiceDate: "2026-03-15", currency: "EUR" }))
+      .toEqual({ kind: "amount_date_other_number", invoiceIds: [15] });
+  });
+
+  it("a numbered scan derives the comparison gross when none was supplied, and holds when neither is available", async () => {
+    const api = apiFor("derived-gross");
+    api.purchaseInvoices.listAll.mockResolvedValue([
+      { id: 11, clients_id: 4242, number: "INV-1O23", gross_price: 124, create_date: "2026-03-15", cl_currencies_id: "EUR", status: "CONFIRMED" },
+    ]);
+    expect(await scanPurchaseIntakeDuplicates(api, { supplierClientId: 4242, invoiceNumber: "INV-1023", derivedGrossPrice: 124, invoiceDate: "2026-03-15", currency: "EUR" }))
+      .toEqual({ kind: "amount_date_other_number", invoiceIds: [11] });
+    expect(await scanPurchaseIntakeDuplicates(api, { supplierClientId: 4242, invoiceNumber: "INV-1023", invoiceDate: "2026-03-15", currency: "EUR" }))
+      .toEqual({ kind: "amount_date_other_number", invoiceIds: [], comparisonUnavailable: ["gross_price"] });
+    expect(await scanPurchaseIntakeDuplicates(api, { supplierClientId: 4242, invoiceNumber: "INV-1023", grossPrice: 124, invoiceDate: "2026-3-15", currency: "EUR" }))
+      .toEqual({ kind: "amount_date_other_number", invoiceIds: [], comparisonUnavailable: ["invoice_date"] });
+  });
+
   it("nonblank exact-number scans do not require amount/date comparison inputs", async () => {
     const api = apiFor("number-only");
     api.purchaseInvoices.listAll.mockResolvedValue([{ id: 9, clients_id: 4242, number: "A-17", status: "PROJECT" }]);

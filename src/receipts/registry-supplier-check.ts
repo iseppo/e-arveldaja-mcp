@@ -107,7 +107,10 @@ export async function crossCheckSupplierWithRegistry(
   // The register names the active company: the buyer's own code was read as the
   // supplier's (its own code is unknown when it has no client record of its
   // own). Hold — booking on it would resolve or create the company itself.
-  if (options.ownCompanyName && companyNamesAgree(registryName, options.ownCompanyName)) {
+  // Exact normalized equality (as supplier resolution): a similarly named
+  // supplier ("Proovi Teenused OÜ" for "Proovi OÜ") is not the company.
+  const ownKey = normalizeCompanyName(options.ownCompanyName);
+  if (ownKey !== "" && normalizeCompanyName(registryName) === ownKey) {
     return {
       ...extracted,
       supplier_identifier_ambiguous: true,

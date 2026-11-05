@@ -162,6 +162,8 @@ function setupPdfWorkflowTool(
       getAccountDimensions: vi.fn().mockResolvedValue([]),
       getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }),
       getBankAccounts: vi.fn().mockResolvedValue([]),
+      // The own company's name: new suppliers are created only when it is known.
+      getInvoiceInfo: vi.fn().mockResolvedValue({ invoice_company_name: "Testija Ostja OÜ" }),
       ...options.readonly,
     },
   } as any;
@@ -1052,6 +1054,19 @@ describe("pdf workflow tools", () => {
         .toMatchObject({ existing_invoice_ids: [32] });
     });
 
+    it("compares the gross derived from the items when gross_price is omitted", async () => {
+      const filePath = createTempInvoiceFile("dupderived.pdf", "%PDF-pdf-bytes");
+      mockedResolveFileInput.mockResolvedValue({ path: filePath });
+      const existing = [{ id: 33, clients_id: 7, number: "PI-NEW-l", status: "CONFIRMED", create_date: "2026-03-18", gross_price: 124 }];
+      const { handler, api } = setupPdfWorkflowTool("create_purchase_invoice_from_pdf", { purchaseInvoices: { listAll: vi.fn().mockResolvedValue(existing) } });
+      const { gross_price: _gross, ...withoutGross } = args(filePath);
+      const response = await handler(withoutGross);
+      expect(response.isError).toBe(true);
+      expect(parseToolPayload<CreatePurchaseInvoiceFromPdfFailurePayload>(response.content[0]!.text))
+        .toMatchObject({ category: "possible_duplicate_purchase_invoice", existing_invoice_ids: [33] });
+      expect(api.purchaseInvoices.createAndSetTotals).not.toHaveBeenCalled();
+    });
+
     it("drops the purchase-invoice list cache right before the supplier + invoice-number duplicate lookup", async () => {
       const filePath = createTempInvoiceFile("dupfresh.pdf", "%PDF-pdf-bytes");
       mockedResolveFileInput.mockResolvedValue({ path: filePath });
@@ -1803,6 +1818,29 @@ describe("resolve_supplier manual-review holds", () => {
       expect(res.registry_data?.status).toBe("K");
       expect(res.suggestion).not.toContain("auto_create=true");
       expect(text).not.toContain("Client not found");
+    }
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["failed", { getInvoiceInfo: vi.fn().mockRejectedValue(new Error("503")) }],
+    ["absent", { getInvoiceInfo: undefined }],
+    ["blank", { getInvoiceInfo: vi.fn().mockResolvedValue({ invoice_company_name: "  " }) }],
+  ])("an own-company name that is %s refuses to create the supplier, in preview and with auto_create", async (_label, readonly) => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      headers: { get: () => "512" },
+      text: () => Promise.resolve(JSON.stringify(ARIREGISTER_AUTOCOMPLETE_TELIA)),
+    }));
+    const create = vi.fn();
+    const { handler } = setupPdfWorkflowTool("resolve_supplier", {
+      clients: { listAll: vi.fn().mockResolvedValue([]), create },
+      readonly,
+    });
+    for (const autoCreate of [false, true]) {
+      const res = parseToolPayload<ResolveSupplierReviewPayload>((await handler({ reg_code: "10234957", auto_create: autoCreate })).content[0]!.text);
+      expect(res).toMatchObject({ found: false, created: false, requires_manual_review: true });
+      expect(res.reason).toContain("own company's name could not be read");
     }
     expect(create).not.toHaveBeenCalled();
   });

@@ -878,6 +878,16 @@ export function registerProcessAccountingDocumentTool(
             }
           : {}),
         ...(referencingJournalIds.length > 0 ? { referencing_journal_ids: referencingJournalIds } : {}),
+        ...(execution.duplicateInvoiceAcknowledged
+          ? {
+              duplicate_invoice_number_acknowledged: {
+                existing_invoice_ids: execution.duplicateInvoiceAcknowledged.existingInvoiceIds,
+                note: execution.duplicateInvoiceAcknowledged.kind === "amount_date_other_number"
+                  ? "Created despite a live invoice with the same supplier, gross and nearby date under another number (allow_duplicate_invoice_number=true)."
+                  : "Created despite a live invoice with the same supplier and number (allow_duplicate_invoice_number=true).",
+              },
+            }
+          : {}),
         note: execution.confirmPlan
           ? "Purchase invoice created as DRAFT and the source document uploaded. The approval that covered create also covers registration: call mode='confirm' with this invoice_id and confirm_plan, unless draft_review differs from the approved booking or this result carries warnings or duplicate signals (referencing_journal_ids, possible_duplicate_postings) that were not on the approved card — then show them and ask first."
           : "Purchase invoice created and the source document uploaded, but no confirm authority was issued. Stop at this invoice id: do not create it again or retry automatically. Report the retained draft and the reason (draft_readback_mismatch / draft_readback_unavailable); it needs a fresh review before anyone confirms it in e-arveldaja.",

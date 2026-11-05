@@ -769,6 +769,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext, run
           ownCompanyRegistryCode,
           ownIbans,
           ownCompanyName,
+          ownCompanyNameRequired: true,
           operatorSuppliedName: nameConfirmed,
           _resolveSupplierOverrides: { country: country ?? "EST", is_physical_entity, foreign_identity_attested },
         },
@@ -1409,10 +1410,14 @@ export function registerCreatePurchaseInvoiceFromPdfTool(server: McpServer, api:
       const duplicates = await scanPurchaseIntakeDuplicates(api, {
         supplierClientId: params.supplier_client_id, invoiceNumber: params.invoice_number,
         grossPrice: params.gross_price, invoiceDate: params.invoice_date, currency: currencyCode,
+        derivedGrossPrice: totalsPreview.gross,
       });
       if (duplicates.comparisonUnavailable) {
         return toolError({ category: "purchase_duplicate_comparison_required", retry: "never",
-          error: `Blank invoice numbers require a positive finite supplied gross_price and a valid invoice_date for duplicate review. Missing or invalid: ${duplicates.comparisonUnavailable.join(", ")}.`,
+          error: (duplicates.kind === "amount_date"
+            ? "Blank invoice numbers require a positive finite supplied gross_price and a valid invoice_date for duplicate review."
+            : "The same-supplier amount/date duplicate review needs a nonzero gross and a valid invoice_date.") +
+            ` Missing or invalid: ${duplicates.comparisonUnavailable.join(", ")}.`,
           next_action: "Supply the original document comparison values and review again before creating." } satisfies CreatePurchaseInvoiceFromPdfFailurePayload);
       }
       const duplicateNumberIds = duplicates.invoiceIds;

@@ -114,7 +114,8 @@ export function findDuplicateInvoice(
  * Live invoices of the supplier with the same gross and a nearby date
  * (detectDuplicatePurchaseInvoice's candidate_same_amount_date_matches) whose
  * non-blank number differs from a non-blank, non-placeholder `invoiceNumber`.
- * AUTO- numbers are extractor/auto-booking placeholders and never match.
+ * AUTO- numbers are extractor/auto-booking placeholders and never match, on
+ * either side.
  */
 export function otherNumberAmountDateMatches(
   invoices: PurchaseInvoice[],
@@ -130,7 +131,8 @@ export function otherNumberAmountDateMatches(
   const ids = new Set(found.candidate_same_amount_date_matches.items.map(item => item.id));
   return invoices.filter(invoice => {
     const number = normalizeInvoiceNumberForComparison(invoice.number);
-    return invoice.id !== undefined && ids.has(invoice.id) && number.length > 0 && number !== normalizedNumber;
+    return invoice.id !== undefined && ids.has(invoice.id) && number.length > 0 && number !== normalizedNumber &&
+      !(invoice.number ?? "").trim().toUpperCase().startsWith("AUTO-");
   });
 }
 

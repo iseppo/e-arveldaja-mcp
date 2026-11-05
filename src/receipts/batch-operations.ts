@@ -600,14 +600,15 @@ async function processSingleReceipt(
       return buildNeedsReviewResult(file, classification, extracted, llmFallback, notes);
     }
 
-    const ownCompanyOptions = options.ownCompanyVat || options.ownCompanyRegistryCode || options.ownIbans?.length || options.ownCompanyName
-      ? {
-          ...(options.ownCompanyVat ? { ownCompanyVat: options.ownCompanyVat } : {}),
-          ...(options.ownCompanyRegistryCode ? { ownCompanyRegistryCode: options.ownCompanyRegistryCode } : {}),
-          ...(options.ownIbans?.length ? { ownIbans: options.ownIbans } : {}),
-          ...(options.ownCompanyName ? { ownCompanyName: options.ownCompanyName } : {}),
-        }
-      : undefined;
+    // A blank or missing own-company name is unavailable: no new supplier is
+    // created without it (it is what tells the buyer's code from the supplier's).
+    const ownCompanyOptions = {
+      ...(options.ownCompanyVat ? { ownCompanyVat: options.ownCompanyVat } : {}),
+      ...(options.ownCompanyRegistryCode ? { ownCompanyRegistryCode: options.ownCompanyRegistryCode } : {}),
+      ...(options.ownIbans?.length ? { ownIbans: options.ownIbans } : {}),
+      ...(options.ownCompanyName?.trim() ? { ownCompanyName: options.ownCompanyName.trim() } : {}),
+      ownCompanyNameRequired: true,
+    };
     const supplierResolution = await resolveSupplierInternal(
       api,
       context.clients,
@@ -632,7 +633,8 @@ async function processSingleReceipt(
     if (!supplierResolution.client && !supplierResolution.preview_client) {
       const fallback = summarize();
       notes.push(
-        (supplierResolution.code === "supplier_client_deactivated" || supplierResolution.code === "supplier_is_own_company") && supplierResolution.reason
+        (supplierResolution.code === "supplier_client_deactivated" || supplierResolution.code === "supplier_is_own_company" ||
+          supplierResolution.code === "own_company_identity_unavailable") && supplierResolution.reason
           ? supplierResolution.reason
           : "Supplier could not be resolved or prepared for creation.",
       );

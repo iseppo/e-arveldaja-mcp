@@ -1946,6 +1946,8 @@ describe("invalidated-status + invoice-number normalization in receipt duplicate
     expect(findDuplicateInvoice([inv({ number: "INV-1O23" })], 7, "INV-1023", "2026-03-20", 50)).toBeUndefined();
     expect(findDuplicateInvoice([inv({ number: "INV-1O23" })], 7, "INV-1023", "2026-03-01", 51)).toBeUndefined();
     expect(findDuplicateInvoice([inv({ number: "INV-1O23" })], 8, "INV-1023", "2026-03-01", 50)).toBeUndefined();
+    expect(findDuplicateInvoice([inv({ number: "AUTO-TX-9" })], 7, "INV-1023", "2026-03-01", 50)).toBeUndefined();
+    expect(findDuplicateInvoice([inv({ number: "INV-1O23" })], 7, "AUTO-20260301-X", "2026-03-01", 50)).toBeUndefined();
   });
 
   it("payment-receipt cross-reference does not link to a VOID invoice", async () => {

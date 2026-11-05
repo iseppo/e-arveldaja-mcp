@@ -575,7 +575,7 @@ export async function createAndMaybeMatchPurchaseInvoice(
     if (held) return held;
     const duplicates = await scanPurchaseIntakeDuplicates(api, { supplierClientId: supplierId, invoiceNumber, grossPrice: grossTotal, invoiceDate, currency: invoiceCurrency });
     if (duplicates.comparisonUnavailable?.length) {
-      notes.push(`Held: purchase invoice duplicate comparison requires supplied valid ${duplicates.comparisonUnavailable.join(", ")} when the invoice number is blank. Correct the document data before creating an invoice.`);
+      notes.push(`Held: purchase invoice duplicate comparison requires a valid ${duplicates.comparisonUnavailable.join(", ")}. Correct the document data before creating an invoice.`);
       return { notes, status: "needs_review" as const };
     }
     if (duplicates.invoiceIds.length) {

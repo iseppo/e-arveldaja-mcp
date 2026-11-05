@@ -841,6 +841,33 @@ describe("AccountingDocumentOperations.create", () => {
     expect(api.purchaseInvoices.createAndSetTotals).toHaveBeenCalledTimes(1);
   });
 
+  it("same supplier + gross + nearby date under another number: prepare blocks, create refuses, the acknowledgement creates and is reported", async () => {
+    const { path, sha256, api, ops } = createSetup();
+    const other = { id: 779, clients_id: 4242, number: "INV-l", status: "CONFIRMED", create_date: "2026-06-12", gross_price: 12 };
+    api.purchaseInvoices.listAll.mockResolvedValue([other]);
+    const blocked = await ops.prepare({ source: { file_path: path }, booking: bookingFields() });
+    if (!blocked.ok) throw new Error("prepare failed");
+    expect(blocked.value.planHandle).toBeUndefined();
+    expect(blocked.value.blockers).toEqual([expect.objectContaining({ code: "possible_duplicate_purchase_invoice", severity: "blocker" })]);
+
+    // Appeared after prepare: the create-time re-check refuses, zero writes.
+    api.purchaseInvoices.listAll.mockResolvedValue([]);
+    const handle = await prepareBookingHandle(ops, path);
+    api.purchaseInvoices.listAll.mockResolvedValue([other]);
+    const refused = await ops.create({ ...baseCreateInput(path, sha256), planHandle: handle });
+    expect(refused.ok).toBe(false);
+    if (!refused.ok) expect(refused.error.code).toBe("possible_duplicate_purchase_invoice");
+    expectNoWrites(api);
+
+    const acknowledged = await ops.prepare({ source: { file_path: path }, booking: { ...bookingFields(), allowDuplicateInvoiceNumber: true } });
+    if (!acknowledged.ok) throw new Error("prepare failed");
+    expect(acknowledged.value.blockers).toEqual([]);
+    expect(acknowledged.value.warnings).toEqual(expect.arrayContaining([expect.objectContaining({ code: "duplicate_purchase_invoice_acknowledged" })]));
+    const created = await ops.create({ ...baseCreateInput(path, sha256), allowDuplicateInvoiceNumber: true, planHandle: acknowledged.value.planHandle! });
+    if (!created.ok) throw new Error(`create failed: ${created.error.code}`);
+    expect(created.value.duplicateInvoiceAcknowledged).toEqual({ kind: "amount_date_other_number", existingInvoiceIds: [779] });
+  });
+
   it("does not block on an invalidated same supplier+number invoice (finding 7)", async () => {
     const { path, api, ops } = createSetup();
     api.purchaseInvoices.listAll.mockResolvedValue([

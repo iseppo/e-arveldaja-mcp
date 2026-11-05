@@ -161,7 +161,8 @@ function makeApi(existingClients: Array<Record<string, unknown>> = []): { api: n
   return { api, rec: { clientsCreate, invoicesCreate, confirm } };
 }
 
-const baseRun = { resolvedFolderPath: FOLDER, accountsDimensionsId: 100, legacyExecuteCreate: false, directoryAccessOptions: {} } as const;
+// The own company's name: new suppliers are created only when it is known.
+const baseRun = { resolvedFolderPath: FOLDER, accountsDimensionsId: 100, legacyExecuteCreate: false, directoryAccessOptions: {}, ownCompanyName: "Testija Ostja OÜ" } as const;
 type Mode = "create" | "create_and_confirm";
 
 async function runMode(api: never, mode: Mode) {
@@ -213,6 +214,20 @@ describe("P2 E1: a new supplier's name needs proof right before the client is cr
     if (!held.ok) throw new Error("dry run failed");
     expect(held.value.results[0]!.status).toBe("needs_review");
     expect(held.value.results[0]!.supplier_resolution?.code).toBe("supplier_name_unverified");
+    expect(rec.clientsCreate).not.toHaveBeenCalled();
+    expect(rec.invoicesCreate).not.toHaveBeenCalled();
+  });
+
+  it.each([["absent", undefined], ["blank", "  "]])("an own-company name that is %s holds a new supplier, with zero writes", async (_label, ownCompanyName) => {
+    stubRegistry([true]);
+    const { api, rec } = makeApi();
+    const ops = createReceiptBatchOperations(api, createTestRuntimeSafetyContext());
+    const { ownCompanyName: _own, ...run } = baseRun;
+    const held = await ops.runBatch({ ...run, ...(ownCompanyName !== undefined ? { ownCompanyName } : {}), executionMode: "dry_run", dryRun: true });
+    if (!held.ok) throw new Error("dry run failed");
+    expect(held.value.results[0]!.status).toBe("needs_review");
+    expect(held.value.results[0]!.supplier_resolution?.code).toBe("own_company_identity_unavailable");
+    expect(held.value.results[0]!.notes.join(" ")).toContain("own company's name could not be read");
     expect(rec.clientsCreate).not.toHaveBeenCalled();
     expect(rec.invoicesCreate).not.toHaveBeenCalled();
   });

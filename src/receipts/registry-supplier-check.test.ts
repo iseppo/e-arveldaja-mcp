@@ -162,6 +162,12 @@ describe("crossCheckSupplierWithRegistry", () => {
     expect(buildExtractionConfidenceSignals(result, {})).toMatchObject({ supplier_identifier_ambiguous: true });
   });
 
+  it.each(["Proovi Teenused OÜ", "Proovo OÜ"])("a similarly named supplier (%s) is not taken for the active company", async (registryName) => {
+    const input = fields({ supplier_name: registryName });
+    const result = await crossCheckSupplierWithRegistry(input, { lookup: registry(registryName), ownCompanyName: "Proovi OÜ" });
+    expect(result).toBe(input);
+  });
+
   it("reads the register through its public autocomplete endpoint once per code", async () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({
       ...ARIREGISTER_AUTOCOMPLETE_TELIA,
