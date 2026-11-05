@@ -62,8 +62,10 @@ type ClosingCandidate = Pick<Journal, "document_number" | "effective_date" | "po
  * year-end close analysis must not claim it for `year` — e.g. a late
  * YEC-RETAINED-2024 dated 2026-01-01 is not 2025's transfer. The shared date +
  * shape predicates below deliberately do NOT apply this: the dividend lg 1
- * calculation relies on them to exclude a late YEC-RESULT-2024 dated
- * 2025-12-31 from 2970, where its 9000 debit falls outside the prior-year P&L.
+ * calculation uses them to exclude every entry-A-shaped journal dated on the
+ * distribution year's 31 Dec (e.g. a late YEC-RESULT-2024 dated 2025-12-31)
+ * from both its 2970 credit and its 9000 debit, as the distribution year's
+ * own close.
  */
 export function isNumberedForOtherYear(journal: Pick<Journal, "document_number">, year: number): boolean {
   const numberedYear = /^YEC-(?:RETAINED|RESULT)-(\d{4})$/.exec(journal.document_number ?? "")?.[1];

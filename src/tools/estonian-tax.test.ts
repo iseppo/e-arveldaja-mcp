@@ -2084,6 +2084,42 @@ describe("prepare_dividend_package remediation", () => {
     expect(late.components).toMatchObject({ closed_prior_year_result: 20000, unclosed_prior_year_profit_and_loss: 0 });
   });
 
+  it("counts a closed 2025 profit once when a legacy YECL close is booked late inside the distribution year", async () => {
+    const lateYecl = makeJournal("2026-01-05", [makePosting(4000, "D", 20000), makePosting(2970, "C", 20000)], { document_number: "YECL-2025", title: "Aasta lõppkanne 2025" });
+    const check = await lg1([...base(5000), profit2025, lateYecl], "2026-03-01");
+    expect(check.balance_before).toBe(25000);
+    expect(check.components).toMatchObject({ closed_prior_year_result: 20000, unclosed_prior_year_profit_and_loss: 0 });
+  });
+
+  it("counts a closed 2025 loss once when its close is booked late inside the distribution year", async () => {
+    const loss2025 = makeJournal("2025-06-01", [makePosting(4000, "D", 3000), makePosting(1000, "C", 3000)]);
+    const onDateRik = makeJournal("2025-12-31", [makePosting(2970, "D", 3000), makePosting(9000, "C", 3000)]);
+    const lateRik = makeJournal("2026-01-05", [makePosting(2970, "D", 3000), makePosting(9000, "C", 3000)]);
+    const lateYecl = makeJournal("2026-01-05", [makePosting(2970, "D", 3000), makePosting(4000, "C", 3000)], { document_number: "YECL-2025" });
+    const onDate = await lg1([...base(5000), loss2025, onDateRik], "2026-03-01");
+    expect(onDate.balance_before).toBe(2000);
+    for (const late of [lateRik, lateYecl]) {
+      const check = await lg1([...base(5000), loss2025, late], "2026-03-01");
+      expect(check.balance_before).toBe(2000);
+      expect(check.components).toMatchObject({ closed_prior_year_result: -3000, unclosed_prior_year_profit_and_loss: 0 });
+    }
+  });
+
+  it("counts a closed 2025 profit once with a late RIK result entry followed by the transfer", async () => {
+    const lateResult = makeJournal("2026-01-05", [makePosting(9000, "D", 20000), makePosting(2970, "C", 20000)]);
+    const transfer = makeJournal("2026-01-10", [makePosting(2970, "D", 20000), makePosting(2960, "C", 20000)]);
+    const check = await lg1([...base(5000), profit2025, lateResult, transfer], "2026-03-01");
+    expect(check.balance_before).toBe(25000);
+    expect(check.components).toMatchObject({ retained_earnings_balance: 25000, closed_prior_year_result: 0, unclosed_prior_year_profit_and_loss: 0 });
+  });
+
+  it("keeps ordinary distribution-year P&L out of lg 1 next to a late prior-year close", async () => {
+    const lateYecl = makeJournal("2026-01-05", [makePosting(4000, "D", 20000), makePosting(2970, "C", 20000)], { document_number: "YECL-2025" });
+    const profit2026 = makeJournal("2026-02-01", [makePosting(1000, "D", 7000), makePosting(4000, "C", 7000)]);
+    const check = await lg1([...base(5000), profit2025, lateYecl, profit2026], "2026-03-01");
+    expect(check.balance_before).toBe(25000);
+  });
+
   it("RIK operator practice (only D 2970 / K 2960, no 9000 entry) counts the year once", async () => {
     // Booked either on 1 Dec of the closed year or during the distribution year.
     for (const date of ["2025-12-01", "2026-05-01"]) {
@@ -2116,6 +2152,40 @@ describe("prepare_dividend_package remediation", () => {
       expect(check.components.current_year_profit_account).toBe(2999);
       expect(check.components.closed_prior_year_result).toBe(20000);
       expect(check.balance_before).toBe(25000);
+    } finally {
+      if (previous === undefined) delete process.env.EARVELDAJA_RULES_FILE;
+      else process.env.EARVELDAJA_RULES_FILE = previous;
+      resetAccountingRulesCache();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("with a current-year profit override, a late title-only close counts once and the distribution year's own close is excluded", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "earv-div-cyp-late-"));
+    const rulesPath = join(dir, "accounting-rules.md");
+    writeFileSync(rulesPath, "# Accounting Rules\n\n## Annual Report\nCurrent year profit account: 2999\n", "utf-8");
+    const previous = process.env.EARVELDAJA_RULES_FILE;
+    process.env.EARVELDAJA_RULES_FILE = rulesPath;
+    resetAccountingRulesCache();
+    try {
+      const chart = [
+        ...rikAccounts(),
+        makeAccount(2999, "C", "Omakapital", "Aruandeaasta kasum erikonto", "Current year profit override"),
+      ];
+      const run = async (journals: Journal[], effective_date: string) => {
+        const { cb } = setup(journals, chart);
+        const data = parseResult(await cb({ net_dividend: 1, shareholder_client_id: 1, effective_date, dry_run: true }));
+        return data.retained_earnings_check as { balance_before: number; components: { closed_prior_year_result: number; unclosed_prior_year_profit_and_loss: number } };
+      };
+      const lateTitleClose = makeJournal("2026-01-05", [makePosting(4000, "D", 20000), makePosting(2999, "C", 20000)], { title: "Aasta lõppkanne 2025" });
+      const late = await run([...base(5000), profit2025, lateTitleClose], "2026-03-01");
+      expect(late.balance_before).toBe(25000);
+      expect(late.components).toMatchObject({ closed_prior_year_result: 20000, unclosed_prior_year_profit_and_loss: 0 });
+
+      const profit2026 = makeJournal("2026-03-01", [makePosting(1000, "D", 7000), makePosting(4000, "C", 7000)]);
+      const ownTitleClose = makeJournal("2026-12-31", [makePosting(4000, "D", 7000), makePosting(2999, "C", 7000)], { title: "Aasta lõppkanne 2026" });
+      const own = await run([...base(5000), profit2025, lateTitleClose, profit2026, ownTitleClose], "2026-12-31");
+      expect(own.balance_before).toBe(25000);
     } finally {
       if (previous === undefined) delete process.env.EARVELDAJA_RULES_FILE;
       else process.env.EARVELDAJA_RULES_FILE = previous;
