@@ -1008,10 +1008,18 @@ describe("looksLikePersonCounterparty", () => {
 
 describe("automatic VAT fallback default", () => {
   it("defaults unmatched auto-bookings to no VAT and keeps gross as net", () => {
-    const vatConfig = getAutoBookedVatConfig();
+    const vatConfig = getAutoBookedVatConfig(true);
     expect(vatConfig).toEqual({ vat_rate_dropdown: "-" });
     expect(deriveAutoBookedNetAmount(100, vatConfig)).toBe(100);
     expect(deriveAutoBookedVatPrice(100, vatConfig)).toBe(0);
+  });
+
+  it("folds the gross for a company that is not fully VAT-registered, whatever the suggestion says", () => {
+    const suggestion = { item: { vat_rate_dropdown: "24", reversed_vat_id: 1 } } as Parameters<typeof getAutoBookedVatConfig>[1];
+    expect(getAutoBookedVatConfig(true, suggestion)).toEqual({ vat_rate_dropdown: "24", reversed_vat_id: 1 });
+    const nonVat = getAutoBookedVatConfig(false, suggestion);
+    expect(nonVat).toEqual({ vat_rate_dropdown: "-" });
+    expect(deriveAutoBookedNetAmount(124, nonVat)).toBe(124);
   });
 });
 

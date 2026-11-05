@@ -601,6 +601,27 @@ describe("pdf workflow tools", () => {
     ]);
   });
 
+  it("drops a history reverse charge when the company is not fully VAT-registered", async () => {
+    const history = {
+      listAll: vi.fn().mockResolvedValue([{ id: 1, clients_id: 7, status: "CONFIRMED", create_date: "2026-02-15" }]),
+      get: vi.fn().mockResolvedValue({
+        id: 1, number: "PI-1", create_date: "2026-02-15", gross_price: 100, liability_accounts_id: 2310,
+        items: [{ custom_title: "Cloud", cl_purchase_articles_id: 45, purchase_accounts_id: 5230, total_net_price: 100, vat_rate_dropdown: "24", reversed_vat_id: 1 }],
+      }),
+    };
+    const { handler } = setupPdfWorkflowTool("suggest_booking", {
+      purchaseInvoices: history,
+      readonly: { getVatInfo: vi.fn().mockResolvedValue({ vat_number: null }) },
+    });
+    const payload = parseToolPayload<SuggestBookingPayload>((await handler({ clients_id: 7, description: "cloud" })).content[0]!.text);
+    expect(payload.past_invoices[0]!.items![0]!.reversed_vat_id ?? null).toBeNull();
+    expect(payload.notes?.join(" ")).toMatch(/reverse charge/i);
+
+    const { handler: fullHandler } = setupPdfWorkflowTool("suggest_booking", { purchaseInvoices: history });
+    const fullPayload = parseToolPayload<SuggestBookingPayload>((await fullHandler({ clients_id: 7, description: "cloud" })).content[0]!.text);
+    expect(fullPayload.past_invoices[0]!.items![0]!.reversed_vat_id).toBe(1);
+  });
+
   it("returns the historical vat_accounts_dimensions_id for reuse (P10)", async () => {
     const { handler } = setupPdfWorkflowTool("suggest_booking", {
       purchaseInvoices: {

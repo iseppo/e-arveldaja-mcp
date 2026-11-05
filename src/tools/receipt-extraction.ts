@@ -4012,11 +4012,18 @@ export function looksLikePersonCounterparty(normalizedCounterparty: string, rawC
   return parts.length >= 2 && parts.length <= 4;
 }
 
+/**
+ * VAT config of an auto-booked (classified bank transaction) purchase item.
+ * A company that is not fully VAT-registered folds VAT into the cost: rate "-",
+ * no reverse charge, so the item net is the paid gross. A VAT-registered one
+ * takes the booking suggestion's rate / reverse charge, else rate "-".
+ */
 export function getAutoBookedVatConfig(
-  _category?: TransactionClassificationCategory,
-  _supplierCountry?: string | null,
+  isVatRegistered: boolean,
+  bookingSuggestion?: Pick<BookingSuggestion, "item"> | null,
 ): Pick<PurchaseInvoiceItem, "vat_rate_dropdown" | "reversed_vat_id"> {
-  return { vat_rate_dropdown: "-" };
+  if (!isVatRegistered) return { vat_rate_dropdown: "-" };
+  return getBookingSuggestionVatConfig(bookingSuggestion) ?? { vat_rate_dropdown: "-" };
 }
 
 export function getBookingSuggestionVatConfig(

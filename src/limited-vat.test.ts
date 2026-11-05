@@ -105,6 +105,13 @@ describe("limited VAT month computation", () => {
     expect(result.reviews).toEqual([expect.objectContaining({ code: "limited_vat_supplier_charged_vat" })]);
   });
 
+  it("makes an invoice that already carries e-arveldaja's reverse charge a review item, never part of the PKM journal", () => {
+    const reversed = invoice(16, aws.id!, "2026-03-02", [item(10, 5000, null, { reversed_vat_id: 1, vat_amount: 2.4 })]);
+    const result = computeLimitedVatMonth("2026-03", [input(reversed, aws)], counts(aws.id!), {});
+    expect(result.included).toEqual([]);
+    expect(result.reviews).toEqual([expect.objectContaining({ code: "limited_vat_native_reverse_charge", invoice_id: 16 })]);
+  });
+
   it("uses the 22 % rate for a 2025-06 service (50.00 → 11.00)", () => {
     const result = computeLimitedVatMonth("2025-06", [input(invoice(7, aws.id!, "2025-06-15", [item(50)]), aws)], counts(aws.id!), {});
     expect(result.included[0]).toMatchObject({ vat_rate: 22, vat: 11 });

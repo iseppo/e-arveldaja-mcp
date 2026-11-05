@@ -234,6 +234,9 @@ export function validateNonVatItem(item: PurchaseInvoiceItem): string[] {
   if (vatRateDropdown !== undefined && vatRateDropdown !== "-") {
     errors.push('vat_rate_dropdown must be absent or "-"');
   }
+  if (item.reversed_vat_id !== undefined && item.reversed_vat_id !== null) {
+    errors.push("reversed_vat_id must be absent (a company that is not fully VAT-registered has no reverse-charge input VAT)");
+  }
   if (item.vat_accounts_id !== undefined && item.vat_accounts_id !== null && item.vat_accounts_id === item.purchase_accounts_id) {
     errors.push("the non-deductible form (VAT on the cost account) also needs vat_accounts_dimensions_id equal to purchase_accounts_dimensions_id, " +
       "cl_vat_articles_id 11, a numeric vat_rate_dropdown above 0 and no reversed_vat_id");
@@ -362,6 +365,8 @@ export function applyPurchaseVatDefaults(
     if (options.allowNonDeductible === true && isNonDeductibleVatItem(merged)) return merged;
     delete merged.vat_accounts_id;
     delete merged.vat_accounts_dimensions_id;
+    // No reverse-charge input leg without full VAT registration (none / limited).
+    delete merged.reversed_vat_id;
     merged.cl_vat_articles_id = 11;
     merged.vat_rate_dropdown = "-";
     return merged;

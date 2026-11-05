@@ -104,6 +104,14 @@ export function resolveReceiptVatRateDropdown(
   const standardRate = standardVatRateOn(extracted.invoice_date);
   const isReverseCharge = suggestionItem.reversed_vat_id !== undefined && suggestionItem.reversed_vat_id !== null;
   if (extracted.total_vat === undefined) return {};
+  if (isReverseCharge && extracted.total_vat > 0) {
+    // The supplier charged VAT (e.g. Estonian OSS VAT), so the document is not
+    // reverse charge as printed; booking both would count the VAT twice.
+    return {
+      review: `Reverse charge is suggested (supplier history, invoice phrase or foreign supplier) but the receipt shows VAT ${extracted.total_vat} charged by the supplier; ` +
+        "decide the VAT treatment and book this document with process_accounting_document.",
+    };
+  }
   if (extracted.total_vat === 0) {
     if (!isReverseCharge) return { rate: "-" };
     // Reverse charge: the supplier charges no VAT but the buyer self-assesses

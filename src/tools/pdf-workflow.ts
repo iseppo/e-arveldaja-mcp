@@ -1052,6 +1052,23 @@ export async function computeBookingSuggestion(
         ? [`supplier_history_partial: ${historyUnavailable} of ${settledInvoices.length} recent invoices unavailable`]
         : [];
 
+      // Only a fully VAT-registered company books a reverse-charge input leg;
+      // for none / limited / unknown a history reversed_vat_id is not suggested.
+      const vatStatus = await resolveCompanyVatStatus(api).then(resolved => resolved.status, () => "unknown" as const);
+      if (vatStatus !== "full") {
+        let dropped = 0;
+        for (const item of detailed.flatMap(inv => inv.items ?? [])) {
+          if (item.reversed_vat_id !== undefined && item.reversed_vat_id !== null) {
+            item.reversed_vat_id = null;
+            dropped += 1;
+          }
+        }
+        if (dropped > 0) {
+          historyNotes.push(`reverse_charge_not_applicable: the supplier history's reverse charge was removed from ${dropped} item(s) ` +
+            `because the company is not fully VAT-registered (status ${vatStatus}); book without reversed_vat_id.`);
+        }
+      }
+
       // If description provided, prefer invoices with matching item descriptions
       if (description) {
         const descLower = description.toLowerCase();

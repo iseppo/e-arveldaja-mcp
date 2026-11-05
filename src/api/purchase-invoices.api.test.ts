@@ -677,6 +677,14 @@ describe("previewPurchaseInvoiceTotals — createAndSetTotals rules before any w
       expect(body.gross_price).toBe(174);
     });
 
+    it("a reverse-charge item with a charged header VAT (V 24 / G 124) is refused before create", async () => {
+      await expectRefusedBeforeCreate(
+        { ...baseData, items: [item(100, "24", { reversed_vat_id: 1 })] },
+        24, 124, true,
+        "purchase_totals_mismatch",
+      );
+    });
+
     it("a reverse-charge credit note −100 / 0 / −100 passes", async () => {
       const { body } = await expectPasses(
         { ...baseData, items: [item(-100, "24", { reversed_vat_id: 1 })] },

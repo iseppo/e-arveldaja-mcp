@@ -124,6 +124,14 @@ describe("receipt inbox booking — VAT rate from extracted totals and date (fin
     expect(createAndSetTotals.mock.calls[0]![0].items[0].vat_rate_dropdown).toBe("24");
   });
 
+  it("reverse charge on a receipt where the supplier charged VAT is held for review, never booked with both", async () => {
+    expect(resolveReceiptVatRateDropdown({ total_vat: 24, invoice_date: "2026-03-10" }, 100, { vat_rate_dropdown: "24", reversed_vat_id: 1 }).review)
+      .toMatch(/reverse charge/i);
+    const { result, createAndSetTotals } = await run(extracted({ total_vat: 24, total_gross: 124 }), { vat_rate_dropdown: "24", reversed_vat_id: 1 });
+    expect(result.status).toBe("needs_review");
+    expect(createAndSetTotals).not.toHaveBeenCalled();
+  });
+
   it("reverse charge with total_vat 0 and no numeric history rate uses the standard rate on the invoice date", () => {
     expect(resolveReceiptVatRateDropdown({ total_vat: 0, invoice_date: "2025-03-10" }, 100, { vat_rate_dropdown: "-", reversed_vat_id: 1 }).rate).toBe("22");
     expect(resolveReceiptVatRateDropdown({ total_vat: 0, invoice_date: "2025-03-10" }, 100, { vat_rate_dropdown: "-" }).rate).toBe("-");

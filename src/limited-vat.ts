@@ -164,6 +164,7 @@ export interface LimitedVatIncludedInvoice {
 export type LimitedVatReviewCode =
   | "limited_vat_supplier_unclassified"
   | "limited_vat_supplier_charged_vat"
+  | "limited_vat_native_reverse_charge"
   | "limited_vat_supplier_estonian_registration"
   | "limited_vat_coverage_incomplete"
   | "limited_vat_fx_unavailable"
@@ -253,6 +254,10 @@ export function computeLimitedVatMonth(
     }
     if (decision.decision === "unclassified") {
       review("limited_vat_supplier_unclassified", "Is this a KMS § 10 lg 5 service (e.g. cloud/SaaS/API, consulting, advertising)? Ask the owner: supplier_classifications [{clients_id, classification: \"counts\" | \"excluded\"}]; the choice is saved for later months on approval.");
+      continue;
+    }
+    if ((invoice.items ?? []).some(item => item.reversed_vat_id !== undefined && item.reversed_vat_id !== null)) {
+      review("limited_vat_native_reverse_charge", "The invoice already carries e-arveldaja's own reverse charge (pöördmaksustamine), so a PKM journal would count the VAT twice. Not included: remove the reverse charge from the invoice rows, or book this invoice's VAT by hand. / Arvel on juba e-arveldaja pöördmaksustamine; PKM-kanne kahekordistaks käibemaksu — eemalda arve ridadelt pöördmaksustamine või kirjenda käsitsi.");
       continue;
     }
     if (supplierChargedVat(invoice)) {

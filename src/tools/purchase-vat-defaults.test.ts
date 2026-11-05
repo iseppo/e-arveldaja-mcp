@@ -268,6 +268,16 @@ describe("applyPurchaseVatDefaults", () => {
   });
 });
 
+describe("non-VAT company: no reverse charge", () => {
+  it("validateNonVatItem refuses reversed_vat_id and the non-VAT defaults drop it", () => {
+    const item = { custom_title: "Cloud", cl_purchase_articles_id: 1, purchase_accounts_id: 5230, total_net_price: 100, reversed_vat_id: 1 } as PurchaseInvoiceItem;
+    expect(purchaseVatDefaults.validateNonVatItem(item)).toEqual([expect.stringMatching(/^reversed_vat_id must be absent/)]);
+    expect(purchaseVatDefaults.validateNonVatItem({ ...item, reversed_vat_id: null } as unknown as PurchaseInvoiceItem)).toEqual([]);
+    expect(applyPurchaseVatDefaults([], item, false).reversed_vat_id).toBeUndefined();
+    expect(applyPurchaseVatDefaults([], item, true).reversed_vat_id).toBe(1);
+  });
+});
+
 describe("M21 validateNonVatItem", () => {
   it("treats null as absence and rejects every normalized non-dash VAT conflict without mutation", () => {
     const validator = (purchaseVatDefaults as any).validateNonVatItem;

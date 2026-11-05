@@ -291,22 +291,30 @@ export function resolvePurchaseInvoiceTotals(input: {
   // When explicit VAT differs from item-computed VAT (rounding), adjust
   // project_no_vat_gross_price on the last item so the API computes matching totals.
   let lastItemGross: number | undefined;
-  if (items && items.length > 0 && vatPrice !== undefined && isVatRegistered && itemVat !== vatPrice) {
-    const vatDiff = roundMoney(vatPrice - itemVat);
+  if (items && items.length > 0 && vatPrice !== undefined && isVatRegistered) {
     // Only a per-line rounding residue (≤ 1 cent per item) may be absorbed.
-    // A larger gap means the explicit totals disagree with the items; the
-    // reverse-charge path (item VAT ≠ invoice VAT by design) keeps the
-    // pre-existing behaviour.
-    const isReverseCharge = items.some(item => item.reversed_vat_id !== undefined && item.reversed_vat_id !== null);
-    if (!isReverseCharge && Math.abs(vatDiff) > roundMoney(0.01 * items.length) + 1e-9) {
+    // A larger gap means the explicit totals disagree with the items. A
+    // reverse-charge item's VAT is self-assessed, never part of the invoice
+    // VAT, so the check compares the invoice VAT with the other items' VAT
+    // only: a reverse-charge item under a charged invoice VAT is refused.
+    const isReversed = (item: PurchaseInvoiceItem) => item.reversed_vat_id !== undefined && item.reversed_vat_id !== null;
+    const chargedItemVat = items.some(isReversed)
+      ? roundMoney((itemAmounts ?? []).reduce((sum, amounts, index) => sum + (items[index] && isReversed(items[index]) ? 0 : amounts.vat), 0))
+      : itemVat;
+    const chargedVatDiff = roundMoney(vatPrice - chargedItemVat);
+    if (Math.abs(chargedVatDiff) > roundMoney(0.01 * items.length) + 1e-9) {
       return {
         ok: false,
         code: "purchase_totals_mismatch",
-        message: `Purchase invoice totals mismatch: explicit vat_price ${vatPrice} differs from the item-computed VAT ${itemVat} ` +
-          `by ${vatDiff}, more than the ${roundMoney(0.01 * items.length)} rounding tolerance for ${items.length} item(s). ` +
+        message: `Purchase invoice totals mismatch: explicit vat_price ${vatPrice} differs from the item-computed VAT ${chargedItemVat} ` +
+          `by ${chargedVatDiff}, more than the ${roundMoney(0.01 * items.length)} rounding tolerance for ${items.length} item(s)` +
+          `${chargedItemVat !== itemVat ? " (reverse-charge items carry no invoice VAT)" : ""}. ` +
           "Fix the item net amounts / VAT rates or the invoice totals.",
       };
     }
+  }
+  if (items && items.length > 0 && vatPrice !== undefined && isVatRegistered && itemVat !== vatPrice) {
+    const vatDiff = roundMoney(vatPrice - itemVat);
     const lastItem = items[items.length - 1]!;
     const currentGross = lastItem.project_no_vat_gross_price
       ?? roundMoney((lastItem.total_net_price ?? 0) + (itemAmounts?.[items.length - 1]?.vat ?? 0));

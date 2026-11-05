@@ -286,6 +286,26 @@ it("M4: checksum-proven incoming after creation leaves the draft unconfirmed", a
   expect(outcome.value.results[0]).toMatchObject({ status: "failed", created_invoice_ids: [9001], partial_mutations: [{ created_invoice_id: 9001, failed_stage: "transaction_drift", created_invoice_status: "PROJECT" }] });
 });
 
+it("a non-VAT company auto-books the folded gross, never the net derived from the history VAT rate or a reverse charge", async () => {
+  for (const historyItem of [SAAS_HISTORY_DETAILS[88].items[0], { ...SAAS_HISTORY_DETAILS[88].items[0], reversed_vat_id: 1 }]) {
+    const { operations, api } = makeSaasOperations(SAAS_TX, {
+      allowWrites: true,
+      purchaseInvoiceDetails: { 88: { ...SAAS_HISTORY_DETAILS[88], items: [historyItem] } },
+    });
+    api.readonly.getVatInfo.mockResolvedValue({ vat_number: null });
+    const planHandle = await dryRunHandle(operations, [saasGroup()]);
+    const outcome = await operations.applyClassifications({ classificationsJson: { groups: [saasGroup()] }, execute: true, planHandle });
+    if (!outcome.ok) throw new Error(outcome.error.code);
+    expect(api.purchaseInvoices.createAndSetTotals).toHaveBeenCalledTimes(1);
+    const [body, vat, gross, isVatRegistered] = api.purchaseInvoices.createAndSetTotals.mock.calls[0]!;
+    expect(isVatRegistered).toBe(false);
+    expect(gross).toBe(25);
+    expect(vat).toBe(0);
+    expect(body.items[0]).toMatchObject({ total_net_price: 25, vat_rate_dropdown: "-" });
+    expect(body.items[0].reversed_vat_id ?? null).toBeNull();
+  }
+});
+
 describe("M4 material boundary matrix", () => {
   const mutations: Array<[string, (tx: any) => any]> = [
     ["incoming", tx => withSignedCamtMarker(tx, "CRDT")],
