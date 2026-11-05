@@ -2202,6 +2202,44 @@ describe("prepare_dividend_package remediation", () => {
     expect(api.journals.create).not.toHaveBeenCalled();
   });
 
+  it("holds a Dec-31 opening balance with P&L lines even when it is labelled like the year-end close", async () => {
+    const chart = [...rikAccounts(), makeAccount(2080, "C", "Kohustused", "Muud võlad", "Other payables")];
+    const otherJournals = [
+      makeJournal("2026-12-31", [makePosting(1000, "D", 30000), makePosting(2960, "C", 30000)]),
+      makeJournal("2026-12-31", [makePosting(1000, "D", 50000), makePosting(4000, "C", 50000)]),
+    ];
+    const postings = () => [
+      makePosting(2970, "D", 25000), makePosting(1000, "D", 5000),
+      makePosting(4000, "C", 7000), makePosting(2080, "C", 20500), makePosting(2900, "C", 2500),
+    ];
+    for (const label of [{ title: "Aasta lõppkanne 2026" }, { document_number: "YECL-2026", title: "Algsaldod" }]) {
+      const opening = makeJournal("2026-12-31", postings(), { id: 7706, operation_type: "INITIAL", ...label });
+      const { api, cb } = setup([opening, ...otherJournals], chart);
+      for (const dry_run of [true, false]) {
+        for (const force of [false, true]) {
+          const result = await cb({ net_dividend: 20000, shareholder_client_id: 1, effective_date: "2026-12-31", dry_run, force });
+          const tag = `${JSON.stringify(label)} dry_run=${dry_run} force=${force}`;
+          expect(isError(result), tag).toBe(true);
+          const data = parseResult(result);
+          expect(data.error_code, tag).toBe("opening_balance_pl_requires_review");
+          expect(data.opening_balance_pl_journals, tag).toEqual([{ journal_id: 7706, effective_date: "2026-12-31" }]);
+        }
+      }
+      expect(api.journals.create).not.toHaveBeenCalled();
+    }
+  });
+
+  it("does not hold a later dividend after a 0.01 dividend booked against 2970 with zero CIT legs", async () => {
+    const tinyDividend = makeJournal("2026-03-01", [
+      makePosting(2970, "D", 0.01), makePosting(8900, "D", 0),
+      makePosting(2650, "C", 0.01), makePosting(2656, "C", 0),
+    ], { id: 7707 });
+    const { api, cb } = setup([...base(5000), profit2025, rikResult2025, tinyDividend], rikAccounts());
+    const result = await cb({ net_dividend: 1000, shareholder_client_id: 1, effective_date: "2026-06-01", dry_run: false });
+    expect(isError(result)).toBe(false);
+    expect(api.journals.create).toHaveBeenCalledTimes(1);
+  });
+
   it("does not hold a distribution-year opening balance with equity only", async () => {
     const opening = makeJournal("2026-01-01", [
       makePosting(1000, "D", 27500), makePosting(2960, "C", 25000), makePosting(2900, "C", 2500),

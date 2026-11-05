@@ -939,9 +939,13 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
         const distributionYearStart = `${distributionYear}-01-01`;
         const currentYearProfitAccount = resolveCurrentYearProfitAccount(accounts, getCurrentYearProfitAccountRule());
         const calculatedResultAccount = resolveCalculatedResultAccount(accounts);
+        // An opening balance (INITIAL) is a starting position, never a
+        // year-end close, whatever its title or document number says.
+        const isDistributionYearClose = (j: Journal) => j.operation_type !== "INITIAL" &&
+          (isYearEndClosingJournal(j, distributionYear, currentYearProfitAccount) ||
+            isYearEndResultEntry(j, distributionYear, { calculatedResult: calculatedResultAccount, currentYearProfit: currentYearProfitAccount }));
         const registeredAsOf = (j: Journal) =>
-          j.registered === true && j.effective_date <= effective_date && !isYearEndClosingJournal(j, distributionYear, currentYearProfitAccount) &&
-          !isYearEndResultEntry(j, distributionYear, { calculatedResult: calculatedResultAccount, currentYearProfit: currentYearProfitAccount });
+          j.registered === true && j.effective_date <= effective_date && !isDistributionYearClose(j);
         const retainedBalance = roundMoney(sumCreditMinusDebit(allJournals, id => id === retainedAccount, registeredAsOf));
         const closedPriorYearResult = currentYearProfitAccount === retainedAccount
           ? 0
@@ -953,9 +957,14 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
         const livePostings = (j: Journal) =>
           (j.postings ?? []).filter(p => !p.is_deleted && (p.type === "D" || p.type === "C"));
         const toCents = (amount: number) => Math.round(amount * 100);
+        // A P&L line worth a value (a zero CIT leg of a 0.01 dividend is not).
+        const hasValuedPlPosting = (j: Journal) =>
+          livePostings(j).some(p => plAccountIds.has(p.accounts_id) && toCents(p.base_amount ?? p.amount) !== 0);
         // Closing shape: only P&L (incl. 9000) and current-year-result lines,
         // touching both, with the result line(s) equal to the P&L net to the cent.
+        // An opening balance (INITIAL) never has closing shape.
         const isClosingShaped = (j: Journal) => {
+          if (j.operation_type === "INITIAL") return false;
           const postings = livePostings(j);
           if (!postings.some(p => p.accounts_id === currentYearProfitAccount) ||
             !postings.some(p => plAccountIds.has(p.accounts_id)) ||
@@ -991,23 +1000,24 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
           const [netDebit, citDebit, netCredit, citCredit] = roles.map(r => toCents(postings
             .filter(p => p.accounts_id === r.account && p.type === r.type)
             .reduce((s, p) => s + (p.base_amount ?? p.amount), 0)));
-          return netDebit > 0 && citDebit > 0 && netDebit === netCredit && citDebit === citCredit;
+          return netDebit > 0 && citDebit >= 0 && netDebit === netCredit && citDebit === citCredit;
         };
         const mixedResultJournals = allJournals
           .filter(j =>
             !j.is_deleted && j.operation_type !== "INITIAL" && j.effective_date >= distributionYearStart &&
             registeredAsOf(j) && !isClosingShaped(j) && !isDividendAgainstResultShape(j) &&
             livePostings(j).some(p => p.accounts_id === currentYearProfitAccount) &&
-            livePostings(j).some(p => plAccountIds.has(p.accounts_id)))
+            hasValuedPlPosting(j))
           .map(j => ({ journal_id: j.id ?? null, document_number: j.document_number ?? null, effective_date: j.effective_date }));
         // An opening balance dated in the distribution year that carries
         // income/expense lines: those lines cannot be attributed to a period
         // (carried-forward prior-year result or current-year to date), so the
         // dividend is held. Ordinary opening equity (no P&L lines) is fine.
+        // Checked directly, without the closing-journal exclusions.
         const openingBalancePlJournals = allJournals
           .filter(j =>
-            !j.is_deleted && j.operation_type === "INITIAL" && j.effective_date >= distributionYearStart &&
-            registeredAsOf(j) && livePostings(j).some(p => plAccountIds.has(p.accounts_id)))
+            !j.is_deleted && j.operation_type === "INITIAL" && j.registered === true &&
+            j.effective_date >= distributionYearStart && j.effective_date <= effective_date && hasValuedPlPosting(j))
           .map(j => ({ journal_id: j.id ?? null, effective_date: j.effective_date }));
         const lg1Accounts = new Set([retainedAccount, currentYearProfitAccount]);
 
