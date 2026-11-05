@@ -47,6 +47,10 @@
 - **Importing a long bank statement is much faster and no longer risks stopping halfway.** Before, the import re-read every bank transaction and journal of the company before each statement row it created, so a 150-row statement sent thousands of requests and could time out or trip the API's login brake mid-import. Details: `import_camt053` / `process_camt053` execute now takes the bank-dimension lock once for the whole run and does one uncached ledger and journal read under it before the first write; the lossy-identity and partial-legacy holds are computed once on that read, and each created row is added to the in-memory duplicate lookup for the rows after it. A row or journal booked elsewhere after the plan review still stops its row (`duplicate_appeared`, `journal_coverage_appeared`, …); one booked while the run is already writing is no longer seen by that run.
 - **Pending and informational bank-statement entries are no longer imported as booked payments.** Before, a statement row marked pending (PDNG) or informational (INFO) was imported like a booked one, so the same payment could be booked again when it later arrived as booked. Details: CAMT preflight accepts an entry status of `BOOK` or no status (both `<Sts>BOOK</Sts>` and `<Sts><Cd>BOOK</Cd></Sts>`) and rejects any other with a positional `status` reason (`camt:ntry:N`); nothing is imported from such a file.
 
+### Changed
+
+- **Internal cleanup and dependency updates; nothing changes in how the tools behave.** Details: unused imports, locals and unreferenced exports/types removed, and the production TypeScript build now rejects unused locals and parameters (`noUnusedLocals` / `noUnusedParameters`); the purchase-invoice totals check uses the shared `toCents` helper (same rounding); the guided `reconcile-bank` workflow now says that `ambiguous_refless_more` counts the hidden rows of every inter-account review code. Dependencies: `@llamaindex/liteparse` 2.17.0 → 2.18.0, `fast-xml-parser` 5.11.2 → 5.12.0, and dev tools `@babel/parser` 8.0.10 → 8.1.0, `vite` 8.3.5 → 8.3.6, `vitest` 5.0.5 → 5.1.0.
+
 ## [0.39.0] - 2026-11-03
 
 ### Added
