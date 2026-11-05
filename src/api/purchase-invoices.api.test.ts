@@ -116,6 +116,9 @@ describe("H05 default preservation", () => {
     ["missing VAT", true, h05Invoice({ vat_price: undefined })],
     ["missing gross", true, h05Invoice({ gross_price: undefined })],
     ["reverse charge", true, h05Invoice({ vat_price: 0, gross_price: 100, items: [{ ...h05Invoice().items[0], reversed_vat_id: 1 }] })],
+    ["mixed ordinary + reverse charge", true, h05Invoice({ vat_price: 24, gross_price: 174, items: [
+      { ...h05Invoice().items[0], vat_amount: 24 }, { ...h05Invoice().items[0], id: 12, total_net_price: 50, vat_amount: 12, reversed_vat_id: 1 },
+    ] })],
     ["non-EUR", true, h05Invoice({ cl_currencies_id: "USD", currency_rate: 0.92 })],
   ])("registers %s after one fresh read, without rewriting totals", async (_label, isVatRegistered, invoice) => {
     const get = vi.fn().mockResolvedValue(invoice);
@@ -675,18 +678,36 @@ describe("previewPurchaseInvoiceTotals — createAndSetTotals rules before any w
         0, 100, true,
       );
       expect(preview).toMatchObject({ ok: true, vat: 0, gross: 100 });
+      expect(preview).not.toHaveProperty("lastItemGross");
       expect(body.vat_price).toBe(0);
       expect(body.gross_price).toBe(100);
+      // The self-assessed VAT is no rounding residue: no gross override on the reverse-charge row.
+      expect(body.items[0].project_no_vat_gross_price ?? null).toBeNull();
     });
 
-    it("mixed ordinary and reverse-charge items pass (exempt from the residue check)", async () => {
-      const { body } = await expectPasses(
+    it("mixed ordinary and reverse-charge items with explicit totals pass without a residue override", async () => {
+      const { preview, body } = await expectPasses(
         { ...baseData, items: [item(100, "24"), item(50, "24", { reversed_vat_id: 1 })] },
         [{ id: 1, total_net_price: 100, vat_amount: 24 }, { id: 2, total_net_price: 50, vat_amount: 12 }],
         24, 174, true,
       );
+      expect(preview).not.toHaveProperty("lastItemGross");
       expect(body.vat_price).toBe(24);
       expect(body.gross_price).toBe(174);
+      expect(body.items.map((row: Record<string, unknown>) => row.project_no_vat_gross_price ?? null)).toEqual([null, null]);
+    });
+
+    it("a rounding residue never lands on a reverse-charge last row", async () => {
+      await expectRefusedBeforeCreate(
+        { ...baseData, items: [item(100.03, "24"), item(50, "24", { reversed_vat_id: 1 })] },
+        24, 174.03, true,
+        "purchase_totals_mismatch",
+      );
+    });
+
+    it("compares the header gross in whole cents (net 0.03 + VAT 0.005 → 0.04)", () => {
+      expect(previewPurchaseInvoiceTotals({ ...baseData, items: [item(0.03, "24")] } as never, 0.005, 0.04, true)).toMatchObject({ ok: true, gross: 0.04 });
+      expect(previewPurchaseInvoiceTotals({ ...baseData, items: [item(0.03, "24")] } as never, 0.005, undefined, true)).toMatchObject({ ok: true, gross: 0.04 });
     });
 
     it("a reverse-charge item with a charged header VAT (V 24 / G 124) is refused before create", async () => {

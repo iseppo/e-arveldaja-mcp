@@ -300,11 +300,13 @@ export function resolvePurchaseInvoiceTotals(input: {
   // Invoice-level gross: VAT-registered (and non-deductible) = item net + invoice
   // VAT; folded = the sum of the items' gross (net + folded VAT). An explicit
   // gross must equal it to the cent.
+  // Compared in whole cents: each amount is rounded to cents before summing.
+  const cents = (value: number) => Math.round(value * 100);
   const foldedItemGross = hasItems
-    ? roundMoney(items.reduce((sum, item, index) =>
-      sum + (item.project_no_vat_gross_price ?? roundMoney((itemAmounts[index]?.net ?? 0) + (itemAmounts[index]?.vat ?? 0))), 0))
+    ? items.reduce((sum, item, index) =>
+      sum + cents(item.project_no_vat_gross_price ?? roundMoney((itemAmounts[index]?.net ?? 0) + (itemAmounts[index]?.vat ?? 0))), 0) / 100
     : roundMoney(itemNet + itemVat);
-  const expectedGross = isVatRegistered ? roundMoney(itemNet + vat) : foldedItemGross;
+  const expectedGross = isVatRegistered ? (cents(itemNet) + cents(vat)) / 100 : foldedItemGross;
   const gross = grossPrice !== undefined ? grossPrice : expectedGross;
   if (hasItems && grossPrice !== undefined && Math.round(grossPrice * 100) !== Math.round(expectedGross * 100)) {
     return {
@@ -335,9 +337,19 @@ export function resolvePurchaseInvoiceTotals(input: {
       };
     }
   }
-  if (items && items.length > 0 && vatPrice !== undefined && isVatRegistered && itemVat !== vatPrice) {
-    const vatDiff = roundMoney(vatPrice - itemVat);
+  // The residue is the gap to the CHARGED rows' VAT: a reverse-charge row's
+  // self-assessed VAT is never part of it, and never absorbs it.
+  const vatDiff = vatPrice !== undefined ? roundMoney(vatPrice - chargedItemVat) : 0;
+  if (items && items.length > 0 && vatPrice !== undefined && isVatRegistered && vatDiff !== 0) {
     const lastItem = items[items.length - 1]!;
+    if (isReversed(lastItem)) {
+      return {
+        ok: false,
+        code: "purchase_totals_mismatch",
+        message: `Purchase invoice totals mismatch: the invoice VAT ${vatPrice} differs from the ordinary rows' VAT ${chargedItemVat} by ${vatDiff}, ` +
+          "and the last row is reverse charge, which cannot absorb a rounding residue. Put an ordinary row last or fix the totals.",
+      };
+    }
     const currentGross = lastItem.project_no_vat_gross_price
       ?? roundMoney((lastItem.total_net_price ?? 0) + (itemAmounts?.[items.length - 1]?.vat ?? 0));
     lastItemGross = roundMoney(currentGross + vatDiff);

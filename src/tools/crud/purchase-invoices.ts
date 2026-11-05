@@ -232,6 +232,7 @@ export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext,
     // create_purchase_invoice (non-VAT field refusal, VAT defaults, dimensions).
     // Drafts: the VAT status decides every write (unknown status throws: nothing is written).
     const draftVatReg = isDraft ? await isCompanyVatRegistered(api) : undefined;
+    const callerSuppliedItems = parsed.items !== undefined;
     if (parsed.items !== undefined && isDraft) {
       const isVatReg = draftVatReg!;
       const rawItems = desandboxAllStrings(parsePurchaseInvoiceItems(parsed.items));
@@ -271,9 +272,22 @@ export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext,
     // The merged effective draft (supplied or re-sent rows, supplied or current
     // header VAT) must pass the reverse-charge gate, header-only updates too.
     if (draftVatReg !== undefined && Array.isArray(parsed.items)) {
+      // Row VAT: the read-back vat_amount of an unchanged stored row; a caller-edited
+      // row's VAT is predicted (a copied vat_amount may be stale).
+      const gateItems = callerSuppliedItems
+        ? (parsed.items as PurchaseInvoiceItem[]).map(item => {
+            const stored = item.id !== undefined ? current.items?.find(row => row.id === item.id) : undefined;
+            const unchanged = stored !== undefined
+              && (stored.total_net_price ?? null) === (item.total_net_price ?? null)
+              && (stored.vat_rate_dropdown ?? null) === (item.vat_rate_dropdown ?? null)
+              && (stored.project_no_vat_gross_price ?? null) === (item.project_no_vat_gross_price ?? null);
+            const { vat_amount: _copied, ...rest } = item;
+            return unchanged ? { ...rest, vat_amount: stored.vat_amount } : rest;
+          })
+        : parsed.items as PurchaseInvoiceItem[];
       const refusal = reverseChargeRegisterRefusal({
         vat_price: parsed.vat_price !== undefined ? parsed.vat_price as number | null : current.vat_price,
-        items: parsed.items as PurchaseInvoiceItem[],
+        items: gateItems,
       }, draftVatReg);
       if (refusal !== undefined) {
         return toolError({
