@@ -2,6 +2,7 @@ import type { ApiContext } from "../tools/crud-tools.js";
 import { detectDuplicatePurchaseInvoice } from "../tools/document-audit.js";
 import { normalizeInvoiceNumberForComparison } from "../purchase-invoice-status.js";
 import { isStrictDate } from "../strict-date.js";
+import { otherNumberAmountDateMatches } from "../tools/receipt-inbox-matching.js";
 
 // Cooperating intake writers in this process and credential/base-URL scope.
 // RIK UI, other processes and other credentials remain outside this FIFO.
@@ -24,7 +25,7 @@ export async function withPurchaseInvoiceLock<T>(
 export async function scanPurchaseIntakeDuplicates(
   api: Pick<ApiContext, "purchaseInvoices">,
   candidate: { supplierClientId: number; invoiceNumber: string; grossPrice?: number; invoiceDate?: string; currency?: string },
-): Promise<{ kind: "number" | "amount_date"; invoiceIds: number[]; comparisonUnavailable?: Array<"gross_price" | "invoice_date"> }> {
+): Promise<{ kind: "number" | "amount_date" | "amount_date_other_number"; invoiceIds: number[]; comparisonUnavailable?: Array<"gross_price" | "invoice_date"> }> {
   const numbered = normalizeInvoiceNumberForComparison(candidate.invoiceNumber).length > 0;
   if (!numbered) {
     const unavailable: Array<"gross_price" | "invoice_date"> = [];
@@ -47,5 +48,15 @@ export async function scanPurchaseIntakeDuplicates(
     }),
   });
   const matches = result[numbered ? "candidate_invoice_number_matches" : "candidate_same_amount_date_matches"] as { items: Array<{ id?: number }> };
-  return { kind: numbered ? "number" : "amount_date", invoiceIds: matches.items.flatMap(row => row.id === undefined ? [] : [row.id]) };
+  const invoiceIds = matches.items.flatMap(row => row.id === undefined ? [] : [row.id]);
+  // No exact-number match: same supplier + currency + gross + nearby date under
+  // another non-blank number (INV-1O23 vs INV-1023) is the reading path's
+  // duplicate too. Only a real supplied gross/date are compared.
+  if (numbered && invoiceIds.length === 0 && typeof candidate.grossPrice === "number" && Number.isFinite(candidate.grossPrice) &&
+      candidate.grossPrice > 0 && typeof candidate.invoiceDate === "string" && isStrictDate(candidate.invoiceDate)) {
+    const sameCurrency = rows.filter(row => (row.cl_currencies_id ?? "EUR") === (candidate.currency ?? "EUR"));
+    const other = otherNumberAmountDateMatches(sameCurrency, candidate.supplierClientId, candidate.invoiceNumber, candidate.grossPrice, candidate.invoiceDate);
+    if (other.length > 0) return { kind: "amount_date_other_number", invoiceIds: other.map(row => row.id!) };
+  }
+  return { kind: numbered ? "number" : "amount_date", invoiceIds };
 }

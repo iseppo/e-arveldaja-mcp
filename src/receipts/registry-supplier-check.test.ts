@@ -151,9 +151,15 @@ describe("crossCheckSupplierWithRegistry", () => {
     expect(lookup).not.toHaveBeenCalled();
   });
 
-  it("never renames the supplier to the active company", async () => {
+  it("holds, never renames, when the register names the active company for the supplier code", async () => {
+    // The company has no client record of its own, so its own code is unknown:
+    // the buyer's code read as the supplier's is caught by the register's name.
     const input = fields();
-    expect(await crossCheckSupplierWithRegistry(input, { lookup: registry("Proovi OÜ"), ownCompanyName: "Proovi OÜ" })).toBe(input);
+    const result = await crossCheckSupplierWithRegistry(input, { lookup: registry("PROOVI OU"), ownCompanyName: "Proovi OÜ" });
+    expect(withoutNotes(result)).toEqual(input);
+    expect(result.supplier_identifier_ambiguous).toBe(true);
+    expect(result.extraction_notes).toEqual([expect.stringMatching(/registry code 10000018 belongs to your own company/)]);
+    expect(buildExtractionConfidenceSignals(result, {})).toMatchObject({ supplier_identifier_ambiguous: true });
   });
 
   it("reads the register through its public autocomplete endpoint once per code", async () => {

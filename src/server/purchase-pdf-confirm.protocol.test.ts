@@ -108,7 +108,10 @@ describe("actual public PDF create → reviewed confirm registration", () => {
       expect((await first.client.callTool({ name: "confirm_purchase_invoice", arguments: args })).isError).toBe(true);
       expect(fake.registers()).toHaveLength(1);
 
-      const another = payload(await first.client.callTool({ name: "create_purchase_invoice_from_pdf", arguments: sourceArgs("PDF-REVIEW-2") }));
+      // Same supplier, gross and date under another number is a possible
+      // duplicate: the acknowledgement books this deliberate second invoice.
+      const another = payload(await first.client.callTool({ name: "create_purchase_invoice_from_pdf",
+        arguments: { ...sourceArgs("PDF-REVIEW-2"), allow_duplicate_invoice_number: true } }));
       fake.state.invoices.get(another.created_invoice_id)!.notes = "external drift";
       const drift = await first.client.callTool({ name: "confirm_purchase_invoice", arguments: {
         id: another.created_invoice_id, plan_handle: another.confirm_plan.plan_handle,

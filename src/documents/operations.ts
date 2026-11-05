@@ -856,9 +856,9 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
         return fail("purchase_duplicate_comparison_required",
           `Blank invoice numbers require a positive finite supplied gross_price and a valid invoice_date for duplicate review. Missing or invalid: ${duplicates.comparisonUnavailable.join(", ")}. Supply the original document values and prepare again.`, "never");
       }
-      if (duplicates.invoiceIds.length > 0 && !(duplicates.kind === "number" && allowDuplicateInvoiceNumber)) {
+      if (duplicates.invoiceIds.length > 0 && !(duplicates.kind !== "amount_date" && allowDuplicateInvoiceNumber)) {
         return fail(duplicates.kind === "number" ? "duplicate_purchase_invoice" : "possible_duplicate_purchase_invoice",
-          `A live purchase invoice matches this supplier and ${duplicates.kind === "number" ? "invoice number" : "amount/date"} (id ${duplicates.invoiceIds.join(", ")}).`, "never");
+          `A live purchase invoice matches this supplier and ${duplicates.kind === "number" ? "invoice number" : duplicates.kind === "amount_date" ? "amount/date" : "gross and nearby date under a different invoice number"} (id ${duplicates.invoiceIds.join(", ")}).`, "never");
       }
 
       // Cross-mechanism intake duplicate guard — BEFORE any invoice/document

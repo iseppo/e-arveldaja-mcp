@@ -2,6 +2,7 @@ import type { Client } from "../types/api.js";
 import type { ApiContext } from "./crud-tools.js";
 import { logAudit } from "../audit-log.js";
 import { normalizeVatValue } from "../document-identifiers.js";
+import { normalizeCompanyName } from "../company-name.js";
 import { validateLegalEntityIdentity } from "../legal-entity-identity.js";
 import { desandboxText } from "../external-text-renderer.js";
 import { matchSupplier } from "../resolution/supplier-default-resolution.js";
@@ -64,7 +65,7 @@ export interface SupplierResolution {
    * operator attestation for a foreign registration. When present the caller
    * must create NEITHER the supplier NOR the invoice.
    */
-  code?: "legal_entity_identity_required" | "supplier_name_unverified" | "supplier_client_deactivated";
+  code?: "legal_entity_identity_required" | "supplier_name_unverified" | "supplier_client_deactivated" | "supplier_is_own_company";
   /**
    * Set with supplier_name_unverified: what this call's registry lookup returned
    * (never the name, which may be the text-derived fallback).
@@ -89,6 +90,12 @@ export interface SupplierResolutionOptions {
   ownCompanyRegistryCode?: string;
   /** The active company's own IBANs: never stored as the supplier's bank account. */
   ownIbans?: readonly string[];
+  /**
+   * The active company's own name (`invoice_info.invoice_company_name`). A new
+   * client is never created when the business register names this company for
+   * the supplier's registry code (the buyer's code read as the supplier's).
+   */
+  ownCompanyName?: string;
   /**
    * P2 E1: the supplier name is an explicit operator input (a tool argument),
    * not text read from a document or a bank row. Only then may a new client be
@@ -243,6 +250,18 @@ export async function resolveSupplierInternal(
   // is already marker-free from the entry canonicalization (no-op here).
   // Only the registry's own name may replace the caller's: a nameless entry's
   // value (blank, whitespace, NBSP) never overrides a confirmed name (P2 E1).
+  if (registryData?.name_source === "registry" && options?.ownCompanyName &&
+      normalizeCompanyName(registryData.name) !== "" &&
+      normalizeCompanyName(registryData.name) === normalizeCompanyName(options.ownCompanyName)) {
+    return {
+      found: false,
+      created: false,
+      requires_manual_review: true,
+      code: "supplier_is_own_company",
+      reason: `The business register shows that registry code ${registryData.reg_code} belongs to your own company, so it is the buyer's code, not the supplier's; no supplier was created. Find the supplier's own registry code on the document.`,
+      ...(selfMatchBlocked ? { self_match_blocked: true } : {}),
+    };
+  }
   const rawClientName = registryData?.name_source === "registry" ? registryData.name : fields.supplier_name;
   const clientName = rawClientName !== undefined ? desandboxText(rawClientName) : undefined;
   if (!clientName || clientName.trim() === "") {

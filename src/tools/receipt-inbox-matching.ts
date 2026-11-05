@@ -3,6 +3,7 @@ import type { PurchaseInvoice, Transaction } from "../types/api.js";
 import { isInvalidatedPurchaseInvoice, normalizeInvoiceNumberForComparison } from "../purchase-invoice-status.js";
 import type { InvoiceSummaryForMatching } from "./receipt-extraction.js";
 import { scoreTransactionToInvoice } from "./receipt-extraction.js";
+import { detectDuplicatePurchaseInvoice } from "./document-audit.js";
 import type { ExtractedReceiptFields } from "./receipt-extraction.js";
 import type { AlreadyBookedCandidate, InvoiceDuplicateMatch, InvoiceNumberCandidate, TransactionMatchCandidate } from "./receipt-inbox-types.js";
 
@@ -91,7 +92,46 @@ export function findDuplicateInvoice(
     };
   }
 
+  // Same supplier + gross + date window with a DIFFERENT non-blank number (a
+  // phone photo read as INV-1023 of the e-mailed INV-1O23): the reading path's
+  // rule (detectDuplicatePurchaseInvoice), so every intake surface agrees. A
+  // review hint only — callers never skip on it.
+  const otherNumber = otherNumberAmountDateMatches(invoices, clientsId, invoiceNumber, grossPrice, createDate)[0];
+  if (otherNumber?.id) {
+    return {
+      reason: "supplier_amount_date_other_number",
+      invoice_id: otherNumber.id,
+      invoice_number: otherNumber.number,
+      create_date: otherNumber.create_date,
+      gross_price: otherNumber.gross_price,
+    };
+  }
+
   return undefined;
+}
+
+/**
+ * Live invoices of the supplier with the same gross and a nearby date
+ * (detectDuplicatePurchaseInvoice's candidate_same_amount_date_matches) whose
+ * non-blank number differs from a non-blank, non-placeholder `invoiceNumber`.
+ * AUTO- numbers are extractor/auto-booking placeholders and never match.
+ */
+export function otherNumberAmountDateMatches(
+  invoices: PurchaseInvoice[],
+  clientsId: number,
+  invoiceNumber: string,
+  grossPrice: number,
+  invoiceDate: string,
+): PurchaseInvoice[] {
+  const normalizedNumber = normalizeInvoiceNumberForComparison(invoiceNumber);
+  if (!normalizedNumber || invoiceNumber.trim().toUpperCase().startsWith("AUTO-")) return [];
+  const found = detectDuplicatePurchaseInvoice(invoices, { clients_id: clientsId, gross_price: grossPrice, invoice_date: invoiceDate }) as
+    { candidate_same_amount_date_matches: { items: Array<{ id?: number }> } };
+  const ids = new Set(found.candidate_same_amount_date_matches.items.map(item => item.id));
+  return invoices.filter(invoice => {
+    const number = normalizeInvoiceNumberForComparison(invoice.number);
+    return invoice.id !== undefined && ids.has(invoice.id) && number.length > 0 && number !== normalizedNumber;
+  });
 }
 
 /**

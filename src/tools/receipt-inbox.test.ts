@@ -1940,6 +1940,14 @@ describe("invalidated-status + invoice-number normalization in receipt duplicate
     expect(findDuplicateInvoice([inv({})], 7, "inv 2024 01", "2026-03-09", 99)?.reason).toBe("supplier_invoice_number");
   });
 
+  it("findDuplicateInvoice reports a different non-blank number at the same supplier, gross and near date", async () => {
+    const { findDuplicateInvoice } = await import("./receipt-inbox-matching.js");
+    expect(findDuplicateInvoice([inv({ number: "INV-1O23" })], 7, "INV-1023", "2026-03-05", 50)).toMatchObject({ reason: "supplier_amount_date_other_number", invoice_id: 5 });
+    expect(findDuplicateInvoice([inv({ number: "INV-1O23" })], 7, "INV-1023", "2026-03-20", 50)).toBeUndefined();
+    expect(findDuplicateInvoice([inv({ number: "INV-1O23" })], 7, "INV-1023", "2026-03-01", 51)).toBeUndefined();
+    expect(findDuplicateInvoice([inv({ number: "INV-1O23" })], 8, "INV-1023", "2026-03-01", 50)).toBeUndefined();
+  });
+
   it("payment-receipt cross-reference does not link to a VOID invoice", async () => {
     const { buildReferencedInvoiceForPaymentReceipt } = await import("./receipt-inbox.js");
     expect(buildReferencedInvoiceForPaymentReceipt("INV-2024-01", [inv({ status: "VOID" })], { client_id: 7 })?.matched).toBe(false);

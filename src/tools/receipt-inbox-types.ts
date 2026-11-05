@@ -91,7 +91,7 @@ export interface TransactionMatchCandidate {
 }
 
 export interface InvoiceDuplicateMatch {
-  reason: "supplier_invoice_number" | "supplier_amount_date";
+  reason: "supplier_invoice_number" | "supplier_amount_date" | "supplier_amount_date_other_number";
   invoice_id: number;
   invoice_number: string;
   create_date: string;

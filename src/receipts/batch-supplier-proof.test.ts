@@ -662,8 +662,11 @@ describe("two receipts of one new verified supplier (review 2026-11-04 MINOR 3)"
     vi.mocked(readFile).mockImplementation((async (path: unknown) =>
       Buffer.from(String(path).includes("two") ? "receipt two" : "receipt one")) as never);
     // Snapshots are written as <index>.pdf in listing order: 1.pdf is two.pdf.
+    // A second, distinct invoice: another number AND a date beyond the 7-day
+    // same-gross window (same gross + nearby date under another number is a
+    // possible duplicate and held).
     vi.mocked(parseDocument).mockImplementation((async (path: string) => parsed(path.endsWith("1.pdf")
-      ? PRINT_RECEIPT.map(line => line === "Arve nr A-17" ? "Arve nr A-18" : line)
+      ? PRINT_RECEIPT.map(line => line === "Arve nr A-17" ? "Arve nr A-18" : line === "Kuupäev 15.03.2026" ? "Kuupäev 30.03.2026" : line)
       : PRINT_RECEIPT)) as never);
   }
 

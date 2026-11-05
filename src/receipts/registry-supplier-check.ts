@@ -19,6 +19,8 @@
  *   → both companies are on the page and the code may not be the supplier's:
  *   `supplier_identifier_ambiguous` holds it.
  * - The register's name is not on the page → an extraction note.
+ * - The register names the active company itself → the buyer's code was read
+ *   as the supplier's: `supplier_identifier_ambiguous` holds it with a note.
  * - No lookup (no Estonian code, own code, register unreachable or nameless)
  *   leaves the extraction exactly as it is.
  *
@@ -102,7 +104,19 @@ export async function crossCheckSupplierWithRegistry(
   }
   const registryName = registry?.name.trim();
   if (!registryName) return extracted;
-  if (options.ownCompanyName && companyNamesAgree(registryName, options.ownCompanyName)) return extracted;
+  // The register names the active company: the buyer's own code was read as the
+  // supplier's (its own code is unknown when it has no client record of its
+  // own). Hold — booking on it would resolve or create the company itself.
+  if (options.ownCompanyName && companyNamesAgree(registryName, options.ownCompanyName)) {
+    return {
+      ...extracted,
+      supplier_identifier_ambiguous: true,
+      extraction_notes: [
+        ...(extracted.extraction_notes ?? []),
+        `The Estonian business register shows that registry code ${regCode} belongs to your own company, so it is the buyer's code, not the supplier's; find the supplier's own registry code on the document before booking.`,
+      ],
+    };
+  }
   if (companyNamesAgree(name, registryName)) return extracted;
 
   const printed = registryNamePrinted(extracted.raw_text ?? "", registryName);

@@ -44,6 +44,27 @@ describe("purchase intake FIFO", () => {
       .toEqual({ kind: "amount_date", invoiceIds: [], comparisonUnavailable: ["invoice_date"] });
   });
 
+  it("a different non-blank number with the same supplier, gross and near date is an other-number match", async () => {
+    const api = apiFor("other-number");
+    api.purchaseInvoices.listAll.mockResolvedValue([
+      { id: 11, clients_id: 4242, number: "INV-1O23", gross_price: 124, create_date: "2026-03-12", cl_currencies_id: "EUR", status: "CONFIRMED" },
+      { id: 12, clients_id: 4242, number: "INV-1O23", gross_price: 124, create_date: "2026-03-12", cl_currencies_id: "USD", status: "CONFIRMED" },
+      { id: 13, clients_id: 4242, number: "INV-0999", gross_price: 124, create_date: "2026-02-12", cl_currencies_id: "EUR", status: "CONFIRMED" },
+      { id: 14, clients_id: 9999, number: "INV-1O23", gross_price: 124, create_date: "2026-03-12", cl_currencies_id: "EUR", status: "CONFIRMED" },
+    ]);
+    expect(await scanPurchaseIntakeDuplicates(api, { supplierClientId: 4242, invoiceNumber: "INV-1023", grossPrice: 124, invoiceDate: "2026-03-15", currency: "EUR" }))
+      .toEqual({ kind: "amount_date_other_number", invoiceIds: [11] });
+  });
+
+  it("an AUTO- placeholder number never takes the other-number amount/date match", async () => {
+    const api = apiFor("auto-number");
+    api.purchaseInvoices.listAll.mockResolvedValue([
+      { id: 11, clients_id: 4242, number: "INV-1O23", gross_price: 124, create_date: "2026-03-15", cl_currencies_id: "EUR", status: "CONFIRMED" },
+    ]);
+    expect(await scanPurchaseIntakeDuplicates(api, { supplierClientId: 4242, invoiceNumber: "AUTO-TX-5", grossPrice: 124, invoiceDate: "2026-03-15", currency: "EUR" }))
+      .toEqual({ kind: "number", invoiceIds: [] });
+  });
+
   it("nonblank exact-number scans do not require amount/date comparison inputs", async () => {
     const api = apiFor("number-only");
     api.purchaseInvoices.listAll.mockResolvedValue([{ id: 9, clients_id: 4242, number: "A-17", status: "PROJECT" }]);

@@ -417,6 +417,15 @@ function duplicateDecision(
   signals: { credit_word_present?: boolean; signed_amount_present?: boolean },
   duplicate: InvoiceDuplicateMatch,
 ): { kind: "skip" } | { kind: "review"; note: string } {
+  // Same supplier, gross and nearby date but another invoice number: the same
+  // invoice read twice (O/0, I/1) or a genuinely separate one — never skipped.
+  if (duplicate.reason === "supplier_amount_date_other_number") {
+    return {
+      kind: "review",
+      note: `Possible duplicate of purchase invoice ${duplicate.invoice_id} (same supplier, gross and date within 7 days, ` +
+        "but a different invoice number); check whether it is the same invoice before booking it.",
+    };
+  }
   // An ambiguous invoice number, or a client resolved from a contested
   // supplier id, may match the wrong existing invoice: a real, unbooked
   // invoice must not be skipped on it, so it is reviewed.
@@ -591,10 +600,12 @@ async function processSingleReceipt(
       return buildNeedsReviewResult(file, classification, extracted, llmFallback, notes);
     }
 
-    const ownCompanyOptions = options.ownCompanyVat || options.ownCompanyRegistryCode
+    const ownCompanyOptions = options.ownCompanyVat || options.ownCompanyRegistryCode || options.ownIbans?.length || options.ownCompanyName
       ? {
           ...(options.ownCompanyVat ? { ownCompanyVat: options.ownCompanyVat } : {}),
           ...(options.ownCompanyRegistryCode ? { ownCompanyRegistryCode: options.ownCompanyRegistryCode } : {}),
+          ...(options.ownIbans?.length ? { ownIbans: options.ownIbans } : {}),
+          ...(options.ownCompanyName ? { ownCompanyName: options.ownCompanyName } : {}),
         }
       : undefined;
     const supplierResolution = await resolveSupplierInternal(
@@ -621,7 +632,7 @@ async function processSingleReceipt(
     if (!supplierResolution.client && !supplierResolution.preview_client) {
       const fallback = summarize();
       notes.push(
-        supplierResolution.code === "supplier_client_deactivated" && supplierResolution.reason
+        (supplierResolution.code === "supplier_client_deactivated" || supplierResolution.code === "supplier_is_own_company") && supplierResolution.reason
           ? supplierResolution.reason
           : "Supplier could not be resolved or prepared for creation.",
       );

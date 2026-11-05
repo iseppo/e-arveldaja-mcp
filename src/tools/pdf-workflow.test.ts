@@ -1033,6 +1033,25 @@ describe("pdf workflow tools", () => {
       expect(api.purchaseInvoices.createAndSetTotals).not.toHaveBeenCalled();
     });
 
+    it("refuses the same supplier + gross + nearby date under another number; allow_duplicate_invoice_number lifts it", async () => {
+      const filePath = createTempInvoiceFile("dupother.pdf", "%PDF-pdf-bytes");
+      mockedResolveFileInput.mockResolvedValue({ path: filePath });
+      const existing = [{ id: 32, clients_id: 7, number: "PI-NEW-l", status: "CONFIRMED", create_date: "2026-03-18", gross_price: 124 }];
+      const refused = setupPdfWorkflowTool("create_purchase_invoice_from_pdf", { purchaseInvoices: { listAll: vi.fn().mockResolvedValue(existing) } });
+      const response = await refused.handler(args(filePath));
+      expect(response.isError).toBe(true);
+      expect(parseToolPayload<CreatePurchaseInvoiceFromPdfFailurePayload>(response.content[0]!.text))
+        .toMatchObject({ category: "possible_duplicate_purchase_invoice", existing_invoice_ids: [32] });
+      expect(refused.api.purchaseInvoices.createAndSetTotals).not.toHaveBeenCalled();
+
+      const allowed = setupPdfWorkflowTool("create_purchase_invoice_from_pdf", { purchaseInvoices: { listAll: vi.fn().mockResolvedValue(existing) } });
+      const created = await allowed.handler(args(filePath, { allow_duplicate_invoice_number: true }));
+      expect(created.isError).not.toBe(true);
+      expect(allowed.api.purchaseInvoices.createAndSetTotals).toHaveBeenCalledTimes(1);
+      expect(parseToolPayload<CreatePurchaseInvoiceFromPdfPayload>(created.content[0]!.text).duplicate_invoice_number_acknowledged)
+        .toMatchObject({ existing_invoice_ids: [32] });
+    });
+
     it("drops the purchase-invoice list cache right before the supplier + invoice-number duplicate lookup", async () => {
       const filePath = createTempInvoiceFile("dupfresh.pdf", "%PDF-pdf-bytes");
       mockedResolveFileInput.mockResolvedValue({ path: filePath });
