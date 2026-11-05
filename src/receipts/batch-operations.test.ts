@@ -1187,6 +1187,33 @@ describe("receipt batch — unresolved supplier duplicate check (live smoke 0.29
     expect(outcome.value.results[0]!.duplicate_candidates).toBeUndefined();
   });
 
+  // Fable identity MAJOR 1: INV-1O23 booked from the e-mail PDF, INV-1023 read
+  // from a phone photo of the same invoice — same supplier, gross and date with a
+  // different non-blank number is reviewed (never created, never skipped).
+  it.each(["dry_run", "create"] as const)("same supplier + gross + near date with a different number is reviewed (%s)", async (mode) => {
+    const { api, spies } = apiWithInvoices([{ ...booked, id: 901, number: "INV-I", clients_id: 7, client_name: "Supplier OU", create_date: "2026-03-18", gross_price: 124 }]);
+    const ops = makeOperations(api);
+    const dryRun = await ops.runBatch({ ...baseRun, executionMode: "dry_run", dryRun: true });
+    if (!dryRun.ok) throw new Error("runBatch failed");
+    const outcome = mode === "dry_run" ? dryRun : await ops.runBatch({
+      ...baseRun, executionMode: "create", dryRun: false, approvedManifest: dryRun.value.manifest, planHandle: dryRun.value.planHandles?.create,
+    });
+    if (!outcome.ok) throw new Error("runBatch failed");
+    const result = outcome.value.results[0]!;
+    expect(result.status).toBe("needs_review");
+    expect(result.duplicate_match).toMatchObject({ invoice_id: 901, reason: "supplier_amount_date_other_number" });
+    expect(result.notes.join(" ")).toContain("purchase invoice 901");
+    expect(spies.createAndSetTotals).not.toHaveBeenCalled();
+  });
+
+  it("a same-gross invoice under another number in another currency is no hold", async () => {
+    const { api } = apiWithInvoices([{ ...booked, id: 902, number: "INV-I", clients_id: 7, client_name: "Supplier OU", create_date: "2026-03-18", gross_price: 124, cl_currencies_id: "USD" }]);
+    const outcome = await makeOperations(api).runBatch({ ...baseRun, executionMode: "dry_run", dryRun: true });
+    if (!outcome.ok) throw new Error("runBatch failed");
+    expect(outcome.value.results[0]!.status).toBe("dry_run_preview");
+    expect(outcome.value.results[0]!.duplicate_match).toBeUndefined();
+  });
+
   // Codex review: an ambiguous number may match the wrong existing invoice, so
   // a real invoice must not be skipped as its duplicate.
   it.each(["dry_run", "create"] as const)("an ambiguous invoice number matching an existing invoice is reviewed, not skipped (%s)", async (mode) => {
@@ -1506,6 +1533,18 @@ describe("receipt batch — own company name reaches extraction", () => {
     });
     expect(outcome.ok).toBe(true);
     expect(vi.mocked(extractReceiptFieldsFromText).mock.calls[0]![2]).toMatchObject({ ownCompanyName: "Proovi OÜ" });
+  });
+  it("passes the own company name and own IBANs to supplier resolution", async () => {
+    const { api } = makeApi();
+    (api as unknown as { readonly: Record<string, ReturnType<typeof vi.fn>> }).readonly.getBankAccounts!
+      .mockResolvedValue([{ account_name_est: "LHV", iban_code: "EE38 2200 2210 2014 5685", accounts_dimensions_id: 5001 }]);
+    const outcome = await makeOperations(api).runBatch({
+      ...baseRun, executionMode: "dry_run", dryRun: true, ownCompanyName: "Proovi OÜ",
+    });
+    expect(outcome.ok).toBe(true);
+    expect(vi.mocked(resolveSupplierInternal).mock.calls[0]![4]).toMatchObject({
+      ownCompanyName: "Proovi OÜ", ownIbans: ["EE382200221020145685"],
+    });
   });
   it("names a sales offer / quote in the needs_review note", async () => {
     vi.mocked(classifyReceiptDocument).mockReturnValue("unclassifiable");

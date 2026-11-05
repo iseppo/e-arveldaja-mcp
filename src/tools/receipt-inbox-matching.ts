@@ -3,6 +3,7 @@ import type { PurchaseInvoice, Transaction } from "../types/api.js";
 import { isInvalidatedPurchaseInvoice, normalizeInvoiceNumberForComparison } from "../purchase-invoice-status.js";
 import type { InvoiceSummaryForMatching } from "./receipt-extraction.js";
 import { scoreTransactionToInvoice } from "./receipt-extraction.js";
+import { detectDuplicatePurchaseInvoice } from "./document-audit.js";
 import type { ExtractedReceiptFields } from "./receipt-extraction.js";
 import type { AlreadyBookedCandidate, InvoiceDuplicateMatch, InvoiceNumberCandidate, TransactionMatchCandidate } from "./receipt-inbox-types.js";
 
@@ -56,6 +57,8 @@ export function findDuplicateInvoice(
   invoiceNumber: string,
   createDate: string,
   grossPrice: number,
+  /** The receipt's currency (default EUR): the amount/date-under-another-number rule compares same-currency invoices only. */
+  currency?: string,
 ): InvoiceDuplicateMatch | undefined {
   const normalizedNumber = normalizeInvoiceNumberForComparison(invoiceNumber);
 
@@ -91,7 +94,51 @@ export function findDuplicateInvoice(
     };
   }
 
+  // Same supplier + gross + date window with a DIFFERENT non-blank number (a
+  // phone photo read as INV-1023 of the e-mailed INV-1O23): the reading path's
+  // rule (detectDuplicatePurchaseInvoice), so every intake surface agrees. A
+  // review hint only — callers never skip on it.
+  // Same currency only, as the create-time scanner (scanPurchaseIntakeDuplicates).
+  const receiptCurrency = (currency ?? "EUR").toUpperCase();
+  const sameCurrency = invoices.filter(invoice => (invoice.cl_currencies_id ?? "EUR").toUpperCase() === receiptCurrency);
+  const otherNumber = otherNumberAmountDateMatches(sameCurrency, clientsId, invoiceNumber, grossPrice, createDate)[0];
+  if (otherNumber?.id) {
+    return {
+      reason: "supplier_amount_date_other_number",
+      invoice_id: otherNumber.id,
+      invoice_number: otherNumber.number,
+      create_date: otherNumber.create_date,
+      gross_price: otherNumber.gross_price,
+    };
+  }
+
   return undefined;
+}
+
+/**
+ * Live invoices of the supplier with the same gross and a nearby date
+ * (detectDuplicatePurchaseInvoice's candidate_same_amount_date_matches) whose
+ * non-blank number differs from a non-blank, non-placeholder `invoiceNumber`.
+ * AUTO- numbers are extractor/auto-booking placeholders and never match, on
+ * either side.
+ */
+export function otherNumberAmountDateMatches(
+  invoices: PurchaseInvoice[],
+  clientsId: number,
+  invoiceNumber: string,
+  grossPrice: number,
+  invoiceDate: string,
+): PurchaseInvoice[] {
+  const normalizedNumber = normalizeInvoiceNumberForComparison(invoiceNumber);
+  if (!normalizedNumber || invoiceNumber.trim().toUpperCase().startsWith("AUTO-")) return [];
+  const found = detectDuplicatePurchaseInvoice(invoices, { clients_id: clientsId, gross_price: grossPrice, invoice_date: invoiceDate }) as
+    { candidate_same_amount_date_matches: { items: Array<{ id?: number }> } };
+  const ids = new Set(found.candidate_same_amount_date_matches.items.map(item => item.id));
+  return invoices.filter(invoice => {
+    const number = normalizeInvoiceNumberForComparison(invoice.number);
+    return invoice.id !== undefined && ids.has(invoice.id) && number.length > 0 && number !== normalizedNumber &&
+      !(invoice.number ?? "").trim().toUpperCase().startsWith("AUTO-");
+  });
 }
 
 /**
@@ -132,12 +179,12 @@ export function findInvoiceNumberMatchesAnySupplier(
  */
 export function findAlreadyBookedCandidates(
   invoices: PurchaseInvoice[],
-  extracted: Partial<Pick<ExtractedReceiptFields, "invoice_number" | "invoice_date" | "total_gross">>,
+  extracted: Partial<Pick<ExtractedReceiptFields, "invoice_number" | "invoice_date" | "total_gross" | "currency">>,
   resolvedClientId: number | undefined,
 ): AlreadyBookedCandidate[] {
   const { invoice_number: invoiceNumber, invoice_date: invoiceDate, total_gross: gross } = extracted;
   if (resolvedClientId !== undefined && invoiceNumber && invoiceDate && gross !== undefined) {
-    const match = findDuplicateInvoice(invoices, resolvedClientId, invoiceNumber, invoiceDate, gross);
+    const match = findDuplicateInvoice(invoices, resolvedClientId, invoiceNumber, invoiceDate, gross, extracted.currency);
     if (match) {
       return [{ invoice_id: match.invoice_id, reason: match.reason, ...(match.gross_price !== undefined ? { gross_price: match.gross_price } : {}) }];
     }

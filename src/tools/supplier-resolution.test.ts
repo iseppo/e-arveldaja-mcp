@@ -896,6 +896,33 @@ describe("resolveSupplierInternal — P2 E1 supplier-name proof at the client-cr
     expect(create.mock.calls[0]![0]).toMatchObject({ name: "Telia Eesti AS", code: "10234957" });
   });
 
+  it("refuses to create a client when the register names the active company for the supplier code", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(REGISTRY_OK));
+    const { api, create } = recordingApi();
+    for (const execute of [false, true]) {
+      const result = await resolveSupplierInternal(api, [], fields(provenance("ocr", "top_line")), execute,
+        { _resolveSupplierOverrides: { country: "EST" }, ownCompanyName: "TELIA EESTI AS" });
+      expect(result).toMatchObject({ found: false, created: false, requires_manual_review: true, code: "supplier_is_own_company" });
+      expect(result.preview_client).toBeUndefined();
+      expect(result.reason).toMatch(/own company/);
+    }
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it.each([["absent", undefined], ["blank", "  "]])("refuses to preview or create a client when the required own-company name is %s", async (_label, ownCompanyName) => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(REGISTRY_OK));
+    const { api, create } = recordingApi();
+    for (const execute of [false, true]) {
+      const result = await resolveSupplierInternal(api, [], fields(provenance("ocr", "top_line")), execute, {
+        _resolveSupplierOverrides: { country: "EST" }, ownCompanyNameRequired: true,
+        ...(ownCompanyName !== undefined ? { ownCompanyName } : {}),
+      });
+      expect(result).toMatchObject({ found: false, created: false, requires_manual_review: true, code: "own_company_identity_unavailable" });
+      expect(result.preview_client).toBeUndefined();
+    }
+    expect(create).not.toHaveBeenCalled();
+  });
+
   it("an explicit operator-supplied name is created without a registry name (resolve_supplier, sales customer)", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(REGISTRY_DOWN));
     const { api, create } = recordingApi();

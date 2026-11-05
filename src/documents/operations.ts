@@ -64,6 +64,7 @@ import type { Account, Client, CreatePurchaseInvoiceData, PurchaseInvoice } from
 import { normalizeVatValue } from "../document-identifiers.js";
 import { draftFingerprint, draftReadbackMismatches } from "./purchase-draft-verification.js";
 import { scanPurchaseIntakeDuplicates, withPurchaseInvoiceLock } from "./purchase-invoice-lock.js";
+import { otherNumberAmountDateMatches } from "../tools/receipt-inbox-matching.js";
 import type {
   AccountingDocumentBookingFields,
   AccountingDocumentConfirmation,
@@ -187,6 +188,8 @@ export interface EffectiveBookingModel {
   readonly blockOnDuplicate: boolean;
   readonly allowDuplicateInvoiceNumber: boolean;
   readonly grossAmountEur?: number;
+  /** The gross createAndSetTotals writes (supplied or derived from the items), for duplicate comparison. */
+  readonly comparisonGross: number;
   /** The chart the items were validated against (uncached for a non-VAT VAT-account item); not fingerprinted. */
   readonly accounts?: readonly Account[];
 }
@@ -319,6 +322,7 @@ export async function computeEffectiveBooking(
     blockOnDuplicate,
     allowDuplicateInvoiceNumber,
     ...(grossAmountEur !== undefined ? { grossAmountEur } : {}),
+    comparisonGross: totalsPreview.gross,
     accounts,
   });
 }
@@ -663,6 +667,28 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
             severity: "blocker",
           });
         }
+        // The create-time rule on the same reviewed fields: same supplier,
+        // currency, gross and nearby date under another number.
+        const otherNumber = boundDuplicates.length > 0 ? [] : otherNumberAmountDateMatches(
+          allPurchases.filter(row => (row.cl_currencies_id ?? "EUR") === effective.value.currencyCode),
+          input.booking.supplierClientId, effective.value.invoiceData.number,
+          effective.value.comparisonGross, effective.value.invoiceData.create_date,
+        ).map(row => row.id!);
+        if (otherNumber.length > 0 && effective.value.allowDuplicateInvoiceNumber) {
+          warnings.push({
+            code: "duplicate_purchase_invoice_acknowledged",
+            message: `A live purchase invoice of the same supplier with the same gross and a date within 7 days exists under another number (id ${otherNumber.join(", ")}); ` +
+              "allow_duplicate_invoice_number acknowledges it is a separate invoice.",
+          });
+        } else if (otherNumber.length > 0) {
+          blockers.push({
+            item_id: "possible_duplicate_purchase_invoice",
+            code: "possible_duplicate_purchase_invoice",
+            message: `A live purchase invoice of the same supplier with the same gross and a date within 7 days exists under another number (id ${otherNumber.join(", ")}); ` +
+              "it may be this invoice with a misread number. If it is a separate invoice, prepare again with allow_duplicate_invoice_number=true.",
+            severity: "blocker",
+          });
+        }
         const planInput: ExecutionPlanInput = {
           normalizedArgs: effective.value.fingerprint,
           sourceIdentities: [{ ...snapshot.identity } as unknown as PlanRecord],
@@ -851,14 +877,18 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
       const duplicates = await scanPurchaseIntakeDuplicates(this.api, {
         supplierClientId: invoiceData.clients_id, invoiceNumber,
         grossPrice: input.grossPrice, invoiceDate: input.invoiceDate, currency: invoiceData.cl_currencies_id,
+        derivedGrossPrice: effective.value.comparisonGross,
       });
       if (duplicates.comparisonUnavailable) {
         return fail("purchase_duplicate_comparison_required",
-          `Blank invoice numbers require a positive finite supplied gross_price and a valid invoice_date for duplicate review. Missing or invalid: ${duplicates.comparisonUnavailable.join(", ")}. Supply the original document values and prepare again.`, "never");
+          (duplicates.kind === "amount_date"
+            ? "Blank invoice numbers require a positive finite supplied gross_price and a valid invoice_date for duplicate review."
+            : "The same-supplier amount/date duplicate review needs a nonzero gross and a valid invoice_date.") +
+            ` Missing or invalid: ${duplicates.comparisonUnavailable.join(", ")}. Supply the original document values and prepare again.`, "never");
       }
-      if (duplicates.invoiceIds.length > 0 && !(duplicates.kind === "number" && allowDuplicateInvoiceNumber)) {
+      if (duplicates.invoiceIds.length > 0 && !(duplicates.kind !== "amount_date" && allowDuplicateInvoiceNumber)) {
         return fail(duplicates.kind === "number" ? "duplicate_purchase_invoice" : "possible_duplicate_purchase_invoice",
-          `A live purchase invoice matches this supplier and ${duplicates.kind === "number" ? "invoice number" : "amount/date"} (id ${duplicates.invoiceIds.join(", ")}).`, "never");
+          `A live purchase invoice matches this supplier and ${duplicates.kind === "number" ? "invoice number" : duplicates.kind === "amount_date" ? "amount/date" : "gross and nearby date under a different invoice number"} (id ${duplicates.invoiceIds.join(", ")}).`, "never");
       }
 
       // Cross-mechanism intake duplicate guard — BEFORE any invoice/document
@@ -976,6 +1006,9 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
         duplicateCandidate,
         ...(duplicateScan.suspects.length > 0 ? { possibleDuplicatePostings: duplicateScan.suspects } : {}),
         journalReferenceScan,
+        ...(duplicates.invoiceIds.length > 0
+          ? { duplicateInvoiceAcknowledged: { kind: duplicates.kind as "number" | "amount_date_other_number", existingInvoiceIds: duplicates.invoiceIds } }
+          : {}),
         ...(confirmPlanHandle ? { confirmPlan: { planHandle: confirmPlanHandle, invoiceId: result.id } } : {}),
         ...(readbackMismatch?.length ? { readbackMismatch } : {}),
         ...(draftReadbackUnavailable ? { draftReadbackUnavailable: true as const } : {}),

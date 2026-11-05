@@ -753,7 +753,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext, run
       // mistook for the supplier would resolve (or auto-create) the buyer's
       // own company as a supplier and book a purchase against self. The
       // receipt-batch flow already threads these through; do the same here.
-      const { ownCompanyVat, ownCompanyRegistryCode, ownIbans } = await resolveOwnCompanyIdentifiers(api, allClients);
+      const { ownCompanyVat, ownCompanyRegistryCode, ownIbans, ownCompanyName } = await resolveOwnCompanyIdentifiers(api, allClients);
       const resolution = await resolveSupplierInternal(
         api,
         allClients,
@@ -768,6 +768,8 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext, run
           ownCompanyVat,
           ownCompanyRegistryCode,
           ownIbans,
+          ownCompanyName,
+          ownCompanyNameRequired: true,
           operatorSuppliedName: nameConfirmed,
           _resolveSupplierOverrides: { country: country ?? "EST", is_physical_entity, foreign_identity_attested },
         },
@@ -1408,14 +1410,27 @@ export function registerCreatePurchaseInvoiceFromPdfTool(server: McpServer, api:
       const duplicates = await scanPurchaseIntakeDuplicates(api, {
         supplierClientId: params.supplier_client_id, invoiceNumber: params.invoice_number,
         grossPrice: params.gross_price, invoiceDate: params.invoice_date, currency: currencyCode,
+        derivedGrossPrice: totalsPreview.gross,
       });
       if (duplicates.comparisonUnavailable) {
         return toolError({ category: "purchase_duplicate_comparison_required", retry: "never",
-          error: `Blank invoice numbers require a positive finite supplied gross_price and a valid invoice_date for duplicate review. Missing or invalid: ${duplicates.comparisonUnavailable.join(", ")}.`,
+          error: (duplicates.kind === "amount_date"
+            ? "Blank invoice numbers require a positive finite supplied gross_price and a valid invoice_date for duplicate review."
+            : "The same-supplier amount/date duplicate review needs a nonzero gross and a valid invoice_date.") +
+            ` Missing or invalid: ${duplicates.comparisonUnavailable.join(", ")}.`,
           next_action: "Supply the original document comparison values and review again before creating." } satisfies CreatePurchaseInvoiceFromPdfFailurePayload);
       }
       const duplicateNumberIds = duplicates.invoiceIds;
-      if (duplicateNumberIds.length > 0 && !(duplicates.kind === "number" && params.allow_duplicate_invoice_number === true)) {
+      if (duplicateNumberIds.length > 0 && !(duplicates.kind !== "amount_date" && params.allow_duplicate_invoice_number === true)) {
+        if (duplicates.kind === "amount_date_other_number") {
+          return toolError({
+            error: "A live purchase invoice of the same supplier with the same gross and a date within 7 days already exists under a different invoice number",
+            category: "possible_duplicate_purchase_invoice",
+            existing_invoice_ids: duplicateNumberIds,
+            next_action: `Compare with purchase invoice(s) ${duplicateNumberIds.join(", ")}: it may be the same invoice with a misread number. ` +
+              "If this is a separate invoice, pass allow_duplicate_invoice_number=true.",
+          } satisfies CreatePurchaseInvoiceFromPdfFailurePayload);
+        }
         return toolError({
           error: `A live purchase invoice with the same supplier and ${duplicates.kind === "number" ? "invoice number" : "amount/date"} already exists`,
           category: duplicates.kind === "number" ? "duplicate_purchase_invoice" : "possible_duplicate_purchase_invoice",
@@ -1579,7 +1594,9 @@ export function registerCreatePurchaseInvoiceFromPdfTool(server: McpServer, api:
               ? {
                   duplicate_invoice_number_acknowledged: {
                     existing_invoice_ids: duplicateNumberIds,
-                    note: "Created despite a live invoice with the same supplier and number (allow_duplicate_invoice_number=true).",
+                    note: duplicates.kind === "amount_date_other_number"
+                      ? "Created despite a live invoice with the same supplier, gross and nearby date under another number (allow_duplicate_invoice_number=true)."
+                      : "Created despite a live invoice with the same supplier and number (allow_duplicate_invoice_number=true).",
                   },
                 }
               : {}),

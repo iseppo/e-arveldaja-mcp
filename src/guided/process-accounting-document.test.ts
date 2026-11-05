@@ -555,6 +555,31 @@ describe("process_accounting_document", () => {
     expect(JSON.stringify(created)).not.toContain(INJECTION);
   });
 
+  it("an acknowledged same-supplier, same-gross invoice under another number is reported on create", async () => {
+    const { path, sha256 } = writeTempPdf();
+    const { handler, api } = setup({
+      clientRows: [supplier()],
+      accounts: [fixtureAccount({ id: 5000, name_est: "Teenused" }), fixtureAccount({ id: 1510, name_est: "Sisendkm", is_vat_account: true })],
+      clients: { get: vi.fn().mockResolvedValue(supplier()) },
+      purchaseInvoices: {
+        listAll: vi.fn().mockResolvedValue([{ id: 779, clients_id: 4242, number: "INV-l", status: "CONFIRMED", create_date: "2026-06-12", gross_price: 12 }]),
+        get: vi.fn(),
+        createAndSetTotals: vi.fn().mockResolvedValue({ id: 90_002, status: "SAVED" }),
+        confirmWithTotals: vi.fn(),
+        invalidate: vi.fn().mockResolvedValue({}),
+        uploadDocument: vi.fn().mockResolvedValue({}),
+      },
+    });
+    const prepared = parse(await handler({ mode: "prepare", file_path: path, ...bookingArgs(), allow_duplicate_invoice_number: true }));
+    const created = parse(await handler({
+      mode: "create", file_path: path, plan_handle: prepared.summary.plan_handle, source_sha256: sha256,
+      ...bookingArgs(), allow_duplicate_invoice_number: true,
+    }));
+    expect(api.purchaseInvoices.createAndSetTotals).toHaveBeenCalledTimes(1);
+    expect(created.duplicate_invoice_number_acknowledged).toMatchObject({ existing_invoice_ids: [779] });
+    expect(created.duplicate_invoice_number_acknowledged.note).toContain("under another number");
+  });
+
   it("rejects mode='create' when required booking fields are missing (no mutation)", async () => {
     const { path } = writeTempPdf();
     const { handler, api } = setup({ clientRows: [supplier()], clients: { get: vi.fn().mockResolvedValue(supplier()) } });

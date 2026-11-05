@@ -155,6 +155,11 @@ export interface AccountingDocumentExecution {
   readonly possibleDuplicatePostings?: readonly DuplicatePostingSuspect[];
   /** Live journals already referencing the invoice number (advisory; hits carry raw journal text). */
   readonly journalReferenceScan: JournalReferenceScanResult;
+  /** Live invoices the create went ahead despite (allow_duplicate_invoice_number): same number, or same gross and nearby date under another number. */
+  readonly duplicateInvoiceAcknowledged?: {
+    readonly kind: "number" | "amount_date_other_number";
+    readonly existingInvoiceIds: readonly number[];
+  };
   /** SECOND plan minted for the SEPARATE confirm/link step — NEVER auto-run. */
   readonly confirmPlan?: {
     readonly planHandle: string;
