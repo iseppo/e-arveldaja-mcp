@@ -5,7 +5,6 @@ import type { CreatePurchaseInvoiceRequest, UpdatePurchaseInvoiceRequest } from 
 import { BaseResource } from "./base-resource.js";
 import { draftFingerprint } from "../purchase-invoice-draft-fingerprint.js";
 import { roundMoney, parseVatRateDropdown } from "../money.js";
-import { toCents } from "../money-cents.js";
 import { classifyMutationFailure } from "../mutation-outcome.js";
 import {
   applyPurchaseItemStructuralDefaults,
@@ -303,13 +302,14 @@ export function resolvePurchaseInvoiceTotals(input: {
   // gross must equal it to the cent.
   // Compared in whole cents: each amount is rounded half-up (sign-symmetric,
   // roundMoney) to cents before summing, so 1.005 counts as 1.01.
+  const cents = (value: number) => Math.round(roundMoney(value) * 100);
   const foldedItemGross = hasItems
     ? items.reduce((sum, item, index) =>
-      sum + toCents(item.project_no_vat_gross_price ?? roundMoney((itemAmounts[index]?.net ?? 0) + (itemAmounts[index]?.vat ?? 0))), 0) / 100
+      sum + cents(item.project_no_vat_gross_price ?? roundMoney((itemAmounts[index]?.net ?? 0) + (itemAmounts[index]?.vat ?? 0))), 0) / 100
     : roundMoney(itemNet + itemVat);
-  const expectedGross = isVatRegistered ? (toCents(itemNet) + toCents(vat)) / 100 : foldedItemGross;
+  const expectedGross = isVatRegistered ? (cents(itemNet) + cents(vat)) / 100 : foldedItemGross;
   const gross = grossPrice !== undefined ? grossPrice : expectedGross;
-  if (hasItems && grossPrice !== undefined && toCents(grossPrice) !== toCents(expectedGross)) {
+  if (hasItems && grossPrice !== undefined && cents(grossPrice) !== cents(expectedGross)) {
     return {
       ok: false,
       code: "purchase_totals_mismatch",
@@ -326,7 +326,7 @@ export function resolvePurchaseInvoiceTotals(input: {
     // Only a per-line rounding residue (≤ 1 cent per item) may be absorbed.
     // A larger gap means the explicit totals disagree with the items; a
     // reverse-charge item under a charged invoice VAT is refused.
-    const chargedVatDiff = (toCents(vatPrice) - toCents(chargedItemVat)) / 100;
+    const chargedVatDiff = (cents(vatPrice) - cents(chargedItemVat)) / 100;
     if (Math.abs(chargedVatDiff) > roundMoney(0.01 * items.length) + 1e-9) {
       return {
         ok: false,
@@ -340,7 +340,7 @@ export function resolvePurchaseInvoiceTotals(input: {
   }
   // The residue is the gap to the CHARGED rows' VAT: a reverse-charge row's
   // self-assessed VAT is never part of it, and never absorbs it.
-  const vatDiff = vatPrice !== undefined ? (toCents(vatPrice) - toCents(chargedItemVat)) / 100 : 0;
+  const vatDiff = vatPrice !== undefined ? (cents(vatPrice) - cents(chargedItemVat)) / 100 : 0;
   if (items && items.length > 0 && vatPrice !== undefined && isVatRegistered && vatDiff !== 0) {
     const lastItem = items[items.length - 1]!;
     if (isReversed(lastItem)) {
