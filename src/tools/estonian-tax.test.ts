@@ -2120,6 +2120,45 @@ describe("prepare_dividend_package remediation", () => {
     expect(check.balance_before).toBe(25000);
   });
 
+  it("holds the dividend when a distribution-year journal mixes the 2970 transfer with current-year income", async () => {
+    // Correct lg 1 is 25 000; lg 2 has headroom (net assets 44 500, floor 2 500),
+    // so a 30 000 net dividend must not pass on a 32 000 overstated ceiling.
+    const mixed = makeJournal("2026-02-01", [
+      makePosting(2970, "D", 20000), makePosting(2960, "C", 20000),
+      makePosting(1000, "D", 7000), makePosting(4000, "C", 7000),
+    ], { id: 7701 });
+    const income2026 = makeJournal("2026-03-01", [makePosting(1000, "D", 10000), makePosting(4000, "C", 10000)]);
+    const journals = [...base(5000), profit2025, rikResult2025, mixed, income2026];
+    const { api, cb } = setup(journals, rikAccounts());
+    for (const dry_run of [true, false]) {
+      const result = await cb({ net_dividend: 30000, shareholder_client_id: 1, effective_date: "2026-06-01", dry_run, force: true });
+      expect(isError(result), String(dry_run)).toBe(true);
+      const data = parseResult(result);
+      expect(data.error_code).toBe("mixed_result_journal_requires_review");
+      expect(String(data.error)).toContain("mixes the year-end result account with income/expense lines");
+      expect(data.mixed_result_journals).toEqual([{ journal_id: 7701, document_number: null, effective_date: "2026-02-01" }]);
+    }
+    expect(api.journals.create).not.toHaveBeenCalled();
+  });
+
+  it("holds the dividend when an earlier distribution-year dividend debited 2970 together with the CIT expense", async () => {
+    const earlierDividend = makeJournal("2026-03-01", [
+      makePosting(2970, "D", 7800), makePosting(8900, "D", 2200),
+      makePosting(2650, "C", 7800), makePosting(2656, "C", 2200),
+    ], { id: 7702 });
+    const { api, cb } = setup([...base(5000), profit2025, rikResult2025, earlierDividend], rikAccounts());
+    const result = await cb({ net_dividend: 1000, shareholder_client_id: 1, effective_date: "2026-06-01", dry_run: false });
+    expect(isError(result)).toBe(true);
+    expect(parseResult(result).error_code).toBe("mixed_result_journal_requires_review");
+    expect(api.journals.create).not.toHaveBeenCalled();
+  });
+
+  it("does not hold for a non-closing-shaped 2970 journal without P&L lines, and keeps its window", async () => {
+    const lateTransfer = makeJournal("2026-01-10", [makePosting(2970, "D", 20000), makePosting(2960, "C", 20000)]);
+    const check = await lg1([...base(5000), profit2025, rikResult2025, lateTransfer], "2026-03-01");
+    expect(check.balance_before).toBe(25000);
+  });
+
   it("RIK operator practice (only D 2970 / K 2960, no 9000 entry) counts the year once", async () => {
     // Booked either on 1 Dec of the closed year or during the distribution year.
     for (const date of ["2025-12-01", "2026-05-01"]) {

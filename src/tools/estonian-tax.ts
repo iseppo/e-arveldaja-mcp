@@ -924,11 +924,13 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
         //    expense balances (RIK does not zero them), so a closed year counts
         //    once (via 2970/2960) and only the unclosed residual counts here.
         //    Legacy YECL journals are included too (they zero P&L into 2970).
-        //    A journal that posts to 2970 (RIK result entry, legacy close)
-        //    counts its P&L lines in the same window as its 2970 line, so a
-        //    prior-year close booked late inside the distribution year (e.g.
-        //    dated 2026-01-05) cancels the prior-year P&L instead of adding
-        //    its result a second time.
+        //    A closing-shaped journal (only P&L and 2970 lines, 2970 = the P&L
+        //    net: RIK result entry, legacy close) counts its P&L lines in the
+        //    same window as its 2970 line, so a prior-year close booked late
+        //    inside the distribution year (e.g. dated 2026-01-05) cancels the
+        //    prior-year P&L instead of adding its result a second time. Any
+        //    other journal's P&L counts only before Jan 1; a distribution-year
+        //    journal mixing 2970 with P&L outside that shape holds the dividend.
         // The distribution year's own result is NOT distributable (no approved
         // annual report yet), so its closing entry (RIK result entry or legacy
         // YECL, dated Dec 31 of that year) is excluded from the 2960/2970
@@ -948,15 +950,37 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
           .filter(a => a.account_type_est === "Tulud" || a.account_type_est === "Kulud")
           .map(a => a.id));
         plAccountIds.add(calculatedResultAccount);
-        const postsToCurrentYearProfit = (j: Journal) =>
-          (j.postings ?? []).some(p => !p.is_deleted && p.accounts_id === currentYearProfitAccount);
+        const livePostings = (j: Journal) =>
+          (j.postings ?? []).filter(p => !p.is_deleted && (p.type === "D" || p.type === "C"));
+        const toCents = (amount: number) => Math.round(amount * 100);
+        // Closing shape: only P&L (incl. 9000) and current-year-result lines,
+        // touching both, with the result line(s) equal to the P&L net to the cent.
+        const isClosingShaped = (j: Journal) => {
+          const postings = livePostings(j);
+          if (!postings.some(p => p.accounts_id === currentYearProfitAccount) ||
+            !postings.some(p => plAccountIds.has(p.accounts_id)) ||
+            !postings.every(p => p.accounts_id === currentYearProfitAccount || plAccountIds.has(p.accounts_id))) return false;
+          const resultNet = sumCreditMinusDebit([j], id => id === currentYearProfitAccount, () => true);
+          const plNet = sumCreditMinusDebit([j], id => plAccountIds.has(id), () => true);
+          return toCents(resultNet) === -toCents(plNet);
+        };
         const unclosedPriorYearPL = roundMoney(sumCreditMinusDebit(
           allJournals,
           id => plAccountIds.has(id),
-          j => postsToCurrentYearProfit(j)
+          j => isClosingShaped(j)
             ? registeredAsOf(j)
             : j.registered === true && j.effective_date < distributionYearStart,
         ));
+        // A distribution-year journal mixing the result account with P&L lines
+        // outside the closing shape cannot be split into "prior-year close" and
+        // "current-year P&L" safely, so the dividend is held for review.
+        const mixedResultJournals = allJournals
+          .filter(j =>
+            !j.is_deleted && j.operation_type !== "INITIAL" && j.effective_date >= distributionYearStart &&
+            registeredAsOf(j) && !isClosingShaped(j) &&
+            livePostings(j).some(p => p.accounts_id === currentYearProfitAccount) &&
+            livePostings(j).some(p => plAccountIds.has(p.accounts_id)))
+          .map(j => ({ journal_id: j.id ?? null, document_number: j.document_number ?? null, effective_date: j.effective_date }));
         const lg1Accounts = new Set([retainedAccount, currentYearProfitAccount]);
 
         // Unconfirmed (PROJECT) dividend drafts: this tool creates its journals
@@ -1193,13 +1217,16 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
         }
         const violations: string[] = [];
         if (pendingDividendDraftAnomalies.length > 0) violations.push("Pending dividend drafts require review");
+        if (mixedResultJournals.length > 0) {
+          violations.push("A journal mixes the year-end result account with income/expense lines; split it or confirm by hand");
+        }
         if (ledgerImbalance) violations.push("Ledger is imbalanced — legality checks cannot be trusted");
         if (retainedShortfall) violations.push("Insufficient retained earnings");
         if (netAssetsBreach) violations.push("ÄS § 157 net assets breach");
 
         // force overrides only known § 157 shortfalls, never uncertain draft
         // reservations or a ledger imbalance. This gate protects preview and create.
-        if (pendingDividendDraftAnomalies.length > 0 || ledgerImbalance || (violations.length > 0 && !force)) {
+        if (pendingDividendDraftAnomalies.length > 0 || mixedResultJournals.length > 0 || ledgerImbalance || (violations.length > 0 && !force)) {
           // Report every triggered legality violation in one response so the
           // operator sees the full picture. ÄS § 157 is explicitly the
           // framework for retained-earnings distribution legality, so a
@@ -1210,6 +1237,10 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
             ...(pendingDividendDraftAnomalies.length > 0 && {
               error_code: "pending_dividend_draft_requires_review",
               pending_dividend_draft_anomalies: pendingDividendDraftAnomalies,
+            }),
+            ...(mixedResultJournals.length > 0 && {
+              ...(pendingDividendDraftAnomalies.length === 0 && { error_code: "mixed_result_journal_requires_review" }),
+              mixed_result_journals: mixedResultJournals,
             }),
             ...(retainedShortfall && {
               retained_earnings_check: {
@@ -1245,6 +1276,8 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
             hint:
               pendingDividendDraftAnomalies.length > 0
                 ? `Review and correct the existing pending dividend draft(s): ${pendingDividendDraftAnomalies.map(d => `journal ${d.journal_id}`).join(", ")}, then re-run. Negative reservation components require review; force=true does not override this hold.`
+                : mixedResultJournals.length > 0
+                ? `A journal mixes the year-end result account (${currentYearProfitAccount}) with income/expense lines: ${mixedResultJournals.map(d => `journal ${d.journal_id}`).join(", ")}. Split it into a closing entry and a separate income/expense journal, or confirm the dividend by hand; force=true does not override this hold.`
                 : ledgerImbalance
                 ? "The ledger is imbalanced (Assets − Liabilities ≠ Equity + P&L); force=true does not override this. Find and fix the unbalanced or partially-deleted journals, then re-run."
                 : retainedShortfall && netAssetsBreach
