@@ -123,16 +123,30 @@ export function linkedPaymentAmount(transaction: Transaction, invoice: PurchaseI
  * Payments dated before the invoice date move the § 11 date only for the
  * prepaid part. `partial` = together they do not cover the invoice gross
  * (invoice currency, integer cents, no tolerance); `unknown` = an early
- * payment's amount (or the gross) is not known. Undefined = no early payment,
- * or the early payments cover the whole gross.
+ * payment's amount (or the gross) is not known, or its direction is not
+ * proved: on an invoice every nonzero early amount must be positive; on a
+ * credit note they must all share one sign (signed refunds or positive
+ * magnitudes, never mixed). Undefined = no early payment, or the early
+ * payments cover the whole gross.
  */
 export function partialPrepayment(invoice: PurchaseInvoice, payments: readonly LimitedVatPayment[]): "partial" | "unknown" | undefined {
-  const early = payments.filter(payment => /^\d{4}-\d{2}-\d{2}$/.test(payment.date) && payment.date < invoice.create_date);
+  const early = earlyPayments(invoice, payments);
   if (early.length === 0) return undefined;
   if (early.some(payment => payment.amount === null || !Number.isFinite(payment.amount))) return "unknown";
   if (typeof invoice.gross_price !== "number" || !Number.isFinite(invoice.gross_price)) return "unknown";
-  const paidCents = early.reduce((sum, payment) => sum + Math.round(payment.amount! * 100), 0);
-  return Math.abs(paidCents) < Math.abs(Math.round(invoice.gross_price * 100)) ? "partial" : undefined;
+  const grossCents = Math.round(invoice.gross_price * 100);
+  const cents = early.map(payment => Math.round(payment.amount! * 100)).filter(value => value !== 0);
+  const allPositive = cents.every(value => value > 0);
+  const allNegative = cents.every(value => value < 0);
+  const directionProved = grossCents > 0 ? allPositive : grossCents < 0 ? allPositive || allNegative : cents.length === 0;
+  if (!directionProved) return "unknown";
+  const paidCents = Math.abs(cents.reduce((sum, value) => sum + value, 0));
+  return paidCents < Math.abs(grossCents) ? "partial" : undefined;
+}
+
+/** Payments dated before the invoice date (valid dates only). */
+export function earlyPayments(invoice: PurchaseInvoice, payments: readonly LimitedVatPayment[]): LimitedVatPayment[] {
+  return payments.filter(payment => /^\d{4}-\d{2}-\d{2}$/.test(payment.date) && payment.date < invoice.create_date);
 }
 
 export function monthBounds(month: string): { from: string; to: string } {
@@ -277,9 +291,11 @@ export function computeLimitedVatMonth(
   const inMonth = (date: string) => date >= from && date <= to;
   for (const { invoice, client, payments } of sorted) {
     const serviceDate = serviceReceivedDate(invoice.create_date, payments.map(payment => payment.date));
-    // A partial prepayment is a review in the prepayment month AND the invoice month.
+    // A partial prepayment is a review in every month holding an early payment AND the invoice month.
     const prepayment = partialPrepayment(invoice, payments);
-    if (!inMonth(serviceDate) && !(prepayment && inMonth(invoice.create_date))) continue;
+    const reviewMonth = prepayment !== undefined &&
+      (inMonth(invoice.create_date) || earlyPayments(invoice, payments).some(payment => inMonth(payment.date)));
+    if (!inMonth(serviceDate) && !reviewMonth) continue;
     const decision = classifySupplier(client, classifications.get(invoice.clients_id));
     if (decision.decision === "not_foreign") continue;
     const base = {
@@ -300,7 +316,7 @@ export function computeLimitedVatMonth(
       continue;
     }
     if (prepayment === "unknown") {
-      review("limited_vat_partial_prepayment", "A payment dated before the invoice date has no amount in the invoice currency (or the invoice gross is missing), so it cannot be checked whether it prepaid the whole invoice. Under KMS § 11 only a prepaid part arises on the payment day; the rest arises on the invoice date. Not included in either month: book this invoice's VAT by hand, or ask the accountant. / Enne arve kuupäeva tehtud makse summat arve valuutas ei saa kindlaks teha, seega pole teada, kas see tasus kogu arve. KMS § 11 järgi kuulub ettemaksu kuusse ainult ettemakstud osa, ülejäänu arve kuupäeva kuusse. Arvet ei arvestata kummaski kuus — kirjenda selle arve käibemaks käsitsi või küsi raamatupidajalt.");
+      review("limited_vat_partial_prepayment", "A payment dated before the invoice date has no amount in the invoice currency, an unproved direction (a refund or reversal sign), or the invoice gross is missing, so it cannot be checked whether it prepaid the whole invoice. Under KMS § 11 only a prepaid part arises on the payment day; the rest arises on the invoice date. Not included in either month: book this invoice's VAT by hand, or ask the accountant. / Enne arve kuupäeva tehtud makse summat arve valuutas või suunda (märki) ei saa kindlaks teha, seega pole teada, kas see tasus kogu arve. KMS § 11 järgi kuulub ettemaksu kuusse ainult ettemakstud osa, ülejäänu arve kuupäeva kuusse. Arvet ei arvestata kummaski kuus — kirjenda selle arve käibemaks käsitsi või küsi raamatupidajalt.");
       continue;
     }
     if (decision.decision === "estonian_registration") {

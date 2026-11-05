@@ -179,6 +179,37 @@ describe("limited VAT month computation", () => {
       }
     });
 
+    it("reviews every month holding an early payment plus the invoice month; a month between without payment gets nothing", () => {
+      const row = input(invoice(31, aws.id!, "2026-05-03", [item(100)]), aws, [{ date: "2026-02-10", amount: 20 }, { date: "2026-04-10", amount: 20 }]);
+      for (const month of ["2026-02", "2026-04", "2026-05"]) {
+        const result = run(month, row);
+        expect(result.included).toEqual([]);
+        expect(result.reviews).toEqual([expect.objectContaining({ code: "limited_vat_partial_prepayment", invoice_id: 31, service_date: "2026-02-10" })]);
+      }
+      for (const month of ["2026-01", "2026-03", "2026-06"]) expect(run(month, row)).toMatchObject({ included: [], reviews: [], excluded: [] });
+    });
+
+    it("reviews both payment months of the reported case (100.00 invoice 04-03, 20.00 on 02-10 and 03-10)", () => {
+      const row = input(invoice(32, aws.id!, "2026-04-03", [item(100)]), aws, [{ date: "2026-02-10", amount: 20 }, { date: "2026-03-10", amount: 20 }]);
+      for (const month of ["2026-02", "2026-03", "2026-04"]) {
+        expect(run(month, row).reviews.map(review => review.code)).toEqual(["limited_vat_partial_prepayment"]);
+        expect(run(month, row).included).toEqual([]);
+      }
+    });
+
+    it("never nets signs: an early reversal on an invoice, or mixed signs on a credit note, is a review", () => {
+      const credit = (payments: LimitedVatPayment[]) => input(invoice(33, aws.id!, "2026-04-03", [item(-100)]), aws, payments);
+      const codes = (row: LimitedVatInvoiceInput) => run("2026-03", row).reviews.map(review => review.code);
+      expect(codes(prepaidWith([{ date: "2026-03-28", amount: -100 }]))).toEqual(["limited_vat_partial_prepayment"]);
+      expect(codes(prepaidWith([{ date: "2026-03-20", amount: 160 }, { date: "2026-03-28", amount: -60 }]))).toEqual(["limited_vat_partial_prepayment"]);
+      expect(codes(credit([{ date: "2026-03-20", amount: -60 }, { date: "2026-03-28", amount: 40 }]))).toEqual(["limited_vat_partial_prepayment"]);
+      for (const signed of [[-60, -40], [60, 40]]) {
+        const row = credit(signed.map((amount, index) => ({ date: `2026-03-2${index}`, amount })));
+        expect(run("2026-03", row).reviews).toEqual([]);
+        expect(run("2026-03", row).included).toEqual([expect.objectContaining({ invoice_id: 33, vat: -24 })]);
+      }
+    });
+
     it("reads a linked payment's amount in the invoice currency only from its distribution to this invoice", () => {
       const inv = invoice(30, aws.id!, "2026-04-03", [item(100)]);
       const tx = (extra: Partial<Transaction>): Transaction => ({ id: 70, accounts_dimensions_id: 1, type: "C", amount: 100, cl_currencies_id: "EUR", date: "2026-03-28", ...extra });
