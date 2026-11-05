@@ -11,7 +11,9 @@ import {
   DEFAULT_FX_LOSS_ACCOUNT,
 } from "../accounting-defaults.js";
 import { resolveFxAccount } from "../account-resolution.js";
-import type { PurchaseInvoice, Transaction, TransactionItem } from "../types/api.js";
+import type { PurchaseInvoice, PurchaseInvoiceItem, Transaction, TransactionItem } from "../types/api.js";
+import { applyPurchaseItemStructuralDefaults } from "./purchase-vat-defaults.js";
+import { desandboxAllStrings } from "../external-text-renderer.js";
 import { BookingGuard } from "../booking-guard.js";
 import { todayInTallinn } from "../local-date.js";
 import { isStrictDate } from "../strict-date.js";
@@ -21,7 +23,7 @@ import { loadProvenBankDirection } from "../bank-transaction-journal-direction.j
 const SMALL_ROUNDING_THRESHOLD = 0.10; // up to 10 cents → in-place fix
 const FX_DIFFERENCE_LIMIT = 1.00;      // up to 1 EUR → FX journal posting
 
-interface ReconcileCandidate {
+export interface ReconcileCandidate {
   invoice_id: number;
   invoice_number: string;
   supplier_name: string;
@@ -53,6 +55,23 @@ interface ReconcileCandidate {
   // the invoice's linked payments), so without this guard a second execute run
   // would create a duplicate FX journal for the same residual.
   already_reconciled?: boolean;
+}
+
+export interface ReconcileCurrencyRoundingPayload {
+  mode: "DRY_RUN" | "EXECUTED";
+  summary: {
+    total_partially_paid_scanned: number;
+    candidates_with_diff: number;
+    small_rounding: number;
+    fx_difference: number;
+    fx_already_reconciled: number;
+    review: number;
+    applied_success?: number;
+    applied_errors?: number;
+  };
+  candidates: ReconcileCandidate[];
+  applied?: Array<{ invoice_id: number; category: string; action: string; result: "success" | "error"; error?: string }>;
+  note: string;
 }
 
 export type SettlementProvenanceErrorCode =
@@ -468,6 +487,9 @@ export function registerCurrencyRoundingTools(server: McpServer, api: ApiContext
         guard.find({ ns: "FX", id: String(invoiceId) }) !== undefined;
 
       const candidates: ReconcileCandidate[] = [];
+      // Invoice lines re-sent with a small_rounding PATCH: the API refuses an
+      // invoice PATCH without items ("Products/services are missing").
+      const patchItemsByInvoice = new Map<number, PurchaseInvoiceItem[]>();
 
       for (const inv of partiallyPaid) {
         const full = await api.purchaseInvoices.get(inv.id!);
@@ -531,10 +553,12 @@ export function registerCurrencyRoundingTools(server: McpServer, api: ApiContext
 
         const isForeignCurrency = currency !== "EUR";
         let category = categorizeDiff(diff);
-        // An EUR invoice has no exchange-rate difference: a 0.10–1.00 EUR
-        // residual is a genuine over/under-payment, never an FX rounding artifact
-        // — do not auto-book it as an FX journal.
-        if (category === "fx_difference" && !isForeignCurrency) category = "review";
+        // An EUR invoice paid in EUR has no exchange-rate difference: any
+        // residual is a partial payment, an overpayment or a real rounding
+        // difference the owner must decide. Never rewrite its gross (that would
+        // write off a real debt and break gross = net + VAT) nor book an FX journal.
+        if (!isForeignCurrency) category = "review";
+        const invoiceItems = Array.isArray(full.items) ? full.items : [];
 
         let proposedAction: string;
         let proposedCurrencyRate: number | undefined;
@@ -545,38 +569,45 @@ export function registerCurrencyRoundingTools(server: McpServer, api: ApiContext
         // A settlement that rounds to 0.00 EUR yields no rate (gross / 0) and
         // no FX basis: review it instead of proposing a correction.
         if (isForeignCurrency && !(paidEur > 0)) category = "review";
+        const foreignGross = full.gross_price ?? 0;
+        // The in-place fix needs a positive foreign gross for the rate and the
+        // invoice lines for the PATCH; without them, review.
+        const smallRoundingBlocker = category !== "small_rounding"
+          ? undefined
+          : !(foreignGross > 0)
+            ? "the invoice has no positive foreign-currency gross, so no settlement rate can be derived"
+            : invoiceItems.length === 0
+              ? "the invoice read back no invoice lines, and the API refuses an invoice update without them"
+              : undefined;
+        if (smallRoundingBlocker !== undefined) category = "review";
 
         if (category === "small_rounding") {
-          if (isForeignCurrency && full.gross_price && full.gross_price > 0) {
-            proposedBaseGrossPrice = paidEur;
-            // currency_rate is FOREIGN units per 1 EUR (ECB convention), so
-            // the settlement rate is foreign gross / paid EUR and EUR = foreign / rate.
-            proposedCurrencyRate = roundTo(full.gross_price / paidEur, 6);
-            // Recompute base_net/base_vat from foreign-currency components so
-            // base_net + base_vat ≈ base_gross stays consistent for VAT
-            // invoices with multi-line / mixed-rate items.
-            if (full.net_price !== undefined && full.net_price !== null) {
-              proposedBaseNetPrice = roundMoney(full.net_price / proposedCurrencyRate);
-              // Derive base_vat as the residual against the pinned base_gross
-              // (paidEur) so base_net + base_vat == base_gross to the cent.
-              // Rounding net, vat, and gross independently could leave the trio
-              // off by 1 cent and re-trip this same rounding check next run.
-              if (full.vat_price !== undefined && full.vat_price !== null) {
-                proposedBaseVatPrice = roundMoney(proposedBaseGrossPrice - proposedBaseNetPrice);
-              }
-            } else if (full.vat_price !== undefined && full.vat_price !== null) {
-              proposedBaseVatPrice = roundMoney(full.vat_price / proposedCurrencyRate);
-              // Mirror the net-present branch: pin base_net as the residual so the
-              // patched trio still reconciles (base_net + base_vat == base_gross).
-              // Without this, execute mode would patch base_gross/base_vat but
-              // leave a stale base_net, re-tripping this same rounding check.
-              proposedBaseNetPrice = roundMoney(proposedBaseGrossPrice - proposedBaseVatPrice);
+          patchItemsByInvoice.set(full.id!, invoiceItems);
+          proposedBaseGrossPrice = paidEur;
+          // currency_rate is FOREIGN units per 1 EUR (ECB convention), so
+          // the settlement rate is foreign gross / paid EUR and EUR = foreign / rate.
+          proposedCurrencyRate = roundTo(foreignGross / paidEur, 6);
+          // Recompute base_net/base_vat from foreign-currency components so
+          // base_net + base_vat ≈ base_gross stays consistent for VAT
+          // invoices with multi-line / mixed-rate items.
+          if (full.net_price !== undefined && full.net_price !== null) {
+            proposedBaseNetPrice = roundMoney(full.net_price / proposedCurrencyRate);
+            // Derive base_vat as the residual against the pinned base_gross
+            // (paidEur) so base_net + base_vat == base_gross to the cent.
+            // Rounding net, vat, and gross independently could leave the trio
+            // off by 1 cent and re-trip this same rounding check next run.
+            if (full.vat_price !== undefined && full.vat_price !== null) {
+              proposedBaseVatPrice = roundMoney(proposedBaseGrossPrice - proposedBaseNetPrice);
             }
-            proposedAction = `Update base_gross_price ${bookedEur.toFixed(2)} → ${paidEur.toFixed(2)} EUR and currency_rate to ${proposedCurrencyRate} (locks Wise actual conversion).`;
-          } else {
-            proposedBaseGrossPrice = paidEur;
-            proposedAction = `Update gross_price ${bookedEur.toFixed(2)} → ${paidEur.toFixed(2)} EUR (legacy EUR booking; Wise paid actual amount).`;
+          } else if (full.vat_price !== undefined && full.vat_price !== null) {
+            proposedBaseVatPrice = roundMoney(full.vat_price / proposedCurrencyRate);
+            // Mirror the net-present branch: pin base_net as the residual so the
+            // patched trio still reconciles (base_net + base_vat == base_gross).
+            // Without this, execute mode would patch base_gross/base_vat but
+            // leave a stale base_net, re-tripping this same rounding check.
+            proposedBaseNetPrice = roundMoney(proposedBaseGrossPrice - proposedBaseVatPrice);
           }
+          proposedAction = `Update base_gross_price ${bookedEur.toFixed(2)} → ${paidEur.toFixed(2)} EUR and currency_rate to ${proposedCurrencyRate} (locks Wise actual conversion).`;
         } else if (category === "fx_difference") {
           // diff = bookedEur - paidEur. diff > 0 means we booked the supplier
           // liability higher than what actually settled in EUR → liability is
@@ -591,10 +622,12 @@ export function registerCurrencyRoundingTools(server: McpServer, api: ApiContext
             proposedAction = `Book ${Math.abs(diff).toFixed(2)} EUR FX adjustment journal: ${isOverstated ? `D ${provenance.liabilityAccountId} / C ${fxAccount} (FX gain — booked liability higher than Wise settlement)` : `D ${fxAccount} / C ${provenance.liabilityAccountId} (FX loss — booked liability lower than Wise settlement)`}.`;
           }
         } else {
-          proposedAction = isForeignCurrency && !(paidEur > 0)
+          proposedAction = smallRoundingBlocker !== undefined
+            ? `Flag for review — residual ${diff.toFixed(2)} EUR, but ${smallRoundingBlocker}; check it manually.`
+            : isForeignCurrency && !(paidEur > 0)
             ? `Flag for review — the confirmed payments settle to ${paidEur.toFixed(2)} EUR, so no settlement rate can be derived; check the payment allocation manually.`
             : !isForeignCurrency
-            ? `Flag for review — EUR invoice residual ${diff.toFixed(2)} EUR is a genuine over/under-payment, not an FX rounding difference.`
+            ? `Flag for review — EUR invoice residual ${diff.toFixed(2)} EUR (booked ${bookedEur.toFixed(2)}, paid ${paidEur.toFixed(2)}): a partial payment, an overpayment or a real rounding difference. The owner decides; nothing is changed automatically.`
             : `Flag for review — diff ${diff.toFixed(2)} EUR exceeds ${FX_DIFFERENCE_LIMIT.toFixed(2)} EUR FX threshold.`;
         }
 
@@ -644,27 +677,30 @@ export function registerCurrencyRoundingTools(server: McpServer, api: ApiContext
           if (c.already_reconciled) continue;
           try {
             if (c.category === "small_rounding") {
-              const patch: Partial<PurchaseInvoice> = {};
-              const isForeignCurrency = c.cl_currencies_id !== "EUR";
-              if (isForeignCurrency && c.proposed_base_gross_price !== undefined && c.proposed_currency_rate !== undefined) {
-                patch.base_gross_price = c.proposed_base_gross_price;
-                patch.currency_rate = c.proposed_currency_rate;
-                // Only adjust base_net/base_vat when the candidate carries a
-                // proposal computed from the foreign-currency components,
-                // preserving any existing VAT/net split for multi-line and
-                // mixed-rate invoices.
-                if (c.proposed_base_net_price !== undefined) patch.base_net_price = c.proposed_base_net_price;
-                if (c.proposed_base_vat_price !== undefined) patch.base_vat_price = c.proposed_base_vat_price;
-              } else if (c.proposed_base_gross_price !== undefined) {
-                patch.gross_price = c.proposed_base_gross_price;
-              }
+              const items = patchItemsByInvoice.get(c.invoice_id);
+              if (c.cl_currencies_id === "EUR" || items === undefined || items.length === 0 ||
+                c.proposed_base_gross_price === undefined || c.proposed_currency_rate === undefined) continue;
+              // Re-send the existing lines (canonicalized, structural defaults),
+              // as update_purchase_invoice does: the PATCH must carry items.
+              const patch: Partial<PurchaseInvoice> = {
+                items: desandboxAllStrings(items.map(item => ({ ...item }))).map(applyPurchaseItemStructuralDefaults),
+              };
+              patch.base_gross_price = c.proposed_base_gross_price;
+              patch.currency_rate = c.proposed_currency_rate;
+              // Only adjust base_net/base_vat when the candidate carries a
+              // proposal computed from the foreign-currency components,
+              // preserving any existing VAT/net split for multi-line and
+              // mixed-rate invoices.
+              if (c.proposed_base_net_price !== undefined) patch.base_net_price = c.proposed_base_net_price;
+              if (c.proposed_base_vat_price !== undefined) patch.base_vat_price = c.proposed_base_vat_price;
               await api.purchaseInvoices.update(c.invoice_id, patch);
               logAudit({
                 tool: "reconcile_currency_rounding", action: "UPDATED", entity_type: "purchase_invoice",
                 entity_id: c.invoice_id,
-                summary: `Adjusted EUR rounding for invoice ${c.invoice_number}: diff ${c.diff_eur.toFixed(2)} EUR`,
+                summary: `Adjusted FX rounding for invoice ${c.invoice_number}: diff ${c.diff_eur.toFixed(2)} EUR`,
                 details: {
-                  patch,
+                  // Lines are re-sent unchanged; log only the changed fields.
+                  patch: { ...patch, items: undefined },
                   paid_eur: c.paid_eur,
                   booked_eur: c.base_gross_price ?? c.gross_price,
                   diff_eur: c.diff_eur,

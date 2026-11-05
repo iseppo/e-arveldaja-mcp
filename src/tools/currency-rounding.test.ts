@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { registerCurrencyRoundingTools } from "./currency-rounding.js";
 import { parseMcpResponse } from "../mcp-json.js";
+import { parseToolPayload } from "../__fixtures__/mcp-response.js";
+import type { ReconcileCurrencyRoundingPayload } from "./currency-rounding.js";
 import { logAudit } from "../audit-log.js";
 
 vi.mock("../audit-log.js", () => ({ logAudit: vi.fn() }));
@@ -93,6 +95,7 @@ describe("reconcile_currency_rounding", () => {
         {
           id: 101,
           number: "USD-001",
+          items: [{ custom_title: "Line" }],
           client_name: "OpenAI",
           status: "CONFIRMED",
           payment_status: "PARTIALLY_PAID",
@@ -142,6 +145,7 @@ describe("reconcile_currency_rounding", () => {
         {
           id: 110,
           number: "USD-010",
+          items: [{ custom_title: "Line" }],
           client_name: "OpenAI",
           status: "CONFIRMED",
           payment_status: "PARTIALLY_PAID",
@@ -190,6 +194,7 @@ describe("reconcile_currency_rounding", () => {
         {
           id: 130,
           number: "USD-030",
+          items: [{ custom_title: "Line" }],
           client_name: "OpenAI",
           status: "CONFIRMED",
           payment_status: "PARTIALLY_PAID",
@@ -232,6 +237,7 @@ describe("reconcile_currency_rounding", () => {
         {
           id: 150,
           number: "USD-050",
+          items: [{ custom_title: "Line" }],
           client_name: "Vendor",
           status: "CONFIRMED",
           payment_status: "PARTIALLY_PAID",
@@ -306,6 +312,7 @@ describe("reconcile_currency_rounding", () => {
         {
           id: 140,
           number: "USD-040",
+          items: [{ custom_title: "Line" }],
           client_name: "OpenAI",
           status: "CONFIRMED",
           payment_status: "PARTIALLY_PAID",
@@ -924,6 +931,7 @@ describe("reconcile_currency_rounding", () => {
     const { handler } = setupTool({
       invoices: [{
         id: 711, number: "H07-SMALL-AUDIT", client_name: "Vendor",
+        items: [{ custom_title: "Line" }],
         payment_status: "PARTIALLY_PAID", cl_currencies_id: "USD",
         gross_price: 10, base_gross_price: 9.03, create_date: "2026-07-01",
         liability_accounts_id: 2120, liability_accounts_dimensions_id: 44,
@@ -1433,5 +1441,87 @@ describe("reconcile_currency_rounding", () => {
     });
     const payload = parseMcpResponse((await handler({ execute: false })).content[0]!.text) as any;
     expect(payload.candidates[0]).toMatchObject({ paid_eur: 9, diff_eur: 0.03, settlement_date: "2026-07-02" });
+  });
+
+  describe("EUR residuals are never written off", () => {
+    const eurInvoice = {
+      id: 960, number: "EUR-1716", client_name: "Vendor", status: "CONFIRMED",
+      payment_status: "PARTIALLY_PAID", cl_currencies_id: "EUR",
+      net_price: 13.84, vat_price: 3.32, gross_price: 17.16, base_gross_price: 17.16,
+      liability_accounts_id: 2310, liability_accounts_dimensions_id: null,
+      create_date: "2026-05-01", transactions: [961],
+      items: [{ custom_title: "Service", total_net_price: 13.84, amount: 1 }],
+    };
+    const eurTx = { id: 961, status: "CONFIRMED", type: "C", description: OUT_MARKER, amount: 17.07, cl_currencies_id: "EUR", date: "2026-05-02", items: [{ accounts_id: 2310, relation_table: "purchase_invoices", relation_id: 960, amount: 17.07, cl_currencies_id: "EUR" }] };
+
+    it("routes an EUR invoice 17.16 paid 17.07 to review and never PATCHes it", async () => {
+      const invoiceUpdate = vi.fn().mockResolvedValue({});
+      const journalCreate = vi.fn();
+      const { handler } = setupTool({ invoices: [eurInvoice], transactionsById: { 961: eurTx }, invoiceUpdate, journalCreate });
+
+      const payload = parseToolPayload<ReconcileCurrencyRoundingPayload>((await handler({ execute: true })).content[0]!.text);
+
+      expect(payload.summary.small_rounding).toBe(0);
+      expect(payload.summary.review).toBe(1);
+      const c = payload.candidates[0]!;
+      expect(c.category).toBe("review");
+      expect(c.diff_eur).toBe(0.09);
+      expect(c.proposed_base_gross_price).toBeUndefined();
+      expect(c.proposed_action).toMatch(/partial payment, an overpayment or a real rounding difference/);
+      expect(invoiceUpdate).not.toHaveBeenCalled();
+      expect(journalCreate).not.toHaveBeenCalled();
+    });
+
+    it("routes an EUR overpayment of a few cents to review too", async () => {
+      const invoiceUpdate = vi.fn().mockResolvedValue({});
+      const overpaid = { ...eurTx, amount: 17.19, items: [{ ...eurTx.items[0]!, amount: 17.19 }] };
+      const { handler } = setupTool({ invoices: [eurInvoice], transactionsById: { 961: overpaid }, invoiceUpdate });
+
+      const payload = parseToolPayload<ReconcileCurrencyRoundingPayload>((await handler({ execute: true })).content[0]!.text);
+
+      expect(payload.candidates[0]!.category).toBe("review");
+      expect(payload.candidates[0]!.diff_eur).toBe(-0.03);
+      expect(invoiceUpdate).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("foreign small rounding PATCH carries the invoice items", () => {
+    const usdInvoice = {
+      id: 970, number: "USD-970", client_name: "OpenAI", status: "CONFIRMED",
+      payment_status: "PARTIALLY_PAID", cl_currencies_id: "USD",
+      net_price: 20, vat_price: 0, gross_price: 20, base_net_price: 17.10, base_vat_price: 0, base_gross_price: 17.10,
+      liability_accounts_id: 2310, liability_accounts_dimensions_id: null,
+      create_date: "2026-05-01", transactions: [971],
+      items: [{ id: 5, custom_title: "API usage", total_net_price: 20, purchase_accounts_id: 5230 }],
+    };
+    const usdTx = { id: 971, status: "CONFIRMED", type: "C", description: OUT_MARKER, amount: 17.07, cl_currencies_id: "EUR", items: [{ accounts_id: 2310, relation_table: "purchase_invoices", relation_id: 970, amount: 17.07, cl_currencies_id: "EUR" }] };
+
+    it("re-sends the existing items with the base-amount patch", async () => {
+      const invoiceUpdate = vi.fn().mockResolvedValue({});
+      const { handler } = setupTool({ invoices: [usdInvoice], transactionsById: { 971: usdTx }, invoiceUpdate });
+
+      const payload = parseToolPayload<ReconcileCurrencyRoundingPayload>((await handler({ execute: true })).content[0]!.text);
+
+      expect(payload.candidates[0]!.category).toBe("small_rounding");
+      expect(invoiceUpdate).toHaveBeenCalledTimes(1);
+      const patch = invoiceUpdate.mock.calls[0]![1] as Record<string, unknown>;
+      expect(patch).toMatchObject({ base_gross_price: 17.07, currency_rate: 1.171646 });
+      expect(patch).not.toHaveProperty("gross_price");
+      expect(patch.items).toEqual([
+        { id: 5, custom_title: "API usage", total_net_price: 20, purchase_accounts_id: 5230, cl_fringe_benefits_id: 1, amount: 1 },
+      ]);
+    });
+
+    it("routes a foreign invoice without readable items to review instead of a PATCH the API rejects", async () => {
+      const invoiceUpdate = vi.fn().mockResolvedValue({});
+      const { items: _items, ...withoutItems } = usdInvoice;
+      const { handler } = setupTool({ invoices: [withoutItems], transactionsById: { 971: usdTx }, invoiceUpdate });
+
+      const payload = parseToolPayload<ReconcileCurrencyRoundingPayload>((await handler({ execute: true })).content[0]!.text);
+
+      expect(payload.candidates[0]!.category).toBe("review");
+      expect(payload.candidates[0]!.proposed_action).toMatch(/no invoice lines/);
+      expect(invoiceUpdate).not.toHaveBeenCalled();
+    });
   });
 });
