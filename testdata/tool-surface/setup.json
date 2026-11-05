@@ -2,9 +2,9 @@
   "profile": "setup",
   "measurement": {
     "toolCount": 131,
-    "toolsListBytes": 152444,
-    "descriptionsBytes": 22854,
-    "inputSchemasBytes": 98031,
+    "toolsListBytes": 153894,
+    "descriptionsBytes": 23071,
+    "inputSchemasBytes": 99264,
     "largestTool": {
       "name": "import_wise_transactions",
       "bytes": 5627
@@ -4366,7 +4366,7 @@
         "openWorldHint": false,
         "readOnlyHint": false
       },
-      "description": "Calculate dividend CIT (22/78 from 2025-01-01; earlier dates date-gated) and create draft journal entries. Only the NET dividend debits retained earnings (Jaotamata kasum); the CIT books as a current-period income-tax expense (P&L 'Tulumaks' line), never a direct reduction of retained earnings — so the ENTIRE lg 1 distributable profit (retained earnings + closed prior-year result + unclosed prior-year P&L; not the current year) is distributable as net dividend (ÄS § 157 lg 1). Hard-blocks a net dividend exceeding it, or a distribution whose gross effect (net + CIT) would push net assets below share capital + restricted reserves (ÄS § 157 lg 2), unless force=true (never on an imbalanced ledger); pending unconfirmed dividend drafts count. Reports max_net_dividend. One journal per shareholder+date: identical retry → duplicate, different amount → dividend_key_conflict. Requires an approved annual report and a profit-distribution decision — attach the decision to the journal with attach_document. Previews by default (dry_run=true): show the preview and get explicit user approval, then call again with dry_run=false to create the draft journal.",
+      "description": "Calculate dividend CIT (22/78 from 2025-01-01; earlier dates date-gated) and create draft journal entries. Only the NET dividend debits retained earnings; the CIT books as income-tax expense (P&L 'Tulumaks', Kulud 8900–8999). ÄS § 157 lg 1 starts from the owner's APPROVED annual report: pass approved_report_year and, from that report's balance sheet, approved_retained_earnings = line 'Eelmiste perioodide jaotamata kasum (kahjum)' and approved_profit_for_year = line 'Aruandeaasta kasum (kahjum)'. Ask the owner or read them from the approved report; never compute them from the books. The tool cross-checks them against the ledger at that year end (a difference holds the dividend) and subtracts every equity distribution booked since, drafts and later dates included. Hard-blocks a net dividend above that, or a gross (net + CIT) that would push net assets below share capital + restricted reserves (lg 2, unconfirmed and later journals reserved), unless force=true; force never lifts a hold or a ledger imbalance. Reports max_net_dividend. One journal per shareholder+date: identical retry → duplicate, different amount → dividend_key_conflict. Attach the profit-distribution decision to the journal with attach_document. Previews by default (dry_run=true): show the preview and get explicit user approval, then call again with dry_run=false to create the draft journal.",
       "execution": {
         "taskSupport": "forbidden"
       },
@@ -4374,6 +4374,20 @@
         "$schema": "http://json-schema.org/draft-07/schema#",
         "additionalProperties": false,
         "properties": {
+          "approved_profit_for_year": {
+            "description": "Required. EUR, may be negative: balance-sheet line 'Aruandeaasta kasum (kahjum)' of that approved report. From the owner or the report, never computed.",
+            "type": "number"
+          },
+          "approved_report_year": {
+            "description": "Required. Financial year of the last APPROVED annual report: the dividend year − 1, or − 2 when last year's report is not approved yet.",
+            "maximum": 9007199254740991,
+            "minimum": -9007199254740991,
+            "type": "integer"
+          },
+          "approved_retained_earnings": {
+            "description": "Required. EUR, may be negative: balance-sheet line 'Eelmiste perioodide jaotamata kasum (kahjum)' of that approved report. From the owner or the report, never computed.",
+            "type": "number"
+          },
           "dividend_payable_account": {
             "description": "Dividend payable account (default: auto-detect 'Dividendivõlad', standard 2650)",
             "type": "number"
@@ -4387,11 +4401,15 @@
             "type": "string"
           },
           "force": {
-            "description": "Book even if the ÄS § 157 lg 1 or lg 2 check fails (only alongside e.g. a capital reduction). Never overrides a ledger-imbalance block. Default false.",
+            "description": "Book even if the ÄS § 157 lg 1 or lg 2 amount check fails (only alongside e.g. a capital reduction). Never overrides a hold (approved-report mismatch, unverified amounts, history or draft holds, invalid targets) or a ledger-imbalance block. Default false.",
             "type": "boolean"
           },
           "income_tax_expense_account": {
-            "description": "Income-tax expense account debited with the CIT — the P&L 'Tulumaks' line (default: lowest Kulud account in 8900–8999, else 8900)",
+            "description": "Income-tax expense account debited with the CIT — the P&L 'Tulumaks' line, Kulud 8900–8999 (default: lowest active such account, else 8900)",
+            "type": "number"
+          },
+          "ledger_difference_acknowledged": {
+            "description": "Only after the owner confirmed the approved figures against the report: the reported difference (approved − ledger at the report year end), to the cent. Never copy the displayed difference without that check.",
             "type": "number"
           },
           "net_dividend": {
@@ -4408,11 +4426,11 @@
             "type": "array"
           },
           "retained_earnings_account": {
-            "description": "Retained earnings account debited with the NET dividend (default: auto-detect 'jaotamata kasum', standard 2960)",
+            "description": "Retained earnings account debited with the NET dividend (default: auto-detect 'jaotamata kasum', standard 2960). Must be a retained-earnings or result account by name, number or the configured result account",
             "type": "number"
           },
           "share_capital_account": {
-            "description": "Share capital account for ÄS §157 net-assets check (default: auto-detect 'Osakapital', standard 2900)",
+            "description": "Share capital account for ÄS §157 net-assets check (default: auto-detect 'Osakapital', standard 2900). Must carry the share-capital name or be 2900",
             "type": "number"
           },
           "shareholder_client_id": {

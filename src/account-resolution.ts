@@ -62,20 +62,23 @@ export function resolveAccountByName(
 
 /** Retained earnings — "Eelmiste perioodide jaotamata kasum (kahjum)" (2960);
  * anchored so "Jaotamata kasumi reserv" (a distributable reserve) is excluded. */
+export const RETAINED_EARNINGS_NAME = /^(eelmiste perioodide )?jaotamata kasum( \(kahjum\))?$/i;
 export const resolveRetainedEarningsAccount = (accounts: Account[], override?: number): number =>
-  resolveAccountByName(accounts, /^(eelmiste perioodide )?jaotamata kasum( \(kahjum\))?$/i, RETAINED_EARNINGS_ACCOUNT, override);
+  resolveAccountByName(accounts, RETAINED_EARNINGS_NAME, RETAINED_EARNINGS_ACCOUNT, override);
 
 /** Current-year result — "Aruandeaasta kasum (kahjum)" (2970), the account
  * RIK's year-end result entry credits with a closed year's profit; anchored so a
  * suffixed sibling ("Aruandeaasta kasum erikonto") is excluded. */
+export const CURRENT_YEAR_PROFIT_NAME = /^aruandeaasta kasum( \(kahjum\))?$/i;
 export const resolveCurrentYearProfitAccount = (accounts: Account[], override?: number): number =>
-  resolveAccountByName(accounts, /^aruandeaasta kasum( \(kahjum\))?$/i, CURRENT_YEAR_PROFIT_ACCOUNT, override);
+  resolveAccountByName(accounts, CURRENT_YEAR_PROFIT_NAME, CURRENT_YEAR_PROFIT_ACCOUNT, override);
 
 /** Calculated result — "Arvestuslik koondtulemus" (9000), the counter-account
  * of RIK's year-end result entry (profit: D 9000 / K 2970). Not an income-
  * statement line. */
+export const CALCULATED_RESULT_NAME = /^arvestuslik koondtulemus$/i;
 export const resolveCalculatedResultAccount = (accounts: Account[], override?: number): number =>
-  resolveAccountByName(accounts, /^arvestuslik koondtulemus$/i, CALCULATED_RESULT_ACCOUNT, override);
+  resolveAccountByName(accounts, CALCULATED_RESULT_NAME, CALCULATED_RESULT_ACCOUNT, override);
 
 /** Posting target for a statutory reserve-capital transfer — the lowest-numbered
  * ACTIVE "Kohustuslik reservkapital" (2940). Unlike
@@ -95,8 +98,9 @@ export const resolveDividendCitPayableAccount = (accounts: Account[], override?:
 /** Share capital — "Osakapital või aktsiakapital nimiväärtuses" (2900); fully
  * anchored so "Registreerimata …" / "Sissemaksmata osakapital" (prefixes) and
  * "… – sissemaksmata osa" (suffixes) are all excluded. */
+export const SHARE_CAPITAL_NAME = /^osakapital v[õo]i aktsiakapital nimiväärtuses$/i;
 export const resolveShareCapitalAccount = (accounts: Account[], override?: number): number =>
-  resolveAccountByName(accounts, /^osakapital v[õo]i aktsiakapital nimiväärtuses$/i, SHARE_CAPITAL_ACCOUNT, override);
+  resolveAccountByName(accounts, SHARE_CAPITAL_NAME, SHARE_CAPITAL_ACCOUNT, override);
 
 /**
  * Statutory non-distributable reserves for the ÄS §157(2) floor — EVERY account
