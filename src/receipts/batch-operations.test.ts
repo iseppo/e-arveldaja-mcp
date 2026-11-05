@@ -1206,6 +1206,14 @@ describe("receipt batch — unresolved supplier duplicate check (live smoke 0.29
     expect(spies.createAndSetTotals).not.toHaveBeenCalled();
   });
 
+  it("a same-gross invoice under another number in another currency is no hold", async () => {
+    const { api } = apiWithInvoices([{ ...booked, id: 902, number: "INV-I", clients_id: 7, client_name: "Supplier OU", create_date: "2026-03-18", gross_price: 124, cl_currencies_id: "USD" }]);
+    const outcome = await makeOperations(api).runBatch({ ...baseRun, executionMode: "dry_run", dryRun: true });
+    if (!outcome.ok) throw new Error("runBatch failed");
+    expect(outcome.value.results[0]!.status).toBe("dry_run_preview");
+    expect(outcome.value.results[0]!.duplicate_match).toBeUndefined();
+  });
+
   // Codex review: an ambiguous number may match the wrong existing invoice, so
   // a real invoice must not be skipped as its duplicate.
   it.each(["dry_run", "create"] as const)("an ambiguous invoice number matching an existing invoice is reviewed, not skipped (%s)", async (mode) => {

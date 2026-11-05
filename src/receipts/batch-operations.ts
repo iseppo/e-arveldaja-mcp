@@ -475,7 +475,7 @@ function likelyAlreadyBookedMatch(
   resolvedClientId: number | undefined,
 ): InvoiceDuplicateMatch | undefined {
   if (resolvedClientId === undefined || !extracted.invoice_number || !extracted.invoice_date || extracted.total_gross === undefined) return undefined;
-  const duplicate = findDuplicateInvoice(context.purchaseInvoices, resolvedClientId, extracted.invoice_number, extracted.invoice_date, extracted.total_gross);
+  const duplicate = findDuplicateInvoice(context.purchaseInvoices, resolvedClientId, extracted.invoice_number, extracted.invoice_date, extracted.total_gross, extracted.currency);
   if (!duplicate || duplicateDecision(extracted, signals, duplicate).kind !== "skip") return undefined;
   const number = normalizeInvoiceNumberForComparison(extracted.invoice_number);
   const exact = context.purchaseInvoices.filter(invoice =>
@@ -777,6 +777,7 @@ async function processSingleReceipt(
         extracted.invoice_number,
         extracted.invoice_date,
         extracted.total_gross,
+        extracted.currency,
       );
       const decision = duplicate ? duplicateDecision(extracted, signals, duplicate) : undefined;
       if (duplicate && decision?.kind === "review") {

@@ -57,6 +57,8 @@ export function findDuplicateInvoice(
   invoiceNumber: string,
   createDate: string,
   grossPrice: number,
+  /** The receipt's currency (default EUR): the amount/date-under-another-number rule compares same-currency invoices only. */
+  currency?: string,
 ): InvoiceDuplicateMatch | undefined {
   const normalizedNumber = normalizeInvoiceNumberForComparison(invoiceNumber);
 
@@ -96,7 +98,10 @@ export function findDuplicateInvoice(
   // phone photo read as INV-1023 of the e-mailed INV-1O23): the reading path's
   // rule (detectDuplicatePurchaseInvoice), so every intake surface agrees. A
   // review hint only — callers never skip on it.
-  const otherNumber = otherNumberAmountDateMatches(invoices, clientsId, invoiceNumber, grossPrice, createDate)[0];
+  // Same currency only, as the create-time scanner (scanPurchaseIntakeDuplicates).
+  const receiptCurrency = (currency ?? "EUR").toUpperCase();
+  const sameCurrency = invoices.filter(invoice => (invoice.cl_currencies_id ?? "EUR").toUpperCase() === receiptCurrency);
+  const otherNumber = otherNumberAmountDateMatches(sameCurrency, clientsId, invoiceNumber, grossPrice, createDate)[0];
   if (otherNumber?.id) {
     return {
       reason: "supplier_amount_date_other_number",
@@ -174,12 +179,12 @@ export function findInvoiceNumberMatchesAnySupplier(
  */
 export function findAlreadyBookedCandidates(
   invoices: PurchaseInvoice[],
-  extracted: Partial<Pick<ExtractedReceiptFields, "invoice_number" | "invoice_date" | "total_gross">>,
+  extracted: Partial<Pick<ExtractedReceiptFields, "invoice_number" | "invoice_date" | "total_gross" | "currency">>,
   resolvedClientId: number | undefined,
 ): AlreadyBookedCandidate[] {
   const { invoice_number: invoiceNumber, invoice_date: invoiceDate, total_gross: gross } = extracted;
   if (resolvedClientId !== undefined && invoiceNumber && invoiceDate && gross !== undefined) {
-    const match = findDuplicateInvoice(invoices, resolvedClientId, invoiceNumber, invoiceDate, gross);
+    const match = findDuplicateInvoice(invoices, resolvedClientId, invoiceNumber, invoiceDate, gross, extracted.currency);
     if (match) {
       return [{ invoice_id: match.invoice_id, reason: match.reason, ...(match.gross_price !== undefined ? { gross_price: match.gross_price } : {}) }];
     }

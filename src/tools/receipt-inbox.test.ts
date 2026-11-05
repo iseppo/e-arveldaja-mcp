@@ -1947,6 +1947,13 @@ describe("invalidated-status + invoice-number normalization in receipt duplicate
     expect(findDuplicateInvoice([inv({ number: "INV-1O23" })], 7, "INV-1023", "2026-03-01", 51)).toBeUndefined();
     expect(findDuplicateInvoice([inv({ number: "INV-1O23" })], 8, "INV-1023", "2026-03-01", 50)).toBeUndefined();
     expect(findDuplicateInvoice([inv({ number: "AUTO-TX-9" })], 7, "INV-1023", "2026-03-01", 50)).toBeUndefined();
+    // Same currency only; the exact-number rule ignores currency as before.
+    expect(findDuplicateInvoice([inv({ number: "INV-1O23", cl_currencies_id: "USD" })], 7, "INV-1023", "2026-03-01", 50, "EUR")).toBeUndefined();
+    expect(findDuplicateInvoice([inv({ number: "INV-1O23", cl_currencies_id: "USD" })], 7, "INV-1023", "2026-03-01", 50, "usd"))
+      .toMatchObject({ reason: "supplier_amount_date_other_number", invoice_id: 5 });
+    expect(findDuplicateInvoice([inv({ number: "INV-1O23", cl_currencies_id: "EUR" })], 7, "INV-1023", "2026-03-01", 50, "EUR"))
+      .toMatchObject({ reason: "supplier_amount_date_other_number", invoice_id: 5 });
+    expect(findDuplicateInvoice([inv({ cl_currencies_id: "USD" })], 7, "INV-2024-01", "2026-03-01", 50, "EUR")?.reason).toBe("supplier_invoice_number");
     expect(findDuplicateInvoice([inv({ number: "INV-1O23" })], 7, "AUTO-20260301-X", "2026-03-01", 50)).toBeUndefined();
   });
 
