@@ -49,7 +49,7 @@
 
 ### Changed
 
-- **Internal cleanup and dependency updates; nothing changes in how the tools behave.** Details: unused imports, locals and unreferenced exports/types removed, and the production TypeScript build now rejects unused locals and parameters (`noUnusedLocals` / `noUnusedParameters`); the purchase-invoice totals check uses the shared `toCents` helper (same rounding); the guided `reconcile-bank` workflow now says that `ambiguous_refless_more` counts the hidden rows of every inter-account review code. Dependencies: `@llamaindex/liteparse` 2.17.0 → 2.18.0, `fast-xml-parser` 5.11.2 → 5.12.0, and dev tools `@babel/parser` 8.0.10 → 8.1.0, `vite` 8.3.5 → 8.3.6, `vitest` 5.0.5 → 5.1.0.
+- **Internal cleanup and dependency updates; nothing changes in how the tools behave.** Details: unused imports, locals and unreferenced exports/types removed, and the production TypeScript build now rejects unused locals and parameters (`noUnusedLocals` / `noUnusedParameters`); the guided `reconcile-bank` workflow now says that `ambiguous_refless_more` counts the hidden rows of every inter-account review code. Dependencies: `@llamaindex/liteparse` 2.17.0 → 2.18.0, `fast-xml-parser` 5.11.2 → 5.12.0, and dev tools `@babel/parser` 8.0.10 → 8.1.0, `vite` 8.3.5 → 8.3.6, `vitest` 5.0.5 → 5.1.0.
 
 ## [0.39.0] - 2026-11-03
 
