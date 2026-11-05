@@ -467,7 +467,7 @@ function matchInvoiceNumber(value: string, line: PacketLine, tokens: LineTokens,
   return undefined;
 }
 
-function matchName(value: string, line: PacketLine, tokens: LineTokens, occ: TextSpan[]): TokenMatch | undefined {
+function matchName(value: string, _line: PacketLine, tokens: LineTokens, occ: TextSpan[]): TokenMatch | undefined {
   const needle = value.normalize("NFC").replace(/[\s¦]+/g, " ").trim().toLowerCase();
   if (needle.length === 0) return undefined;
   for (const cell of tokens.cells) {

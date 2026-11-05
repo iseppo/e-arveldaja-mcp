@@ -1,6 +1,5 @@
 import { canonicalPlanJson, stripUndefinedDeep } from "./camt-plan.js";
 import {
-  type BuildExecutionPlanInputArgs,
   type PlanExecutionCommandSpec,
   type PlanReviewCommand,
 } from "./plan-module-core.js";
@@ -39,7 +38,6 @@ export function reconDeleteProposedMirrorCommandId(transactionId: number): strin
 }
 
 export type ReconciliationReviewCommand = PlanReviewCommand;
-export type BuildReconciliationExecutionPlanInputArgs = BuildExecutionPlanInputArgs;
 
 /**
  * PLANNER: assemble the immutable execution-plan input for a reviewed

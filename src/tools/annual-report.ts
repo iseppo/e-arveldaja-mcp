@@ -695,7 +695,7 @@ async function analyzeYearEndClose(
 ): Promise<YearEndCloseAnalysis | { error: string; details: string[] }> {
   const { from, to } = getYearBounds(year);
 
-  const [accounts, { opening, journals: allJournals }, allTransactions, allSales, allPurchases] = await Promise.all([
+  const [accounts, { journals: allJournals }, allTransactions, allSales, allPurchases] = await Promise.all([
     api.readonly.getAccounts(),
     loadJournalsWithOpeningBalance(api),
     api.transactions.listAll(),
@@ -1116,7 +1116,6 @@ export async function buildAnnualReportData(api: ApiContext, year: number): Prom
     }),
   ]);
 
-  const accountsById = new Map(accounts.map((account) => [account.id, account]));
   const cashAccountIds = new Set(accounts.filter(isCashFlowCashAccount).map(account => account.id));
   const closeAccounts = resolveCloseAccounts(accounts);
   const currentYearProfitAccountId = closeAccounts.currentYearProfit;

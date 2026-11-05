@@ -5,8 +5,6 @@ import {
   readExactInputRecord,
   type PublicDetailInput,
   type PublicDetailRecord,
-  type PublicDetailScalar,
-  type PublicDetailValue,
 } from "./public-detail-store.js";
 import type { RuntimeSafetyScope } from "./runtime-safety-context.js";
 
@@ -16,9 +14,7 @@ export const MAX_OPERATION_RESULT_TOMBSTONES = 512;
 const OPERATION_PATTERN = /^[a-z][a-z0-9_.-]{0,127}$/;
 
 export type OperationResultStatus = "completed" | "partial" | "indeterminate";
-export type PublicResultScalar = PublicDetailScalar;
 export type PublicResultRecord = PublicDetailRecord;
-export type PublicResultValue = PublicDetailValue;
 export type PublicOperationResultDetailInput = PublicDetailInput;
 export interface PublicOperationResultDetail {
   readonly contract: "operation_result_detail_v1";

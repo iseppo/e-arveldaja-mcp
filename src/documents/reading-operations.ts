@@ -17,7 +17,7 @@ import type { FileInputSnapshot, FileInputSource } from "../file-input-snapshot.
 import { parseDocument, type ParsedDocument } from "../document-parser.js";
 import { blankLeaderLines, buildLostValueCrops, defaultLostValueSeam, type BlankLeaderProof, lostValueRects, ocrLostValueLine, type LostValueCrops, type LostValueSeam } from "./lost-value-ocr.js";
 import { LOST_VALUE_FIELDS, matchLostValue, parseLostValueReading, type LostValueField, type LostValueReason } from "../document-reading-lost-value.js";
-import { buildReadingPacket, normalizeForMatch, packetLostLeaders, renderPacketLine, type PacketHoldCode, type ReadingPacket } from "../document-reading-packet.js";
+import { normalizeForMatch, packetLostLeaders, renderPacketLine, type PacketHoldCode, type ReadingPacket } from "../document-reading-packet.js";
 import { printedPaymentReference } from "../document-reading-reference.js";
 import {
   checkReading,
@@ -28,7 +28,6 @@ import {
   type CheckContext,
   type CheckResult,
   type HeuristicView,
-  type HoldCode,
 } from "../document-reading-check.js";
 import { parseDocumentReading, parseProof, type ReadingField } from "../document-reading-schemas.js";
 import {
@@ -73,7 +72,7 @@ import { vatRatesInForceOn } from "../estonian-tax-rules.js";
 import { desandboxAllStrings, desandboxText } from "../external-text-renderer.js";
 import { logAudit } from "../audit-log.js";
 import { normalizeInvoiceNumberForComparison } from "../purchase-invoice-status.js";
-import { canonicalPlanJson, stripUndefinedDeep } from "../tools/camt-plan.js";
+import { canonicalPlanJson } from "../tools/camt-plan.js";
 import { isAmbiguousPostCreateFailure } from "../tools/receipt-inbox.js";
 import { InvoiceCreationError } from "../api/purchase-invoices.api.js";
 import { uploadSourceDocumentOrInvalidate } from "../tools/pdf-workflow.js";
@@ -81,7 +80,7 @@ import { assertFileInputSnapshotIdentity, FileInputSnapshotError, planBoundFileR
 import { FILE_REFERENCE_OPERATIONS } from "../file-reference-store.js";
 import { todayInTallinn } from "../local-date.js";
 import { parseStrictDate } from "../strict-date.js";
-import type { Account, Client, CreatePurchaseInvoiceData, PurchaseInvoice, PurchaseInvoiceItem } from "../types/api.js";
+import type { Client, PurchaseInvoice, PurchaseInvoiceItem } from "../types/api.js";
 import { computeEffectiveBooking, INVOICE_DOCUMENT_EXTENSIONS, loadSnapshot, materializeSnapshot, MAX_INVOICE_DOCUMENT_SIZE, wrongCompanySignal, type EffectiveBookingModel, type MaterializedSnapshot } from "./operations.js";
 import type { AccountingDocumentBookingFields } from "./types.js";
 import {

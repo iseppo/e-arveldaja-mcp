@@ -17,7 +17,7 @@ import { logAudit } from "../audit-log.js";
 import { classifyMutationFailure } from "../mutation-outcome.js";
 import {
   captureSaleCreateScope, saleCreateRecoveryFor, saleCreateIntent,
-  type SaleCreateIntent, type SaleCreateRecoveryMarker, type SaleCreateRecoverySession,
+  type SaleCreateIntent, type SaleCreateRecoverySession,
 } from "./create-recovery.js";
 import type { SaleInvoiceDeliveryRequest } from "../types/api.js";
 import {

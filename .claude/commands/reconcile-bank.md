@@ -294,7 +294,7 @@ Capability condition for `standard`: inspect the connected MCP server's advertis
   - <!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:guided -->
 Capability condition for `guided`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `reconcile_bank_transactions`, and none of these is advertised: `confirm_transaction`. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.
 
-`ambiguous_refless` (or `ambiguous_refless_more` for overflow)
+`ambiguous_refless` (`ambiguous_refless_more` counts the unshown rows of every code in this list, not only this one)
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:guided --><!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:standard -->
 Capability condition for `standard`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `confirm_transaction`. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.
 

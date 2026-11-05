@@ -29,7 +29,6 @@ import type {
   ImportRejectedField,
   ParsedCamtEntry,
   StatementBalanceCheckResult,
-  Transaction,
 } from "./types.js";
 import {
   CAMT_HOLD_SKIP_CODES,

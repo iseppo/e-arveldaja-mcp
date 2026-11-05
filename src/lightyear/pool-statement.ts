@@ -129,8 +129,6 @@ export function poolSourceDigest(rows: readonly PoolStatementRow[], ref: string)
   return createHash("sha256").update(JSON.stringify([ref, own])).digest("hex");
 }
 
-/** Roles that must be booked through the pool log. */
-export const POOL_LOGGED_ROLES: ReadonlySet<PoolRole> = new Set(["distribution_in", "sell_in", "buy_relief", "conversion_out"]);
 const INFLOW_ROLES: ReadonlySet<PoolRole> = new Set(["distribution_in", "sell_in"]);
 const OUTFLOW_ROLES: ReadonlySet<PoolRole> = new Set(["buy_relief", "conversion_out"]);
 

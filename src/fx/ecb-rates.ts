@@ -79,11 +79,6 @@ export interface EcbRateDeps {
 // Public reference data, so the cache is not cleared on switch_connection.
 const moduleCache = new Map<string, CachedResolution>();
 
-/** Test seam: drop the module-level cache. */
-export function resetEcbRateCache(): void {
-  moduleCache.clear();
-}
-
 export function ecbSeries(currency: string): string {
   return `EXR.D.${currency}.EUR.SP00.A`;
 }

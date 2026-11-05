@@ -85,7 +85,6 @@ const ProofAnswerSchema = z.object({
   why_this_one: z.string().max(300),
   verdict: z.enum(["confirm", "problem"]),
 }).strict();
-export type ProofAnswer = z.infer<typeof ProofAnswerSchema>;
 
 export const ProofSchema = z.object({
   source_sha256: digest,

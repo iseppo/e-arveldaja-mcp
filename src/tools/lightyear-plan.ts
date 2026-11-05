@@ -1,6 +1,5 @@
 import { canonicalPlanJson, stripUndefinedDeep } from "./camt-plan.js";
 import {
-  type BuildExecutionPlanInputArgs,
   type PlanExecutionCommandSpec,
   type PlanReviewCommand,
 } from "./plan-module-core.js";
@@ -37,7 +36,6 @@ export function lightyearFxRevaluationCommandId(index: number): string {
 }
 
 export type LightyearPlanReviewCommand = PlanReviewCommand;
-export type BuildLightyearExecutionPlanInputArgs = BuildExecutionPlanInputArgs;
 
 /**
  * PLANNER: assemble the immutable execution-plan input for a reviewed Lightyear

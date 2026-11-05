@@ -257,7 +257,7 @@ function isPercentFollowed(word: Word, next: Word | undefined): boolean {
 
 interface RawMoney extends Span { kind: MoneyKind; values: number[] }
 
-function cellMoney(cell: Cell, words: Word[]): RawMoney[] {
+function cellMoney(_cell: Cell, words: Word[]): RawMoney[] {
   const out: RawMoney[] = [];
   const cores = words.map(wordCore);
   const consumed = new Set<number>();
