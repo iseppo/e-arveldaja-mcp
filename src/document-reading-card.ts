@@ -323,8 +323,6 @@ export function buildReadingCard(input: CardInput): CardOutcome {
 // Owner answers
 // ---------------------------------------------------------------------------
 
-export type OwnerAnswer = { choice: string } | { value: string | number } | { confirm: boolean };
-
 export type AnswerOutcome =
   | { ok: true; values: AcceptedValues; correctedFields: TypedField[]; buyerAttested: boolean; textLayerTyped: boolean }
   | { ok: false; code: "owner_answer_missing" | "owner_answer_invalid" | "owner_declined"; rows: string[] };

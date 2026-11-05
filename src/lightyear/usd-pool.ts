@@ -126,12 +126,6 @@ export interface ConversionEvidence {
   fx_eur_cents: 0;
 }
 
-export interface UsdPoolState {
-  usd_cents: number;
-  eur_cents: number;
-  snapshot_digest: string;
-}
-
 /** The validated, replayed history a plan is built on. */
 export interface UsdPoolSnapshot {
   pool_key: PoolKey;

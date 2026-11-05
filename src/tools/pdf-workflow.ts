@@ -463,15 +463,6 @@ export type ResolveSupplierNotFoundPayload = {
   suggestion: string;
 };
 
-export type ResolveSupplierPayload =
-  | ResolveSupplierRefusalPayload
-  | ResolveSupplierSelfMatchPayload
-  | ResolveSupplierNameConfirmationPayload
-  | ResolveSupplierFoundPayload
-  | ResolveSupplierCreatedPayload
-  | ResolveSupplierReviewPayload
-  | ResolveSupplierNotFoundPayload;
-
 /**
  * Assemble the PDF hints from identifiers already extracted by
  * `extractReceiptFieldsFromText`. `extractReceiptFieldsFromText` runs
