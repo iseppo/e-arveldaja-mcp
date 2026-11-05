@@ -2157,6 +2157,59 @@ describe("prepare_dividend_package remediation", () => {
     expect(api.journals.create).toHaveBeenCalledTimes(1);
   });
 
+  it("holds a distribution-year journal combining a CIT-account close with the 2970 → 2960 transfer", async () => {
+    // Correct lg 1 is 25 000 (retained 5 000 + 2025 result 13 000 + 7 000 CIT
+    // reversal); without the hold it read 32 000, and net assets 44 500 leave
+    // lg 2 headroom for a 30 000 net dividend.
+    const combined = makeJournal("2026-02-01", [
+      makePosting(8900, "D", 7000), makePosting(2970, "C", 7000),
+      makePosting(2970, "D", 7000), makePosting(2960, "C", 7000),
+    ], { id: 7703 });
+    const journals = [
+      ...base(5000),
+      makeJournal("2025-06-01", [makePosting(1000, "D", 13000), makePosting(4000, "C", 13000)]),
+      makeJournal("2025-12-31", [makePosting(9000, "D", 13000), makePosting(2970, "C", 13000)]),
+      makeJournal("2025-11-01", [makePosting(1000, "D", 7000), makePosting(8900, "C", 7000)]),
+      combined,
+      makeJournal("2026-03-01", [makePosting(1000, "D", 17000), makePosting(4000, "C", 17000)]),
+    ];
+    const { api, cb } = setup(journals, rikAccounts());
+    for (const dry_run of [true, false]) {
+      const result = await cb({ net_dividend: 30000, shareholder_client_id: 1, effective_date: "2026-06-01", dry_run, force: true });
+      expect(isError(result), String(dry_run)).toBe(true);
+      const data = parseResult(result);
+      expect(data.error_code).toBe("mixed_result_journal_requires_review");
+      expect(data.mixed_result_journals).toEqual([{ journal_id: 7703, document_number: null, effective_date: "2026-02-01" }]);
+    }
+    expect(api.journals.create).not.toHaveBeenCalled();
+  });
+
+  it("holds the dividend when a distribution-year opening balance carries income/expense lines", async () => {
+    const opening = makeJournal("2026-01-01", [
+      makePosting(1000, "D", 20500), makePosting(5000, "D", 7000),
+      makePosting(2960, "C", 25000), makePosting(2900, "C", 2500),
+    ], { id: 7704, operation_type: "INITIAL" });
+    const income2026 = makeJournal("2026-03-01", [makePosting(1000, "D", 20000), makePosting(4000, "C", 20000)]);
+    const { api, cb } = setup([opening, income2026], rikAccounts());
+    for (const dry_run of [true, false]) {
+      const result = await cb({ net_dividend: 22000, shareholder_client_id: 1, effective_date: "2026-06-01", dry_run, force: true });
+      expect(isError(result), String(dry_run)).toBe(true);
+      const data = parseResult(result);
+      expect(data.error_code).toBe("opening_balance_pl_requires_review");
+      expect(String(data.error)).toContain("opening balance contains income/expense lines");
+      expect(data.opening_balance_pl_journals).toEqual([{ journal_id: 7704, effective_date: "2026-01-01" }]);
+    }
+    expect(api.journals.create).not.toHaveBeenCalled();
+  });
+
+  it("does not hold a distribution-year opening balance with equity only", async () => {
+    const opening = makeJournal("2026-01-01", [
+      makePosting(1000, "D", 27500), makePosting(2960, "C", 25000), makePosting(2900, "C", 2500),
+    ], { id: 7705, operation_type: "INITIAL" });
+    const check = await lg1([opening], "2026-06-01");
+    expect(check.balance_before).toBe(25000);
+  });
+
   it("does not hold for a non-closing-shaped 2970 journal without P&L lines, and keeps its window", async () => {
     const lateTransfer = makeJournal("2026-01-10", [makePosting(2970, "D", 20000), makePosting(2960, "C", 20000)]);
     const check = await lg1([...base(5000), profit2025, rikResult2025, lateTransfer], "2026-03-01");
