@@ -2696,7 +2696,8 @@ describe("wise import tool", () => {
       // configured bank account); company identity is still transfer-only.
       expect(api.readonly.getBankAccounts, item.id).toHaveBeenCalledTimes(1);
       expect(api.readonly.getInvoiceInfo, item.id).not.toHaveBeenCalled();
-      expect(api.journals.listAllWithPostings, item.id).not.toHaveBeenCalled();
+      // Journals are read once for the planned main create (exact-label check).
+      expect(api.journals.listAllWithPostings, item.id).toHaveBeenCalledTimes(1);
       expect(api.transactions.create, item.id).toHaveBeenCalledTimes(item.execute ? 1 : 0);
       expect(api.transactions.update, item.id).not.toHaveBeenCalled();
       expect(api.transactions.confirm, item.id).not.toHaveBeenCalled();
@@ -4273,8 +4274,8 @@ describe("wise import tool", () => {
       ["missing", []],
       ["changed", [{ ...expectedJournal, registered: false }]],
     ] as const) {
-      // The card payment (main_create only, no journal read) gives the run a
-      // plan; the journalized transfer is re-checked once after it.
+      // The card payment (a main_create, never re-checked in the write loop)
+      // gives the run a plan; the journalized transfer is re-checked once after it.
       mockedReadFile.mockResolvedValue(buildCsvRows([row, cardPaymentValues("2026-06-12")]));
       const setup = setupWiseTool([], vi.fn().mockResolvedValue({ created_object_id: 8840 }), {
         accountDimensions: configuredTransferDimensions(),
@@ -5911,7 +5912,7 @@ describe("wise import server plan handle (P12/P19)", () => {
       expect(setup.api.transactions.create).toHaveBeenCalledTimes(2);
     });
 
-    it("invalidates extra, missing, or reordered ownership approvals at execute (no mutation)", async () => {
+    it("invalidates extra or missing ownership approvals at execute (no mutation); order does not matter", async () => {
       mockedReadFile.mockResolvedValue(transferCsv());
       const setup = setupWiseTool([], undefined, transferOptions());
 
@@ -5922,18 +5923,19 @@ describe("wise import server plan handle (P12/P19)", () => {
       expect(missingResult.code).toBe("wise_transfer_ownership_reapproval_required");
       expect(setup.api.transactions.create).not.toHaveBeenCalled();
 
-      const reordered = await previewWith(setup, ["TRANSFER-X", "TRANSFER-Y"]);
-      clearWiseCallHistory(setup.api);
-      const reorderedResult = await executeWith<WiseFailurePayload>(setup, ["TRANSFER-Y", "TRANSFER-X"], reordered.plan_handle!, reordered.approved_command_digest!);
-      expect(reorderedResult.code).toBe("wise_transfer_ownership_reapproval_required");
-      expect(setup.api.transactions.create).not.toHaveBeenCalled();
-
       // EXTRA is checked against a plan baked with only [X].
       const extra = await previewWith(setup, ["TRANSFER-X"]);
       clearWiseCallHistory(setup.api);
       const extraResult = await executeWith<WiseFailurePayload>(setup, ["TRANSFER-X", "TRANSFER-Y"], extra.plan_handle!, extra.approved_command_digest!);
       expect(extraResult.code).toBe("wise_transfer_ownership_reapproval_required");
       expect(setup.api.transactions.create).not.toHaveBeenCalled();
+
+      // The digest sorts the IDs, so the same set in another order is the same approval.
+      const reordered = await previewWith(setup, ["TRANSFER-X", "TRANSFER-Y"]);
+      clearWiseCallHistory(setup.api);
+      const reorderedResult = await executeWith<WiseFailurePayload>(setup, ["TRANSFER-Y", "TRANSFER-X"], reordered.plan_handle!, reordered.approved_command_digest!);
+      expect(reorderedResult.code).toBeUndefined();
+      expect(setup.api.transactions.create).toHaveBeenCalled();
     });
   });
 });
@@ -7190,12 +7192,34 @@ describe("wise import review fixes (M1/M2/m1-m6)", () => {
       })]));
     });
 
-    it("a card-only CSV never re-reads journals", async () => {
+    it("a card-only CSV never re-reads journals in the write loop", async () => {
       mockedReadFile.mockResolvedValue(buildCsvRows([cardPaymentValues("2026-02-05")]));
       const setup = setupWiseTool([], undefined, transferOptions());
       await runApprovedWiseImport(setup, transferArgs);
       expect(setup.api.transactions.create).toHaveBeenCalledTimes(1);
-      expect(setup.api.journals.listAllWithPostings).not.toHaveBeenCalled();
+      // Execute reads them once, for the projection's exact-label check.
+      expect(setup.api.journals.listAllWithPostings).toHaveBeenCalledTimes(1);
+    });
+
+    it("a card-only CSV row already booked by a journal labelled with its Wise ID is already journalized", async () => {
+      const wiseId = "CARD_TRANSACTION-123";
+      mockedReadFile.mockResolvedValue(buildCsvRows([cardPaymentValues("2026-02-05", wiseId)]));
+      const setup = setupWiseTool([], undefined, transferOptions());
+      setup.api.journals.listAllWithPostings.mockResolvedValue([{
+        id: 993, is_deleted: false, registered: true, effective_date: "2026-02-05",
+        document_number: wiseId,
+        postings: [
+          { is_deleted: false, accounts_dimensions_id: 5, type: "C", amount: 12.34, base_amount: 12.34 },
+          { is_deleted: false, accounts_id: 5000, type: "D", amount: 12.34, base_amount: 12.34 },
+        ],
+      }]);
+      const dry = parseWiseResponse(await setup.handler({ ...transferArgs, execute: false }));
+      expect(dry.execution.already_journalized_rows).toEqual([
+        expect.objectContaining({ wise_id: wiseId, existing_journal_id: 993 }),
+      ]);
+      expect(dry.results.some(result => result.status === "would_create")).toBe(false);
+      expect(dry.plan_handle).toBeUndefined();
+      expect(setup.api.transactions.create).not.toHaveBeenCalled();
     });
   });
 
