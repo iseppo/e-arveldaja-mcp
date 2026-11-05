@@ -462,6 +462,88 @@ export function getTransferPairCompatibility(
   };
 }
 
+/** Outcome of {@link evaluateTransferPair}. */
+export type TransferPairEvaluation =
+  | { kind: "rejected" }
+  /** Same nominal amount, different base (EUR) amounts: never one transfer. */
+  | { kind: "conflicting_amounts"; confidence: number }
+  | { kind: "admitted"; confidence: number; reasons: string[]; comparableAmount: number };
+
+/**
+ * Whether outgoing `txOut` and incoming `txIn` are one inter-account transfer
+ * (Phase-1 C<->D pairing). The single predicate behind both the dry-run
+ * admission and the execute-time re-check, so execute re-verifies exactly
+ * what the dry run admitted, against fresh rows and account mapping.
+ */
+export function evaluateTransferPair(
+  txOut: Transaction,
+  txIn: Transaction,
+  lookups: Pick<InterAccountMatchLookups, "ownIbanToDimension" | "dimensionToIban" | "ownIbansWithoutDimension" | "companyLegalName">,
+  maxGap: number,
+): TransferPairEvaluation {
+  if (txOut.accounts_dimensions_id === txIn.accounts_dimensions_id) return { kind: "rejected" };
+  // A trusted `x=i` leg is a proven external payment, on either side.
+  if (isCamtCounterpartyIbanOmitted(txOut) || isCamtCounterpartyIbanOmitted(txIn)) return { kind: "rejected" };
+
+  const compatibility = getTransferPairCompatibility(txOut, txIn, maxGap);
+  if (!compatibility) return { kind: "rejected" };
+  if (compatibility.conflictingComparableAmounts) return { kind: "conflicting_amounts", confidence: compatibility.confidence };
+
+  let confidence = compatibility.confidence;
+  const reasons = [...compatibility.reasons];
+  const { ownIbanToDimension, dimensionToIban } = lookups;
+  const outCounterpartyIban = counterpartyIbanOf(txOut);
+  const inCounterpartyIban = counterpartyIbanOf(txIn);
+  const inAccountIban = dimensionToIban.get(txIn.accounts_dimensions_id) ?? "";
+  const outAccountIban = dimensionToIban.get(txOut.accounts_dimensions_id) ?? "";
+
+  // A counterparty IBAN naming a *different* own account contradicts this
+  // pairing, and an incoming row from a known third-party IBAN is a real
+  // receipt, not a transfer mirror leg — pairing would delete it.
+  // An IBAN may back several own accounts, so veto only when none of them
+  // is the candidate's account.
+  const outCounterpartyDims = outCounterpartyIban ? ownIbanToDimension.get(outCounterpartyIban) : undefined;
+  const inCounterpartyDims = inCounterpartyIban ? ownIbanToDimension.get(inCounterpartyIban) : undefined;
+  if (outCounterpartyDims && !outCounterpartyDims.has(txIn.accounts_dimensions_id)) return { kind: "rejected" };
+  if (inCounterpartyDims && !inCounterpartyDims.has(txOut.accounts_dimensions_id)) return { kind: "rejected" };
+  if (!hasMirrorOwnOriginEvidence(txIn, txOut, lookups)) return { kind: "rejected" };
+
+  const hasOutgoingIbanMatchesIncomingAccount =
+    Boolean(outCounterpartyIban && outCounterpartyIban === inAccountIban);
+  const hasIncomingIbanMatchesOutgoingAccount =
+    Boolean(inCounterpartyIban && inCounterpartyIban === outAccountIban);
+  const hasOutgoingCounterpartyIsOwnAccount =
+    Boolean(outCounterpartyIban && ownIbanToDimension.has(outCounterpartyIban));
+  const hasIncomingCounterpartyIsOwnAccount =
+    Boolean(inCounterpartyIban && ownIbanToDimension.has(inCounterpartyIban));
+
+  if (hasOutgoingIbanMatchesIncomingAccount) {
+    confidence += 30;
+    reasons.push("outgoing_iban_matches_incoming_account");
+  }
+  if (hasIncomingIbanMatchesOutgoingAccount) {
+    confidence += 30;
+    reasons.push("incoming_iban_matches_outgoing_account");
+  }
+  if (hasOutgoingCounterpartyIsOwnAccount && confidence <= 60) {
+    confidence += 15;
+    reasons.push("outgoing_counterparty_is_own_account");
+  }
+  if (hasIncomingCounterpartyIsOwnAccount && confidence <= 60) {
+    confidence += 15;
+    reasons.push("incoming_counterparty_is_own_account");
+  }
+
+  const hasCounterpartySignal =
+    hasOutgoingIbanMatchesIncomingAccount ||
+    hasIncomingIbanMatchesOutgoingAccount ||
+    hasOutgoingCounterpartyIsOwnAccount ||
+    hasIncomingCounterpartyIsOwnAccount;
+  if (!hasCounterpartySignal || confidence < 50) return { kind: "rejected" };
+
+  return { kind: "admitted", confidence: Math.min(confidence, 100), reasons, comparableAmount: compatibility.txAComparableAmount };
+}
+
 export function hasReciprocalOwnIbanEvidence(
   txA: Transaction,
   txB: Transaction,
