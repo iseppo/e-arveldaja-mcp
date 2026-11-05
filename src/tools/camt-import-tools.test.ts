@@ -2790,17 +2790,16 @@ describe("camt import tool", () => {
     ]);
   });
 
-  it("re-reads the ledger uncached before every row's write, so a duplicate booked elsewhere mid-batch still blocks", async () => {
+  it("re-reads the ledger uncached once before the first write, so a duplicate booked elsewhere since the review still blocks", async () => {
     mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
     mockedReadFile.mockResolvedValue(twoDistinctRefXml());
     const { api, handler } = setupCamtTool();
     const plan_handle = await issueCamtPlanHandle(handler, { file_path: "/tmp/camt.xml", accounts_dimensions_id: 7 });
 
-    // Reads: execute-time projection, row 1's recheck, row 2's recheck. REF-B
-    // is booked elsewhere only AFTER row 1's write — a single pre-batch read
-    // would miss it.
+    // Reads: execute-time projection, then the run's one fresh read under the
+    // lock. REF-B is booked elsewhere between the two.
     let ledgerReads = 0;
-    api.transactions.listAll.mockImplementation(async () => (ledgerReads++ < 2 ? [] : [{
+    api.transactions.listAll.mockImplementation(async () => (ledgerReads++ < 1 ? [] : [{
       id: 778, status: "PROJECT", is_deleted: false, accounts_dimensions_id: 7,
       bank_ref_number: "REF-B", date: "2026-02-02", type: "C", amount: 20, cl_currencies_id: "EUR",
     }]));
@@ -2812,9 +2811,50 @@ describe("camt import tool", () => {
     })).content[0]!.text);
 
     expect(api.transactions.create).toHaveBeenCalledTimes(1);
-    // Each per-row recheck drops the 120 s list cache first.
-    expect(api.transactions.invalidateListCache).toHaveBeenCalledTimes(2);
+    // The run's fresh read drops the 120 s list cache first.
+    expect(api.transactions.invalidateListCache).toHaveBeenCalledTimes(1);
+    expect(ledgerReads).toBe(2);
     expect(payload.execution.execution_report!.stop_reason).toMatchObject({ command_id: "camt-create-1", category: "plan_drift" });
+  });
+
+  it("reads the ledger and journals a constant number of times however many rows it creates", async () => {
+    const entry = (index: number) => `
+      <Ntry>
+        <Amt Ccy="EUR">${10 + index}.00</Amt>
+        <CdtDbtInd>DBIT</CdtDbtInd>
+        <BookgDt><Dt>2026-02-0${1 + (index % 9)}</Dt></BookgDt>
+        <AcctSvcrRef>REF-N${index}</AcctSvcrRef>
+        <NtryDtls>
+          <TxDtls>
+            <Refs><AcctSvcrRef>REF-N${index}</AcctSvcrRef></Refs>
+            <AmtDtls><TxAmt><Amt Ccy="EUR">${10 + index}.00</Amt></TxAmt></AmtDtls>
+            <RltdPties><Cdtr><Nm>Vendor ${index} OÜ</Nm></Cdtr></RltdPties>
+            <RmtInf><Ustrd>Payment ${index}</Ustrd></RmtInf>
+          </TxDtls>
+        </NtryDtls>
+      </Ntry>`;
+    const statement = (rows: number) => twoDistinctRefXml().replace(
+      /<Ntry>[\s\S]*<\/Ntry>/,
+      Array.from({ length: rows }, (_, index) => entry(index)).join(""),
+    );
+    const args = { file_path: "/tmp/camt.xml", accounts_dimensions_id: 7 };
+    const readCounts = async (rows: number) => {
+      mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+      mockedReadFile.mockResolvedValue(statement(rows));
+      const { api, handler } = setupCamtTool({ allowWrites: true, journals: [] });
+      const plan_handle = await issueCamtPlanHandle(handler, args);
+      let nextId = 9100;
+      api.transactions.create.mockImplementation(async () => ({ created_object_id: nextId++ }));
+      api.transactions.listAll.mockClear();
+      api.journals.listAllWithPostings.mockClear();
+      const payload = parseToolPayload<CamtImportFullPayload>((await handler({ ...args, execute: true, plan_handle })).content[0]!.text);
+      expect(api.transactions.create).toHaveBeenCalledTimes(rows);
+      expect(payload.execution.execution_report!.stop_reason).toBeNull();
+      return { ledger: api.transactions.listAll.mock.calls.length, journals: api.journals.listAllWithPostings.mock.calls.length };
+    };
+    const one = await readCounts(1);
+    const many = await readCounts(8);
+    expect(many).toEqual(one);
   });
 
   it("still collapses the same bank-referenced entry repeated across the file", async () => {
@@ -3694,14 +3734,15 @@ describe("camt import — journals that already book the movement (F1)", () => {
     expect(payload.retry).toBe("safe");
   });
 
-  it("(g) stops at the row whose precheck sees a journal that appeared during the command loop", async () => {
+  it("(g) stops at the row whose journal appeared after the execute-time projection, before the first write", async () => {
     mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
     mockedReadFile.mockResolvedValue(twoDistinctRefXml());
     const { api, handler } = setupCamtTool({ allowWrites: true, journals: [] });
     const plan_handle = await issueCamtPlanHandle(handler, args);
     api.transactions.create.mockResolvedValue({ created_object_id: 9001 });
-    // Empty at execute-time projection and row 1's precheck; REF-B's journal lands after row 1's write.
-    api.journals.listAllWithPostings.mockImplementation(async () => (api.transactions.create.mock.calls.length === 0 ? [] : [
+    // Empty at the execute-time projection; REF-B's journal is there at the run's fresh read.
+    let journalReads = 0;
+    api.journals.listAllWithPostings.mockImplementation(async () => (journalReads++ < 1 ? [] : [
       journalCoverageFixture(503, "BANK:REF-B", {
         effective_date: "2026-02-02",
         postings: [{ accounts_id: 1020, accounts_dimensions_id: 7, type: "C", amount: 20, base_amount: 20, cl_currencies_id: "EUR", is_deleted: false }],
@@ -3712,7 +3753,7 @@ describe("camt import — journals that already book the movement (F1)", () => {
     const payload = parseToolPayload<CamtImportFullPayload>((await handler({ ...args, execute: true, plan_handle })).content[0]!.text);
 
     expect(api.transactions.create).toHaveBeenCalledTimes(1);
-    expect(api.journals.invalidateListCache).toHaveBeenCalledTimes(2);
+    expect(api.journals.invalidateListCache).toHaveBeenCalledTimes(1);
     expect(payload.execution.execution_report!.stop_reason).toMatchObject({
       command_id: "camt-create-1", category: "plan_drift", code: "journal_coverage_appeared",
     });

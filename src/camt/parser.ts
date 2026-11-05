@@ -411,6 +411,14 @@ function buildStatement(xml: string, rejected: ImportRejectedField[]): CamtParse
       ? rawDirection
       : capture(rejected, () => reject(entryRowId, "direction", rawDirection, "CAMT direction must be CRDT or DBIT"));
 
+    // Only a booked entry (BOOK, or no status) is a ledger movement; a pending
+    // (PDNG) or informational (INFO) one may still change or reappear booked.
+    // camt.053.001.02 carries <Sts>BOOK</Sts>, .08 <Sts><Cd>BOOK</Cd></Sts>.
+    const statusNode = valueAt(entryNode, ["Sts"]);
+    const rawStatus = textAt(entryNode, ["Sts"]) ?? textAt(entryNode, ["Sts", "Cd"]);
+    const statusBooked = statusNode === undefined || rawStatus === "BOOK" ||
+      capture(rejected, () => reject(entryRowId, "status", rawStatus, "Only booked (BOOK) CAMT entries can be imported; pending or informational entries are not booked yet"));
+
     const rawDate = textAt(entryNode, ["BookgDt", "Dt"]) ?? textAt(entryNode, ["BookgDt", "DtTm"]);
     const entryDate = rawDate === undefined
       ? capture(rejected, () => reject(entryRowId, "booking_date", rawDate, "CAMT entry is missing a booking date"))
@@ -430,7 +438,7 @@ function buildStatement(xml: string, rejected: ImportRejectedField[]): CamtParse
 
     // An invalid core field excludes this row from the successful value but
     // never stops validation of later entries or details.
-    if (!direction || !entryDate || !entryAmount) continue;
+    if (!direction || !entryDate || !entryAmount || !statusBooked) continue;
 
     // Weight each leg by its value in the entry currency: the original when
     // already in that currency, else its CntrValAmt (separately converted legs

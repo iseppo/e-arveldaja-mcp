@@ -462,6 +462,34 @@ describe("parseCamt053Xml", () => {
     expect(() => parseCamt053Xml(malicious)).toThrow(/must not contain DOCTYPE or ENTITY/);
     expect(() => preflightCamt053Xml(malicious)).toThrow(/must not contain DOCTYPE or ENTITY/);
   });
+
+  // The second entry gets the status; the first keeps none (accepted).
+  const withSecondEntryStatus = (status: string) => {
+    const at = sampleXml.indexOf("<CdtDbtInd>DBIT</CdtDbtInd>");
+    const end = at + "<CdtDbtInd>DBIT</CdtDbtInd>".length;
+    return `${sampleXml.slice(0, end)}\n        ${status}${sampleXml.slice(end)}`;
+  };
+
+  it.each([
+    ["camt.053.001.02 BOOK", "<Sts>BOOK</Sts>"],
+    ["camt.053.001.08 BOOK", "<Sts><Cd>BOOK</Cd></Sts>"],
+  ])("accepts a booked entry status (%s) and a missing one", (_label, status) => {
+    const result = preflightCamt053Xml(withSecondEntryStatus(status));
+    expect(result.ok).toBe(true);
+    expect(result.ok && result.value.entries.length).toBe(parseCamt053Xml(sampleXml).entries.length);
+  });
+
+  it.each([
+    ["PDNG", "<Sts>PDNG</Sts>"],
+    ["INFO", "<Sts>INFO</Sts>"],
+    ["PDNG", "<Sts><Cd>PDNG</Cd></Sts>"],
+  ])("rejects a %s entry status with a positional reason", (value, status) => {
+    const result = preflightCamt053Xml(withSecondEntryStatus(status));
+    expect(result.ok).toBe(false);
+    expect(!result.ok && result.rejected_fields).toEqual([
+      expect.objectContaining({ source_row_id: "camt:ntry:2", field: "status", value, reason: expect.stringContaining("Only booked (BOOK)") }),
+    ]);
+  });
 });
 
 // --- M05: strict CAMT row validation -----------------------------------------

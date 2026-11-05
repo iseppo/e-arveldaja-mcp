@@ -754,16 +754,12 @@ export async function executeCamtImport(
 
   const createdApiIdByIndex = new Map<number, number>();
   const completedIndices = new Set<number>();
-  // Rows this run created, re-indexed into every per-row lookup so a later row
-  // still sees them even when the list read does not return them yet (or no
-  // usable id came back).
-  const createdThisRun: Transaction[] = [];
   const exactKeyOccurrences = findExactKeyOccurrences(projection.parsed.entries, accountsDimensionsId);
-  // A row's duplicate recheck and its create run under one lock per company
-  // + bank dimension (in-process queue plus file lock), held from the row's
-  // prepare until the next row's prepare or the end of the run. A concurrent
-  // execute of the same statement then rechecks only after this row's create
-  // has landed, instead of both passing on the same ledger.
+  // The duplicate rechecks and the creates run under one lock per company +
+  // bank dimension (in-process queue plus file lock), held from the first
+  // row's prepare to the end of the run. A concurrent execute of the same
+  // statement then reads the ledger only after this run's creates landed,
+  // instead of both passing on the same ledger.
   const rowLockPath = resolvePath(
     process.env.EARVELDAJA_LOCK_DIR ?? resolvePath(tmpdir(), "e-arveldaja-mcp-locks"),
     `${createHash("sha256").update(`${lockScope}\0camt\0${accountsDimensionsId}`).digest("hex")}.lock`,
@@ -775,7 +771,6 @@ export async function executeCamtImport(
     await release?.();
   };
   const acquireRowLock = async () => {
-    await freeRowLock();
     releaseRowLock = await new Promise<() => Promise<void>>((acquired, failed) => {
       let release!: () => void;
       const held = new Promise<void>(resolve => { release = resolve; });
@@ -786,26 +781,65 @@ export async function executeCamtImport(
       done.catch(failed);
     });
   };
+  // One UNCACHED ledger and journal read per run, under the lock and before
+  // the first write: a row or journal booked elsewhere (UI, another process)
+  // since the plan review blocks its row. The statement-wide holds (lossy
+  // identities, partial legacy groups) are computed once on it; the per-row
+  // checks then use the in-memory lookup, which every create updates.
+  interface FreshRunState {
+    readonly lookup: ReturnType<typeof buildDuplicateLookup>;
+    readonly lossyKeys: ReadonlySet<string>;
+    readonly partial: ReadonlySet<ParsedCamtEntry>;
+    readonly coverageContext: ReturnType<typeof buildCamtJournalCoverageContext>;
+    readonly bankAccounts: CamtJournalSnapshot["bankAccounts"];
+  }
+  let fresh: FreshRunState | { readonly error_code: string } | undefined;
+  const loadFreshRunState = async (): Promise<FreshRunState | { readonly error_code: string }> => {
+    api.transactions.invalidateListCache();
+    const ledger = (await api.transactions.listAll()).filter(isNonVoidTransaction);
+    const lookup = buildDuplicateLookup(ledger, accountsDimensionsId);
+    const entries = projection.parsed.entries;
+    const lossyKeys = findLossyIdentityConflicts(entries, lookup, accountsDimensionsId);
+    const freshEntries = entries.map(entry => {
+      const ids = findDuplicateTransactionIds(
+        entry, lookup, projection.repeatedBankReferences, accountsDimensionsId,
+        exactKeyOccurrences.get(buildBatchDuplicateKey(entry)),
+      );
+      return { ...entry, duplicate: ids.length > 0, duplicate_transaction_ids: ids };
+    });
+    const partialFresh = findPartialLegacyEntries(freshEntries, lookup, accountsDimensionsId);
+    const partial = new Set(entries.filter((_, index) => partialFresh.has(freshEntries[index]!)));
+    api.journals.invalidateListCache();
+    let snapshot: CamtJournalSnapshot;
+    try {
+      snapshot = await loadCamtJournalSnapshot(
+        api, accountsDimensionsId, projection.descriptors.some(descriptor => descriptor.counterparty_iban_omitted === true),
+      );
+    } catch (error) {
+      if (error instanceof CamtJournalSnapshotError) return { error_code: error.code };
+      throw error;
+    }
+    const coverageContext = buildCamtJournalCoverageContext({
+      snapshot,
+      dimensionId: accountsDimensionsId,
+      entries,
+      ledgerTransactions: ledger,
+    });
+    return { lookup, lossyKeys, partial, coverageContext, bankAccounts: snapshot.bankAccounts };
+  };
   const executionReport = await executeCamtCommands({
     count: projection.descriptors.length,
     prepareIndex: async index => {
-      await acquireRowLock();
-      // Recheck this command's duplicate precondition against an UNCACHED
-      // ledger read immediately before its own mutate: a row booked elsewhere
-      // (UI, another process) since the plan review must still block it.
-      const descriptor = projection.descriptors[index]!;
-      api.transactions.invalidateListCache();
-      const ledger = (await api.transactions.listAll()).filter(isNonVoidTransaction);
-      const lookup = buildDuplicateLookup(ledger, accountsDimensionsId);
-      // A created row the list read already returns must not be counted twice
-      // (exact-key cardinality below counts rows).
-      const listedIds = new Set(ledger.map(transaction => transaction.id));
-      for (const created of createdThisRun) {
-        if (!listedIds.has(created.id)) addToDuplicateLookup(lookup, created, accountsDimensionsId);
+      if (fresh === undefined) {
+        await acquireRowLock();
+        fresh = await loadFreshRunState();
       }
+      if ("error_code" in fresh) return { outcome: "drift", error_code: fresh.error_code };
+      const { lookup, lossyKeys, partial, coverageContext, bankAccounts } = fresh;
+      const descriptor = projection.descriptors[index]!;
       // The projection's holds, on the fresh ledger: a lossy key now shared
       // by competing entries, and a stored row with a poisoned marker.
-      if (findLossyIdentityConflicts(projection.parsed.entries, lookup, accountsDimensionsId).has(descriptor.batchDuplicateKey)) {
+      if (lossyKeys.has(descriptor.batchDuplicateKey)) {
         return { outcome: "drift", error_code: "camt_lossy_identity_ambiguous" };
       }
       const duplicateIds = findDuplicateTransactionIds(
@@ -816,47 +850,25 @@ export async function executeCamtImport(
       if (findPoisonedMarkerHolds(descriptor.entry, lookup).length > 0) {
         return { outcome: "drift", error_code: "poisoned_marker_appeared" };
       }
-      // The group-level partial-legacy check, on the same fresh ledger: an old
-      // aggregate row of this entry's split group may have appeared too.
-      const entries = projection.parsed.entries;
-      const fresh = entries.map(entry => {
-        const ids = findDuplicateTransactionIds(
-          entry, lookup, projection.repeatedBankReferences, accountsDimensionsId,
-          exactKeyOccurrences.get(buildBatchDuplicateKey(entry)),
-        );
-        return { ...entry, duplicate: ids.length > 0, duplicate_transaction_ids: ids };
-      });
-      const partial = findPartialLegacyEntries(fresh, lookup, accountsDimensionsId);
-      if (partial.has(fresh[entries.indexOf(descriptor.entry)]!)) {
+      // The group-level partial-legacy check: an old aggregate row of this
+      // entry's split group may have appeared too.
+      if (partial.has(descriptor.entry)) {
         return { outcome: "drift", error_code: "partial_legacy_appeared" };
-      }
-      // Same for a journal booked elsewhere since the review (manual entry,
-      // the other side of an own transfer): an uncached journal read.
-      api.journals.invalidateListCache();
-      let snapshot: CamtJournalSnapshot;
-      try {
-        snapshot = await loadCamtJournalSnapshot(api, accountsDimensionsId, descriptor.counterparty_iban_omitted === true);
-      } catch (error) {
-        if (error instanceof CamtJournalSnapshotError) return { outcome: "drift", error_code: error.code };
-        throw error;
       }
       // An `x=i` row needs fresh proof that its counterparty is still not an
       // own account (one may have been added since the projection).
       if (
         descriptor.counterparty_iban_omitted &&
         !isCamtIbanOmissionEligible(
-          camtIbanOmissionEvidence(snapshot.bankAccounts, projection.statementMetadata.iban),
+          camtIbanOmissionEvidence(bankAccounts, projection.statementMetadata.iban),
           descriptor.entry.counterparty_iban,
         )
       ) {
         return { outcome: "drift", error_code: "camt_iban_ownership_changed" };
       }
-      const coverage = classifyCamtJournalCoverage(descriptor.entry, buildCamtJournalCoverageContext({
-        snapshot,
-        dimensionId: accountsDimensionsId,
-        entries: projection.parsed.entries,
-        ledgerTransactions: ledger,
-      }));
+      // A journal booked elsewhere since the review (manual entry, the other
+      // side of an own transfer).
+      const coverage = classifyCamtJournalCoverage(descriptor.entry, coverageContext);
       return coverage.kind !== "none"
         ? { outcome: "drift", error_code: "journal_coverage_appeared" }
         : { outcome: "ready" };
@@ -876,7 +888,10 @@ export async function executeCamtImport(
       // The row exists now whether or not a usable id came back; -1 stands in
       // for an unknown id (the lookup only needs a truthy id to hold a key).
       const knownId = typeof createdId === "number" && Number.isSafeInteger(createdId) && createdId > 0 ? createdId : -1;
-      createdThisRun.push({ ...descriptor.payload, id: knownId, status: "PROJECT" } as Transaction);
+      // Indexed into the run's lookup so a later row of this run sees it.
+      if (fresh !== undefined && !("error_code" in fresh)) {
+        addToDuplicateLookup(fresh.lookup, { ...descriptor.payload, id: knownId, status: "PROJECT" } as Transaction, accountsDimensionsId);
+      }
       if (typeof createdId === "number" && Number.isSafeInteger(createdId) && createdId > 0) {
         createdApiIdByIndex.set(index, createdId);
         return { outcome: "completed", known_objects: [{ entity_type: "transaction", entity_id: createdId, outcome: "created" }] };
