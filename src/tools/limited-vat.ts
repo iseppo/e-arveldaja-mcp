@@ -38,6 +38,7 @@ import {
   classifySupplier,
   computeLimitedVatMonth,
   fxKeysFor,
+  linkedPaymentAmount,
   isMonthCandidate,
   kmdFigures,
   limitedVatJournalProblem,
@@ -50,6 +51,7 @@ import {
   type LimitedVatIncludedInvoice,
   type LimitedVatInvoiceInput,
   type LimitedVatKmdFigures,
+  type LimitedVatPayment,
   type LimitedVatMonthState,
   type LimitedVatPosting,
   type LimitedVatReview,
@@ -458,13 +460,19 @@ async function loadMonthInputs(api: ApiContext, month: string, fresh: boolean): 
   for (const candidate of read) {
     const invoice: PurchaseInvoice = await api.purchaseInvoices.get(candidate.id!);
     if (invoice.status !== "CONFIRMED") continue;
-    const paymentDates: string[] = [];
+    const payments: LimitedVatPayment[] = [];
     for (const transactionId of invoice.transactions ?? []) {
       const transaction = await api.transactions.get(transactionId);
-      if (transaction.is_deleted !== true && transaction.status === "CONFIRMED" && typeof transaction.date === "string") paymentDates.push(transaction.date);
+      if (transaction.is_deleted !== true && transaction.status === "CONFIRMED" && typeof transaction.date === "string") {
+        payments.push({ date: transaction.date, amount: linkedPaymentAmount(transaction, invoice) });
+      }
     }
-    if (invoice.paid_in_cash && typeof invoice.cash_payment_date === "string") paymentDates.push(invoice.cash_payment_date);
-    inputs.push({ invoice, client: byId.get(invoice.clients_id), payment_dates: paymentDates.sort() });
+    // A cash-paid invoice is paid in full on its cash payment date.
+    if (invoice.paid_in_cash && typeof invoice.cash_payment_date === "string") {
+      payments.push({ date: invoice.cash_payment_date, amount: typeof invoice.gross_price === "number" ? invoice.gross_price : null });
+    }
+    payments.sort((a, b) => a.date.localeCompare(b.date) || String(a.amount).localeCompare(String(b.amount)));
+    inputs.push({ invoice, client: byId.get(invoice.clients_id), payments });
   }
   return { inputs, clients, unread };
 }
@@ -552,9 +560,15 @@ function monthFingerprint(build: MonthBuild): string {
       invoice_country: input.client?.cl_invoice_country ?? null,
       vat_no: input.client?.invoice_vat_no ?? null,
     }])).values()].sort((a, b) => a.clients_id - b.clients_id);
+  // Payment dates and amounts decide the § 11 month and partial prepayments.
+  const payments = build.inputs
+    .filter(input => touched.has(input.invoice.id!))
+    .map(input => ({ invoice_id: input.invoice.id!, payments: input.payments.map(payment => ({ date: payment.date, amount: payment.amount })) }))
+    .sort((a, b) => a.invoice_id - b.invoice_id);
   return canonicalPlanJson({
     included: computation.included as unknown as PlanData,
     suppliers,
+    payments,
     kmd: kmdFigures(computation.included) as unknown as PlanData,
     review_details: computation.reviews.map(review => `${review.code}:${review.invoice_id}:${review.clients_id}:${review.service_date}`),
     month: build.month,

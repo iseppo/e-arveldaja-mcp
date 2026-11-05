@@ -10,7 +10,7 @@ import { roundMoney } from "./money.js";
 import { replayFrozenFx, fxOutcomeKey, type FrozenFxOutcomes, type EcbRateRecord } from "./fx/ecb-rates.js";
 import { standardVatRateOn } from "./estonian-tax-rules.js";
 import { isInvalidatedPurchaseInvoice } from "./purchase-invoice-status.js";
-import type { Client, Journal, PurchaseInvoice } from "./types/api.js";
+import type { Client, Journal, PurchaseInvoice, Transaction } from "./types/api.js";
 import type { LimitedVatBookingRecord, LimitedVatStoreRecord, LimitedVatSupplierRecord } from "./company-vat-status.js";
 
 /** EU member states other than Estonia (ISO 3166-1 alpha-3, as in `cl_code_country`). */
@@ -99,6 +99,42 @@ export function serviceReceivedDate(invoiceDate: string, paymentDates: readonly 
   return [invoiceDate, ...paymentDates.filter(date => /^\d{4}-\d{2}-\d{2}$/.test(date))].sort()[0]!;
 }
 
+/**
+ * The amount a linked bank transaction pays on `invoice`, in the invoice
+ * currency: the sum of its distribution items to this invoice. Null when it
+ * cannot be determined (no item for the invoice, a non-finite amount, or a
+ * transaction / item currency other than the invoice currency).
+ */
+export function linkedPaymentAmount(transaction: Transaction, invoice: PurchaseInvoice): number | null {
+  const invoiceCurrency = (invoice.cl_currencies_id ?? "EUR").toUpperCase();
+  const transactionCurrency = (transaction.cl_currencies_id ?? "").toUpperCase();
+  const items = (transaction.items ?? []).filter(item => item.relation_table === "purchase_invoices" && item.relation_id === invoice.id);
+  if (items.length === 0 || transactionCurrency !== invoiceCurrency) return null;
+  let cents = 0;
+  for (const item of items) {
+    if (item.cl_currencies_id && item.cl_currencies_id.toUpperCase() !== invoiceCurrency) return null;
+    if (typeof item.amount !== "number" || !Number.isFinite(item.amount)) return null;
+    cents += Math.round(item.amount * 100);
+  }
+  return cents / 100;
+}
+
+/**
+ * Payments dated before the invoice date move the § 11 date only for the
+ * prepaid part. `partial` = together they do not cover the invoice gross
+ * (invoice currency, integer cents, no tolerance); `unknown` = an early
+ * payment's amount (or the gross) is not known. Undefined = no early payment,
+ * or the early payments cover the whole gross.
+ */
+export function partialPrepayment(invoice: PurchaseInvoice, payments: readonly LimitedVatPayment[]): "partial" | "unknown" | undefined {
+  const early = payments.filter(payment => /^\d{4}-\d{2}-\d{2}$/.test(payment.date) && payment.date < invoice.create_date);
+  if (early.length === 0) return undefined;
+  if (early.some(payment => payment.amount === null || !Number.isFinite(payment.amount))) return "unknown";
+  if (typeof invoice.gross_price !== "number" || !Number.isFinite(invoice.gross_price)) return "unknown";
+  const paidCents = early.reduce((sum, payment) => sum + Math.round(payment.amount! * 100), 0);
+  return Math.abs(paidCents) < Math.abs(Math.round(invoice.gross_price * 100)) ? "partial" : undefined;
+}
+
 export function monthBounds(month: string): { from: string; to: string } {
   const [year, monthNumber] = month.split("-").map(Number) as [number, number];
   const last = new Date(Date.UTC(year, monthNumber, 0)).getUTCDate();
@@ -132,8 +168,14 @@ export function supplierChargedVat(invoice: PurchaseInvoice): boolean {
 export interface LimitedVatInvoiceInput {
   invoice: PurchaseInvoice;
   client: Client | undefined;
-  /** Dates of linked bank payments (fresh reads). */
-  payment_dates: readonly string[];
+  /** Linked payments (fresh reads): bank transactions and the invoice's cash payment. */
+  payments: readonly LimitedVatPayment[];
+}
+
+export interface LimitedVatPayment {
+  date: string;
+  /** Paid amount in the invoice currency; null when it cannot be determined. */
+  amount: number | null;
 }
 
 export interface LimitedVatLine {
@@ -169,7 +211,8 @@ export type LimitedVatReviewCode =
   | "limited_vat_coverage_incomplete"
   | "limited_vat_fx_unavailable"
   | "limited_vat_item_account_missing"
-  | "limited_vat_rate_unknown";
+  | "limited_vat_rate_unknown"
+  | "limited_vat_partial_prepayment";
 
 export interface LimitedVatReview {
   code: LimitedVatReviewCode;
@@ -213,9 +256,9 @@ export function isMonthCandidate(invoice: PurchaseInvoice, client: Client | unde
 export function fxKeysFor(inputs: readonly LimitedVatInvoiceInput[], month: string): string[] {
   const { from, to } = monthBounds(month);
   const keys = new Set<string>();
-  for (const { invoice, payment_dates } of inputs) {
+  for (const { invoice, payments } of inputs) {
     const currency = (invoice.cl_currencies_id ?? "EUR").toUpperCase();
-    const date = serviceReceivedDate(invoice.create_date, payment_dates);
+    const date = serviceReceivedDate(invoice.create_date, payments.map(payment => payment.date));
     if (currency !== "EUR" && date >= from && date <= to) keys.add(fxOutcomeKey(currency, date));
   }
   return [...keys].sort();
@@ -231,9 +274,12 @@ export function computeLimitedVatMonth(
   const { from, to } = monthBounds(month);
   const result: LimitedVatMonthComputation = { month, included: [], excluded: [], reviews: [] };
   const sorted = [...inputs].sort((a, b) => (a.invoice.id ?? 0) - (b.invoice.id ?? 0));
-  for (const { invoice, client, payment_dates } of sorted) {
-    const serviceDate = serviceReceivedDate(invoice.create_date, payment_dates);
-    if (serviceDate < from || serviceDate > to) continue;
+  const inMonth = (date: string) => date >= from && date <= to;
+  for (const { invoice, client, payments } of sorted) {
+    const serviceDate = serviceReceivedDate(invoice.create_date, payments.map(payment => payment.date));
+    // A partial prepayment is a review in the prepayment month AND the invoice month.
+    const prepayment = partialPrepayment(invoice, payments);
+    if (!inMonth(serviceDate) && !(prepayment && inMonth(invoice.create_date))) continue;
     const decision = classifySupplier(client, classifications.get(invoice.clients_id));
     if (decision.decision === "not_foreign") continue;
     const base = {
@@ -243,11 +289,20 @@ export function computeLimitedVatMonth(
       supplier: client?.name ?? invoice.client_name,
     };
     if (decision.decision === "excluded") {
+      if (!inMonth(serviceDate)) continue; // listed once, in its § 11 month
       result.excluded.push({ ...base, reason: decision.source });
       continue;
     }
     const review = (code: LimitedVatReviewCode, message: string) =>
       result.reviews.push({ ...base, code, service_date: serviceDate, message });
+    if (prepayment === "partial") {
+      review("limited_vat_partial_prepayment", "A payment dated before the invoice date covers only part of the invoice gross. Under KMS § 11 only the prepaid part arises on the payment day (that month, that day's ECB rate); the rest arises on the invoice date. Not included in either month (no automatic split): book this invoice's VAT by hand, or ask the accountant. / Enne arve kuupäeva tehtud ettemaks katab ainult osa arve summast. KMS § 11 järgi kuulub ettemaksu kuusse (ettemaksu päeva kursiga) ainult ettemakstud osa, ülejäänu arve kuupäeva kuusse. Arvet ei arvestata kummaski kuus — kirjenda selle arve käibemaks käsitsi või küsi raamatupidajalt.");
+      continue;
+    }
+    if (prepayment === "unknown") {
+      review("limited_vat_partial_prepayment", "A payment dated before the invoice date has no amount in the invoice currency (or the invoice gross is missing), so it cannot be checked whether it prepaid the whole invoice. Under KMS § 11 only a prepaid part arises on the payment day; the rest arises on the invoice date. Not included in either month: book this invoice's VAT by hand, or ask the accountant. / Enne arve kuupäeva tehtud makse summat arve valuutas ei saa kindlaks teha, seega pole teada, kas see tasus kogu arve. KMS § 11 järgi kuulub ettemaksu kuusse ainult ettemakstud osa, ülejäänu arve kuupäeva kuusse. Arvet ei arvestata kummaski kuus — kirjenda selle arve käibemaks käsitsi või küsi raamatupidajalt.");
+      continue;
+    }
     if (decision.decision === "estonian_registration") {
       review("limited_vat_supplier_estonian_registration", "The supplier has an Estonian VAT number or Estonian invoice country, so it may be registered in Estonia (KMS § 21 lg 1 covers only businesses not registered here). Not included, even when classified: check the supplier's registration and correct the client data.");
       continue;

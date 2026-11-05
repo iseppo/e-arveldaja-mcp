@@ -10,12 +10,14 @@ import {
   paymentDeadline,
   postingSignature,
   resolveLimitedVatMonthState,
+  linkedPaymentAmount,
   serviceReceivedDate,
   type LimitedVatInvoiceInput,
+  type LimitedVatPayment,
 } from "./limited-vat.js";
 import type { FrozenFxOutcomes } from "./fx/ecb-rates.js";
 import type { LimitedVatStoreRecord } from "./company-vat-status.js";
-import type { Client, Journal, PurchaseInvoice, PurchaseInvoiceItem } from "./types/api.js";
+import type { Client, Journal, PurchaseInvoice, PurchaseInvoiceItem, Transaction } from "./types/api.js";
 
 const LIABILITY = 2410;
 
@@ -46,8 +48,8 @@ const aws = client(10, "Amazon Web Services EMEA SARL", "LUX");
 const openai = client(11, "OpenAI, LLC", "USA");
 const telia = client(12, "Telia Eesti AS", "EST");
 
-function input(inv: PurchaseInvoice, c: Client, paymentDates: string[] = []): LimitedVatInvoiceInput {
-  return { invoice: inv, client: c, payment_dates: paymentDates };
+function input(inv: PurchaseInvoice, c: Client, payments: LimitedVatPayment[] = []): LimitedVatInvoiceInput {
+  return { invoice: inv, client: c, payments };
 }
 
 const counts = (...ids: number[]) => new Map(ids.map(id => [id, "counts" as const]));
@@ -119,9 +121,71 @@ describe("limited VAT month computation", () => {
 
   it("dates the service by the earliest of invoice and payment date (§ 11 lg 1)", () => {
     expect(serviceReceivedDate("2026-04-03", ["2026-03-28"])).toBe("2026-03-28");
-    const prepaid = input(invoice(8, aws.id!, "2026-04-03", [item(20)]), aws, ["2026-03-28"]);
+    const prepaid = input(invoice(8, aws.id!, "2026-04-03", [item(20)]), aws, [{ date: "2026-03-28", amount: 20 }]);
     expect(computeLimitedVatMonth("2026-03", [prepaid], counts(aws.id!), {}).included).toHaveLength(1);
     expect(computeLimitedVatMonth("2026-04", [prepaid], counts(aws.id!), {}).included).toHaveLength(0);
+  });
+
+  describe("partial prepayment (KMS § 11: only the prepaid part arises on the payment day)", () => {
+    const run = (month: string, row: LimitedVatInvoiceInput) => computeLimitedVatMonth(month, [row], counts(aws.id!), {});
+    const prepaidWith = (payments: LimitedVatPayment[]) => input(invoice(30, aws.id!, "2026-04-03", [item(100)]), aws, payments);
+
+    it("books a full prepayment before the invoice date in the prepayment month (unchanged)", () => {
+      const row = prepaidWith([{ date: "2026-03-28", amount: 100 }]);
+      const march = run("2026-03", row);
+      expect(march.included).toEqual([expect.objectContaining({ invoice_id: 30, service_date: "2026-03-28", vat: 24 })]);
+      expect(march.reviews).toEqual([]);
+      expect(run("2026-04", row).included).toEqual([]);
+      expect(run("2026-04", row).reviews).toEqual([]);
+    });
+
+    it("makes a partial prepayment a review in both the prepayment and the invoice month, never booked or in the KMD", () => {
+      const row = prepaidWith([{ date: "2026-03-28", amount: 40 }]);
+      for (const month of ["2026-03", "2026-04"]) {
+        const result = run(month, row);
+        expect(result.included).toEqual([]);
+        expect(result.reviews).toEqual([expect.objectContaining({ code: "limited_vat_partial_prepayment", invoice_id: 30, service_date: "2026-03-28" })]);
+        expect(result.reviews[0]!.message).toContain("raamatupidajalt");
+        expect(buildLimitedVatPostings(result.included, LIABILITY)).toEqual([]);
+        expect(kmdFigures(result.included)).toMatchObject({ row_1_taxable_value: 0, row_4_vat: 0 });
+      }
+    });
+
+    it("is a review when the early payments fall one cent short (tolerance 0)", () => {
+      expect(run("2026-03", prepaidWith([{ date: "2026-03-28", amount: 99.99 }])).reviews.map(review => review.code)).toEqual(["limited_vat_partial_prepayment"]);
+    });
+
+    it("books two early payments that together cover the gross", () => {
+      const row = prepaidWith([{ date: "2026-03-20", amount: 60 }, { date: "2026-03-28", amount: 40 }]);
+      expect(run("2026-03", row).included).toEqual([expect.objectContaining({ invoice_id: 30, service_date: "2026-03-20" })]);
+      expect(run("2026-04", row).reviews).toEqual([]);
+    });
+
+    it("keeps a payment on or after the invoice date unchanged (invoice month, no review)", () => {
+      for (const date of ["2026-04-03", "2026-04-20"]) {
+        const row = prepaidWith([{ date, amount: 40 }]);
+        expect(run("2026-04", row).included).toEqual([expect.objectContaining({ invoice_id: 30, service_date: "2026-04-03" })]);
+        expect(run("2026-04", row).reviews).toEqual([]);
+        expect(run("2026-03", row).reviews).toEqual([]);
+      }
+    });
+
+    it("makes an early payment of unknown amount a review in both months (fail closed)", () => {
+      const row = prepaidWith([{ date: "2026-03-28", amount: null }]);
+      for (const month of ["2026-03", "2026-04"]) {
+        const result = run(month, row);
+        expect(result.included).toEqual([]);
+        expect(result.reviews).toEqual([expect.objectContaining({ code: "limited_vat_partial_prepayment", invoice_id: 30 })]);
+      }
+    });
+
+    it("reads a linked payment's amount in the invoice currency only from its distribution to this invoice", () => {
+      const inv = invoice(30, aws.id!, "2026-04-03", [item(100)]);
+      const tx = (extra: Partial<Transaction>): Transaction => ({ id: 70, accounts_dimensions_id: 1, type: "C", amount: 100, cl_currencies_id: "EUR", date: "2026-03-28", ...extra });
+      expect(linkedPaymentAmount(tx({ items: [{ accounts_id: 2310, relation_table: "purchase_invoices", relation_id: 30, amount: 40 }, { accounts_id: 2310, relation_table: "purchase_invoices", relation_id: 31, amount: 60 }] }), inv)).toBe(40);
+      expect(linkedPaymentAmount(tx({ items: [] }), inv)).toBeNull();
+      expect(linkedPaymentAmount(tx({ cl_currencies_id: "USD", items: [{ accounts_id: 2310, relation_table: "purchase_invoices", relation_id: 30, amount: 40 }] }), inv)).toBeNull();
+    });
   });
 
   it("makes an ECB failure a review item, never a guessed rate", () => {

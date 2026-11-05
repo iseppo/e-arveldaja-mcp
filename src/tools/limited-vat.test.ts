@@ -102,6 +102,12 @@ function setup(state: FakeState, fetchImpl?: EcbFetch) {
   return { call, api, ctx };
 }
 
+/** A confirmed EUR payment distributing `amount` to purchase invoice 1. */
+const prepayment = (id: number, date: string, amount: number): Transaction => ({
+  id, date, status: "CONFIRMED", type: "C", amount, cl_currencies_id: "EUR", accounts_dimensions_id: 1,
+  items: [{ accounts_id: 2310, relation_table: "purchase_invoices", relation_id: 1, amount }],
+});
+
 let dir: string;
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "limited-vat-"));
@@ -416,12 +422,43 @@ describe("limited_vat review fixes (fail closed)", () => {
   it("F5: includes an invoice dated months later but prepaid in the month", async () => {
     const state = baseState({
       invoices: [invoice(1, 10, "2026-07-15", 50, { transactions: [70] })],
-      transactions: [{ id: 70, date: "2026-03-15", status: "CONFIRMED" } as Transaction],
+      transactions: [prepayment(70, "2026-03-15", 50)],
     });
     const { call } = setup(state);
     await setLimited(call);
     const dry = parseToolPayload<LimitedVatMonthPayload>((await call({ mode: "month", month: "2026-03", supplier_classifications: [{ clients_id: 10, classification: "counts" }] })).text);
     expect(dry.included_invoices.map(row => [row.invoice_id, row.service_date])).toEqual([[1, "2026-03-15"]]);
+  });
+
+  it("a partial prepayment is a review in the prepayment and the invoice month, never booked, and kept out of the KMD", async () => {
+    const state = baseState({
+      invoices: [invoice(1, 10, "2026-04-03", 50, { transactions: [70] })],
+      transactions: [prepayment(70, "2026-03-15", 20)],
+    });
+    const { call } = setup(state);
+    await setLimited(call);
+    for (const month of ["2026-03", "2026-04"]) {
+      const dry = parseToolPayload<LimitedVatMonthPayload>((await call({ mode: "month", month, supplier_classifications: [{ clients_id: 10, classification: "counts" }] })).text);
+      expect(dry.included_invoices).toEqual([]);
+      expect(dry.review_items.map(review => [review.code, review.invoice_id])).toEqual([["limited_vat_partial_prepayment", 1]]);
+      expect(dry.kmd).toMatchObject({ row_1_taxable_value: 0, row_4_vat: 0 });
+    }
+  });
+
+  it("execute drifts when a linked payment amount changes after the dry run", async () => {
+    const state = baseState({
+      invoices: [invoice(1, 10, "2026-04-03", 50, { transactions: [70] }), invoice(2, 10, "2026-03-05", 30)],
+      transactions: [prepayment(70, "2026-03-15", 50)],
+    });
+    const { call } = setup(state);
+    await setLimited(call);
+    const args = { mode: "month", month: "2026-03", supplier_classifications: [{ clients_id: 10, classification: "counts" }] };
+    const dry = parseToolPayload<LimitedVatMonthPayload>((await call(args)).text);
+    expect(dry.included_invoices.map(row => row.invoice_id)).toEqual([1, 2]);
+    state.transactions = [prepayment(70, "2026-03-15", 60)];
+    const drift = await call({ ...args, execute: true, plan_handle: dry.plan_handle });
+    expect(drift.text).toContain("plan_drift");
+    expect(state.writes).toEqual([]);
   });
 
   it("F5: reports later invoices beyond the read budget as limited_vat_coverage_incomplete, never a silent omission", async () => {
