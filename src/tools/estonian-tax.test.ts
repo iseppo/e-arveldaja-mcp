@@ -2141,16 +2141,20 @@ describe("prepare_dividend_package remediation", () => {
     expect(api.journals.create).not.toHaveBeenCalled();
   });
 
-  it("holds the dividend when an earlier distribution-year dividend debited 2970 together with the CIT expense", async () => {
+  it("does not hold an earlier distribution-year dividend booked against 2970 and keeps its CIT out of lg 1", async () => {
     const earlierDividend = makeJournal("2026-03-01", [
       makePosting(2970, "D", 7800), makePosting(8900, "D", 2200),
       makePosting(2650, "C", 7800), makePosting(2656, "C", 2200),
     ], { id: 7702 });
-    const { api, cb } = setup([...base(5000), profit2025, rikResult2025, earlierDividend], rikAccounts());
+    const journals = [...base(5000), profit2025, rikResult2025, earlierDividend];
+    const check = await lg1(journals, "2026-06-01");
+    expect(check.balance_before).toBe(17200);
+    expect(check.components).toMatchObject({ closed_prior_year_result: 12200, unclosed_prior_year_profit_and_loss: 0 });
+
+    const { api, cb } = setup(journals, rikAccounts());
     const result = await cb({ net_dividend: 1000, shareholder_client_id: 1, effective_date: "2026-06-01", dry_run: false });
-    expect(isError(result)).toBe(true);
-    expect(parseResult(result).error_code).toBe("mixed_result_journal_requires_review");
-    expect(api.journals.create).not.toHaveBeenCalled();
+    expect(isError(result)).toBe(false);
+    expect(api.journals.create).toHaveBeenCalledTimes(1);
   });
 
   it("does not hold for a non-closing-shaped 2970 journal without P&L lines, and keeps its window", async () => {

@@ -973,13 +973,16 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
         ));
         // A distribution-year journal mixing the result account with P&L lines
         // outside the closing shape cannot be split into "prior-year close" and
-        // "current-year P&L" safely, so the dividend is held for review.
+        // "current-year P&L" safely, so the dividend is held for review. A
+        // dividend journal booked against the result account (its only P&L
+        // line is the CIT on this tool's income-tax expense account) is not
+        // held: its CIT is current-year expense and stays outside the window.
         const mixedResultJournals = allJournals
           .filter(j =>
             !j.is_deleted && j.operation_type !== "INITIAL" && j.effective_date >= distributionYearStart &&
             registeredAsOf(j) && !isClosingShaped(j) &&
             livePostings(j).some(p => p.accounts_id === currentYearProfitAccount) &&
-            livePostings(j).some(p => plAccountIds.has(p.accounts_id)))
+            livePostings(j).some(p => plAccountIds.has(p.accounts_id) && p.accounts_id !== incomeTaxExpenseAccount))
           .map(j => ({ journal_id: j.id ?? null, document_number: j.document_number ?? null, effective_date: j.effective_date }));
         const lg1Accounts = new Set([retainedAccount, currentYearProfitAccount]);
 
