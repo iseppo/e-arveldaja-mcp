@@ -1724,6 +1724,35 @@ describe("update_* post-confirmation audit lock", () => {
     expect(patch.items).toEqual(existingItems.map(item => ({ ...item, cl_fringe_benefits_id: 1, amount: 1 })));
   });
 
+  it("update_purchase_invoice refuses a header-only update that would re-send a reverse charge for a non-VAT company", async () => {
+    const update = vi.fn();
+    const { handler } = getCrudToolHarness("update_purchase_invoice", {
+      readonly: { ...purchaseUpdateReadonly(), getVatInfo: vi.fn().mockResolvedValue({ vat_number: null }) },
+      purchaseInvoices: {
+        get: vi.fn().mockResolvedValue({ id: 7, status: "PROJECT", vat_price: 0, items: [{ id: 1, custom_title: "Cloud", total_net_price: 100, vat_rate_dropdown: "24", reversed_vat_id: 1 }] }),
+        update,
+      },
+    });
+    const result = await handler({ id: 7, data: { notes: "header only" } }) as { content: Array<{ text: string }> };
+    expect(update).not.toHaveBeenCalled();
+    expect(result.content[0]!.text).toContain("reverse_charge_update_refused");
+  });
+
+  it("update_purchase_invoice refuses charged header VAT on a reverse-charge draft (full company), header-only", async () => {
+    const update = vi.fn();
+    const { handler } = getCrudToolHarness("update_purchase_invoice", {
+      purchaseInvoices: {
+        get: vi.fn().mockResolvedValue({ id: 7, status: "PROJECT", vat_price: 0, gross_price: 100, items: [{ id: 1, custom_title: "Cloud", total_net_price: 100, vat_rate_dropdown: "24", vat_amount: 24, reversed_vat_id: 1 }] }),
+        update,
+      },
+    });
+    const refused = await handler({ id: 7, data: { vat_price: 24, gross_price: 124 } }) as { content: Array<{ text: string }> };
+    expect(update).not.toHaveBeenCalled();
+    expect(refused.content[0]!.text).toContain("reverse_charge_update_refused");
+    await handler({ id: 7, data: { notes: "header only" } });
+    expect(update).toHaveBeenCalledTimes(1);
+  });
+
   // GitHub #62: create_purchase_invoice defaults cl_fringe_benefits_id (NOT NULL
   // in the API) but update did not, so the create payload 500'd on update.
   it("update_purchase_invoice defaults cl_fringe_benefits_id/amount on caller items like create does", async () => {

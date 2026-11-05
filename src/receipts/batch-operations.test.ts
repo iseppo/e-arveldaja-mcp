@@ -418,6 +418,24 @@ describe("P01 bound supplier identity and public pager", () => {
     expect(rows[1]).toMatchObject({ relative_path: "second.pdf", supplier_client_id: 8, invoice_number: "INV-TWO", bank_confirmation: { transaction_id: 43, client_transition: { from: null, to: 8 }, distribution: { invoice_reference: "receipt:1:future_purchase_invoice", amount: 124 } } });
   });
 
+  it.each([
+    ["full → none", { vat_number: "EE123456789" }, { vat_number: null }],
+    ["none → full", { vat_number: null }, { vat_number: "EE123456789" }],
+  ])("a company VAT status change between preview and execute (%s) is plan_drift with zero writes", async (_label, before, after) => {
+    vi.mocked(extractReceiptFieldsFromText).mockReturnValue({ supplier_name: "Supplier OU", invoice_number: "INV-VAT", invoice_date: "2026-03-20", total_net: 100, total_vat: 24, total_gross: 124, currency: "EUR", raw_text: "ignored", description: "Service" } as never);
+    const { api, spies } = makeApi();
+    const getVatInfo = (api as unknown as { readonly: Record<string, ReturnType<typeof vi.fn>> }).readonly.getVatInfo!;
+    getVatInfo.mockResolvedValue(before);
+    const ops = makeOperations(api);
+    const dry = await ops.runBatch({ ...baseRun, executionMode: "dry_run", dryRun: true });
+    if (!dry.ok) throw new Error(dry.error.code);
+    expect(dry.value.results[0]).toMatchObject({ status: "dry_run_preview" });
+    getVatInfo.mockResolvedValue(after);
+    const outcome = await ops.runBatch({ ...baseRun, executionMode: "create", dryRun: false, approvedManifest: dry.value.manifest, planHandle: dry.value.planHandles!.create });
+    expect(outcome).toMatchObject({ ok: false, error: { code: "plan_drift" } });
+    expect(spies.createAndSetTotals).not.toHaveBeenCalled();
+  });
+
   it("#3 processes a byte-identical receipt copy once: the copy is skipped with duplicate_file_of and never booked", async () => {
     vi.mocked(readdir).mockResolvedValue([{ name: "first.pdf", isFile: () => true }, { name: "first (1).pdf", isFile: () => true }] as never);
     vi.mocked(readFile).mockResolvedValue(Buffer.from("same receipt pdf") as never);

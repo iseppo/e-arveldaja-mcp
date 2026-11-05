@@ -1176,7 +1176,7 @@ class ReceiptBatchOperationsImpl implements ReceiptBatchOperations {
         // `create` approval can never be replayed as `create_and_confirm`.
         const results = await runLoop("dry_run", true, false, { backfill: true });
         const mintHandle = (effect: ReceiptBatchExecutionMode): string => {
-          const fingerprint = computeBatchFingerprint(results, input, snapshot, bankTransactions, effect);
+          const fingerprint = computeBatchFingerprint(results, input, snapshot, bankTransactions, effect, context);
           const reviews = receiptEffectReviews(fingerprint);
           const planInput: ExecutionPlanInput = {
             normalizedArgs: fingerprint,
@@ -1220,7 +1220,7 @@ class ReceiptBatchOperationsImpl implements ReceiptBatchOperations {
       // rule, supplier/article/account/dimension, or live bank transaction all
       // change this fingerprint.
       const projection = await runLoop("dry_run", true, false, { backfill: false });
-      const freshFingerprint = computeBatchFingerprint(projection, input, snapshot, bankTransactions, input.executionMode);
+      const freshFingerprint = computeBatchFingerprint(projection, input, snapshot, bankTransactions, input.executionMode, context);
 
       let storedPlan;
       try {
@@ -1245,6 +1245,30 @@ class ReceiptBatchOperationsImpl implements ReceiptBatchOperations {
   }
 }
 
+/** The prepared invoice rows + totals of a previewed receipt (null when the row is not created). */
+function preparedBookingOf(
+  result: ReceiptBatchFileResult,
+  context: Pick<ReceiptProcessingContext, "isVatRegistered" | "purchaseArticlesWithVat">,
+): PlanData {
+  if (result.status !== "dry_run_preview" || !result.extracted || !result.booking_suggestion) return null;
+  const prepared = prepareReceiptInvoiceItems(context, result.extracted, result.booking_suggestion, result.extracted.description ?? "Receipt expense");
+  if (!prepared.ok) return { held: true };
+  return stripUndefinedDeep({
+    gross_total: prepared.grossTotal,
+    vat_total: context.isVatRegistered ? result.extracted.total_vat ?? null : 0,
+    items: prepared.items.map(item => ({
+      purchase_accounts_id: item.purchase_accounts_id ?? null,
+      purchase_accounts_dimensions_id: item.purchase_accounts_dimensions_id ?? null,
+      total_net_price: item.total_net_price ?? null,
+      vat_rate_dropdown: item.vat_rate_dropdown ?? null,
+      vat_accounts_id: item.vat_accounts_id ?? null,
+      cl_vat_articles_id: item.cl_vat_articles_id ?? null,
+      reversed_vat_id: item.reversed_vat_id ?? null,
+      project_no_vat_gross_price: item.project_no_vat_gross_price ?? null,
+    })),
+  }) as unknown as PlanData;
+}
+
 /**
  * P0-3 canonical drift fingerprint of a receipt batch. Binds — for ONE execution
  * effect — the manifest (file bytes), folder identity, bank dimension, every date
@@ -1259,6 +1283,7 @@ function computeBatchFingerprint(
   snapshot: { manifest: { relative_path: string; sha256: string }[]; files: ReceiptFileSnapshot[] },
   bankTransactions: Transaction[],
   effect: ReceiptBatchExecutionMode,
+  context: Pick<ReceiptProcessingContext, "isVatRegistered" | "purchaseArticlesWithVat" | "companyVatStatus">,
 ): PlanRecord {
   const files: PlanData[] = results.map((result, index) => {
     // Bind the row to the actual snapshotted path, never a basename or sorted
@@ -1314,12 +1339,17 @@ function computeBatchFingerprint(
             reversed_vat_id: result.booking_suggestion.item?.reversed_vat_id ?? null,
           }
         : null,
+      // The effective VAT treatment the create would write: the prepared rows
+      // and totals (folded gross vs net + input VAT, reverse charge), so a VAT
+      // status change between preview and execute is plan drift.
+      prepared_booking: preparedBookingOf(result, context),
     });
   });
   const bankTx: PlanData[] = bankTransactions.map(tx => stripUndefinedDeep(snapshotBankTransaction(tx)) as unknown as PlanData);
   return stripUndefinedDeep({
     schema: "receipt_batch_v1",
     execution_effect: effect,
+    company_vat_status: context.companyVatStatus ?? (context.isVatRegistered ? "full" : "none"),
     folder: input.resolvedFolderPath,
     accounts_dimensions_id: input.accountsDimensionsId,
     date_from: input.dateFrom ?? null,

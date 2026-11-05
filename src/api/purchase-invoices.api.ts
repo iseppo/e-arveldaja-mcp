@@ -12,6 +12,7 @@ import {
   hasVatAccountFields,
   normalizeVatRate,
   nonVatRegisterRefusal,
+  reverseChargeRegisterRefusal,
   proveNonDeductibleInvoice,
 } from "../tools/purchase-vat-defaults.js";
 
@@ -59,7 +60,8 @@ export type PurchaseInvoiceTotalsCorrectionCode =
   | "correction_items_missing"
   | "correction_preview_required"
   | "correction_preview_mismatch"
-  | "correction_nonvat_form_unproven";
+  | "correction_nonvat_form_unproven"
+  | "reverse_charge_register_refused";
 
 const TOTALS_CORRECTION_ERRORS: Record<PurchaseInvoiceTotalsCorrectionCode, {
   message: string;
@@ -88,6 +90,10 @@ const TOTALS_CORRECTION_ERRORS: Record<PurchaseInvoiceTotalsCorrectionCode, {
   correction_preview_mismatch: {
     message: "The approved purchase invoice totals correction preview no longer matches fresh invoice state.",
     nextAction: "Call preview_purchase_invoice_totals_correction again and obtain approval for the new snapshot.",
+  },
+  reverse_charge_register_refused: {
+    message: "Purchase invoice is not registered: its reverse charge (reversed_vat_id) does not fit the company VAT status or the invoice VAT (a reverse-charge row under a charged invoice VAT, or reverse charge on a company that is not fully VAT-registered).",
+    nextAction: "Fix the rows in e-arveldaja (remove the reverse charge, or set the invoice VAT to the VAT of the ordinary rows), or delete the draft and recreate it; then confirm again.",
   },
   correction_nonvat_form_unproven: {
     message: "Non-VAT purchase invoice carries a VAT account that is not a proven non-deductible form (VAT on the cost account, cent-exact, EUR); it is not registered.",
@@ -277,30 +283,46 @@ export function resolvePurchaseInvoiceTotals(input: {
   const itemVat = itemAmounts ? roundMoney(itemAmounts.reduce((s, i) => s + i.vat, 0)) : 0;
   const itemNet = itemAmounts ? roundMoney(itemAmounts.reduce((s, i) => s + i.net, 0)) : 0;
 
+  // A reverse-charge item's VAT is self-assessed, never part of the invoice
+  // VAT: the invoice VAT of the items is the VAT of the other (charged) items.
+  const isReversed = (item: PurchaseInvoiceItem) => item.reversed_vat_id !== undefined && item.reversed_vat_id !== null;
+  const hasItems = items !== undefined && items.length > 0 && itemAmounts !== undefined;
+  const chargedItemVat = hasItems && items.some(isReversed)
+    ? roundMoney(itemAmounts.reduce((sum, amounts, index) => sum + (items[index] && isReversed(items[index]) ? 0 : amounts.vat), 0))
+    : itemVat;
+
   // Invoice-level VAT: explicit value wins for VAT-registered companies.
   // Non-VAT companies must keep invoice-level vat_price at 0 even if item VAT is tracked.
   const vat = isVatRegistered
-    ? (vatPrice !== undefined ? vatPrice : itemVat)
+    ? (vatPrice !== undefined ? vatPrice : chargedItemVat)
     : 0;
 
-  // Invoice-level gross: explicit value wins, otherwise net + actual item VAT
-  const gross = grossPrice !== undefined
-    ? grossPrice
+  // Invoice-level gross: VAT-registered (and non-deductible) = item net + invoice
+  // VAT; folded = the sum of the items' gross (net + folded VAT). An explicit
+  // gross must equal it to the cent.
+  const foldedItemGross = hasItems
+    ? roundMoney(items.reduce((sum, item, index) =>
+      sum + (item.project_no_vat_gross_price ?? roundMoney((itemAmounts[index]?.net ?? 0) + (itemAmounts[index]?.vat ?? 0))), 0))
     : roundMoney(itemNet + itemVat);
+  const expectedGross = isVatRegistered ? roundMoney(itemNet + vat) : foldedItemGross;
+  const gross = grossPrice !== undefined ? grossPrice : expectedGross;
+  if (hasItems && grossPrice !== undefined && Math.round(grossPrice * 100) !== Math.round(expectedGross * 100)) {
+    return {
+      ok: false,
+      code: "purchase_totals_mismatch",
+      message: `Purchase invoice totals mismatch: explicit gross_price ${grossPrice} differs from ` +
+        (isVatRegistered ? `the item net ${itemNet} + invoice VAT ${vat} = ${expectedGross}` : `the items' gross ${expectedGross}`) +
+        ". Fix the item net amounts / VAT rates or the invoice totals.",
+    };
+  }
 
   // When explicit VAT differs from item-computed VAT (rounding), adjust
   // project_no_vat_gross_price on the last item so the API computes matching totals.
   let lastItemGross: number | undefined;
   if (items && items.length > 0 && vatPrice !== undefined && isVatRegistered) {
     // Only a per-line rounding residue (≤ 1 cent per item) may be absorbed.
-    // A larger gap means the explicit totals disagree with the items. A
-    // reverse-charge item's VAT is self-assessed, never part of the invoice
-    // VAT, so the check compares the invoice VAT with the other items' VAT
-    // only: a reverse-charge item under a charged invoice VAT is refused.
-    const isReversed = (item: PurchaseInvoiceItem) => item.reversed_vat_id !== undefined && item.reversed_vat_id !== null;
-    const chargedItemVat = items.some(isReversed)
-      ? roundMoney((itemAmounts ?? []).reduce((sum, amounts, index) => sum + (items[index] && isReversed(items[index]) ? 0 : amounts.vat), 0))
-      : itemVat;
+    // A larger gap means the explicit totals disagree with the items; a
+    // reverse-charge item under a charged invoice VAT is refused.
     const chargedVatDiff = roundMoney(vatPrice - chargedItemVat);
     if (Math.abs(chargedVatDiff) > roundMoney(0.01 * items.length) + 1e-9) {
       return {
@@ -833,15 +855,17 @@ export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
       if (options.approvedCorrection !== undefined) {
         throw new PurchaseInvoiceTotalsCorrectionError("correction_preview_mismatch");
       }
-      if (!isVatRegistered) {
-        let draft: PurchaseInvoice;
-        try { draft = await this.getFreshInvoice(id); }
-        catch (error) {
-          if (options.expectedDraftFingerprint !== undefined) throw new PurchaseInvoiceDraftVerificationError("draft_readback_unavailable", { cause: error });
-          throw error;
-        }
-        if (nonVatRegisterRefusal(draft, options.accounts) !== undefined) throw new PurchaseInvoiceTotalsCorrectionError("correction_nonvat_form_unproven");
+      let draft: PurchaseInvoice;
+      try { draft = await this.getFreshInvoice(id); }
+      catch (error) {
+        if (options.expectedDraftFingerprint !== undefined) throw new PurchaseInvoiceDraftVerificationError("draft_readback_unavailable", { cause: error });
+        throw error;
       }
+      if (reverseChargeRegisterRefusal(draft, isVatRegistered) !== undefined) throw new PurchaseInvoiceTotalsCorrectionError("reverse_charge_register_refused");
+      if (!isVatRegistered && nonVatRegisterRefusal(draft, options.accounts) !== undefined) {
+        throw new PurchaseInvoiceTotalsCorrectionError("correction_nonvat_form_unproven");
+      }
+      // The reviewed-draft fingerprint is checked on a final fresh read after these prerequisites.
       return this.confirm(id, { expectedDraftFingerprint: options.expectedDraftFingerprint });
     }
     if (options.approvedCorrection === undefined) {

@@ -52,6 +52,7 @@ import {
   getPurchaseArticlesWithVat,
   hasVatAccountFields,
   nonVatRegisterRefusal,
+  reverseChargeRegisterRefusal,
 } from "../tools/purchase-vat-defaults.js";
 import { parsePurchaseInvoiceItems, tagNotes } from "../tools/crud-tools.js";
 import { isCompanyVatRegistered } from "../company-vat-status.js";
@@ -1023,7 +1024,13 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
 
     // GitHub #63 (P4): a non-VAT draft is read fresh; one carrying a VAT account
     // registers only when the non-deductible proof accepts it on a fresh chart.
-    if (!(await isCompanyVatRegistered(this.api))) {
+    const confirmVatReg = await isCompanyVatRegistered(this.api);
+    const reverseChargeRefusal = reverseChargeRegisterRefusal(draft, confirmVatReg);
+    if (reverseChargeRefusal !== undefined) {
+      return fail("reverse_charge_register_refused",
+        `Purchase invoice ${input.invoiceId} is not registered: ${reverseChargeRefusal}. Fix the rows in e-arveldaja or recreate the draft.`, "never");
+    }
+    if (!confirmVatReg) {
       if ((draft.items ?? []).some(hasVatAccountFields)) {
         const refusal = nonVatRegisterRefusal(draft, await this.api.readonly.getAccounts({ fresh: true }));
         if (refusal !== undefined) {

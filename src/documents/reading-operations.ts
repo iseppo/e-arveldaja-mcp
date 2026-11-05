@@ -65,6 +65,7 @@ import {
   hasVatAccountFields,
   isNonDeductibleVatItem,
   nonVatRegisterRefusal,
+  reverseChargeRegisterRefusal,
   normalizeVatRate,
 } from "../tools/purchase-vat-defaults.js";
 import { parsePurchaseInvoiceItems } from "../tools/crud-tools.js";
@@ -1184,7 +1185,8 @@ class ReadingDocumentOperations {
           : historyTitleNotPrinted(itemsSource.template.custom_title, packet) ? "not_printed" as const : undefined
         : undefined;
       const itemTitleRequired = itemTitleReason !== undefined;
-      if (booking?.failure) return fail(booking.failure.code, booking.failure.message, "never");
+      // A booking the totals rules refuse is a failure unless holds already explain it (e.g. a gross that does not close).
+      if (booking?.failure) return result.holds.length > 0 ? ok(result) : fail(booking.failure.code, booking.failure.message, "never");
       if (!cardOutcome || cardOutcome.blocked || !itemsSource || supplierClient?.id === undefined) return ok(result);
       // A booking the owner has not seen is never created: no gross, no booking review, no handle.
       if (values.gross === null) return ok({ ...result, holds: [{ code: "required_field_missing", field: "gross" }] });
@@ -1366,7 +1368,11 @@ class ReadingDocumentOperations {
           booking = await buildReadingBooking(this.api, final, plan.supplier_client_id, plan.items_source as unknown as ReadingItemsSource,
             plan.booking_input as Omit<ReadingBookingInput, "items">, material, isVatReg, knownIban, reference && "value" in reference ? reference.value : undefined,
             orderReferenceNote);
-          if (booking.failure) return fail(booking.failure.code, booking.failure.message, "never");
+          if (booking.failure) {
+            // Holds already raised (e.g. arithmetic_mismatch) explain a refused booking: report them, nothing is written.
+            if (holds.length > 0) return ok<CreateReadingResult>({ status: "held", holds: [...new Map(holds.map((hold) => [`${hold.code}\u0000${hold.field ?? ""}`, hold])).values()] });
+            return fail(booking.failure.code, booking.failure.message, "never");
+          }
           const binding = checkBookingBinding(final, booking.view!, {
             vatRegistered: isVatReg,
             vatZeroNoteProven: plan.vat_zero_note_proven,
@@ -1523,8 +1529,13 @@ class ReadingDocumentOperations {
       if (latest.status !== "PROJECT" || draftFingerprint(latest) !== plan.draft_fingerprint) {
         return fail<ConfirmReadingResult>("draft_changed", "The draft changed after it was created and reviewed; it is not registered. Review it in e-arveldaja.", "never");
       }
+      const confirmVatReg = await isCompanyVatRegistered(this.api);
+      const reverseChargeRefusal = reverseChargeRegisterRefusal(latest, confirmVatReg);
+      if (reverseChargeRefusal !== undefined) {
+        return fail<ConfirmReadingResult>("reverse_charge_register_refused", `The draft is not registered: ${reverseChargeRefusal}. Review it in e-arveldaja.`, "never");
+      }
       // GitHub #63 (P4): a non-VAT draft carrying a VAT account registers only when the proof accepts it on a fresh chart.
-      if ((latest.items ?? []).some(hasVatAccountFields) && !(await isCompanyVatRegistered(this.api))) {
+      if ((latest.items ?? []).some(hasVatAccountFields) && !confirmVatReg) {
         const refusal = nonVatRegisterRefusal(latest, await this.api.readonly.getAccounts({ fresh: true }));
         if (refusal !== undefined) {
           return fail<ConfirmReadingResult>("nonvat_form_unproven",

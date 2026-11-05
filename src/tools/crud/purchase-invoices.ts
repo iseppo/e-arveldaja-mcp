@@ -17,6 +17,7 @@ import {
   getPurchaseArticlesWithVat,
   hasVatAccountFields,
   refuseNonVatItemsWithVatFields,
+  reverseChargeRegisterRefusal,
 } from "../purchase-vat-defaults.js";
 import type { CreatePurchaseInvoiceData, PurchaseInvoiceItem } from "../../types/api.js";
 import {
@@ -229,8 +230,10 @@ export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext,
     }
     // Caller-supplied draft items get the same validation and VAT defaulting as
     // create_purchase_invoice (non-VAT field refusal, VAT defaults, dimensions).
+    // Drafts: the VAT status decides every write (unknown status throws: nothing is written).
+    const draftVatReg = isDraft ? await isCompanyVatRegistered(api) : undefined;
     if (parsed.items !== undefined && isDraft) {
-      const isVatReg = await isCompanyVatRegistered(api);
+      const isVatReg = draftVatReg!;
       const rawItems = desandboxAllStrings(parsePurchaseInvoiceItems(parsed.items));
       // GitHub #63: rows of the non-deductible form (VAT on the cost account) are
       // not edited here: the defaults would fold them silently, and a supplied
@@ -264,6 +267,22 @@ export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext,
       // verbatim would persist them again. desandboxAllStrings is a no-op on the
       // common (already-clean) path.
       parsed.items = desandboxAllStrings(current.items.map(item => ({ ...item })));
+    }
+    // The merged effective draft (supplied or re-sent rows, supplied or current
+    // header VAT) must pass the reverse-charge gate, header-only updates too.
+    if (draftVatReg !== undefined && Array.isArray(parsed.items)) {
+      const refusal = reverseChargeRegisterRefusal({
+        vat_price: parsed.vat_price !== undefined ? parsed.vat_price as number | null : current.vat_price,
+        items: parsed.items as PurchaseInvoiceItem[],
+      }, draftVatReg);
+      if (refusal !== undefined) {
+        return toolError({
+          error: `Purchase invoice ${id} was not updated: ${refusal}.`,
+          category: "manual_review_required",
+          code: "reverse_charge_update_refused",
+          next_action: "Remove the reverse charge from the rows, or keep the invoice VAT equal to the VAT of the ordinary rows, then retry the update with items.",
+        });
+      }
     }
     // PATCH replaces the whole item list. Preserve explicit fringe classifiers
     // from caller or readback, with the compatible default 1 for missing/null.

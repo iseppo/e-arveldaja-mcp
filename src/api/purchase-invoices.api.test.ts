@@ -81,7 +81,8 @@ describe("reviewed PDF draft register guard", () => {
     get.mockResolvedValue({ ...draft, notes: "backend drift" });
     await expect(api.confirmWithTotals(1, true, { expectedDraftFingerprint: draftFingerprint(draft as any) } as any))
       .rejects.toMatchObject({ code: "draft_changed" });
-    expect(get).toHaveBeenCalledTimes(2);
+    // The cached read, the register-gate read and the final fingerprint read: both confirm reads are fresh.
+    expect(get).toHaveBeenCalledTimes(3);
     expect(patch).not.toHaveBeenCalled();
   });
   it("registers the unchanged actual draft once", async () => {
@@ -114,15 +115,15 @@ describe("H05 default preservation", () => {
     ["supplier rounding", true, h05Invoice()],
     ["missing VAT", true, h05Invoice({ vat_price: undefined })],
     ["missing gross", true, h05Invoice({ gross_price: undefined })],
-    ["reverse charge", true, h05Invoice({ items: [{ ...h05Invoice().items[0], reversed_vat_id: 1 }] })],
+    ["reverse charge", true, h05Invoice({ vat_price: 0, gross_price: 100, items: [{ ...h05Invoice().items[0], reversed_vat_id: 1 }] })],
     ["non-EUR", true, h05Invoice({ cl_currencies_id: "USD", currency_rate: 0.92 })],
-  ])("registers %s without reading or rewriting totals", async (_label, isVatRegistered, invoice) => {
+  ])("registers %s after one fresh read, without rewriting totals", async (_label, isVatRegistered, invoice) => {
     const get = vi.fn().mockResolvedValue(invoice);
     const { api, patch } = h05Api(get);
 
     await api.confirmWithTotals(1, isVatRegistered as boolean);
 
-    expect(get).not.toHaveBeenCalled();
+    expect(get).toHaveBeenCalledTimes(1);
     expect(patch).toHaveBeenCalledTimes(1);
     expect(patch).toHaveBeenCalledWith("/purchase_invoices/1/register", {});
   });
@@ -139,13 +140,24 @@ describe("H05 default preservation", () => {
     expect(patch).toHaveBeenCalledWith("/purchase_invoices/1/register", {});
   });
 
+  it.each([
+    ["a reverse-charge row under a charged invoice VAT (full company)", true, h05Invoice({ items: [{ ...h05Invoice().items[0], reversed_vat_id: 1 }] })],
+    ["a reverse-charge row on a company that is not fully VAT-registered", false, h05Invoice({ vat_price: 0, gross_price: 100, items: [{ ...h05Invoice().items[0], reversed_vat_id: 1 }] })],
+  ])("refuses to register %s, never reaching /register", async (_label, isVatRegistered, invoice) => {
+    const get = vi.fn().mockResolvedValue(invoice);
+    const { api, patch } = h05Api(get);
+
+    await expect(api.confirmWithTotals(1, isVatRegistered as boolean)).rejects.toMatchObject({ code: "reverse_charge_register_refused" });
+    expect(patch).not.toHaveBeenCalled();
+  });
+
   it("treats explicit recalculateTotals=false as the preserving default", async () => {
     const get = vi.fn().mockResolvedValue(h05Invoice());
     const { api, patch } = h05Api(get);
 
     await api.confirmWithTotals(1, true, { recalculateTotals: false });
 
-    expect(get).not.toHaveBeenCalled();
+    expect(get).toHaveBeenCalledTimes(1);
     expect(patch).toHaveBeenCalledTimes(1);
     expect(patch).toHaveBeenCalledWith("/purchase_invoices/1/register", {});
   });
@@ -685,6 +697,30 @@ describe("previewPurchaseInvoiceTotals — createAndSetTotals rules before any w
       );
     });
 
+    it("all items reverse charge with omitted totals writes VAT 0 and gross = net (never the self-assessed VAT)", async () => {
+      for (const gross of [undefined, 100]) {
+        const { preview, body } = await expectPasses(
+          { ...baseData, items: [item(100, "24", { reversed_vat_id: 1 })] },
+          [{ id: 1, total_net_price: 100, vat_amount: 24 }],
+          undefined, gross, true,
+        );
+        expect(preview).toMatchObject({ ok: true, vat: 0, gross: 100 });
+        expect(body.vat_price).toBe(0);
+        expect(body.gross_price).toBe(100);
+        expect(body.items[0].reversed_vat_id).toBe(1);
+      }
+    });
+
+    it("mixed ordinary and reverse-charge items with omitted totals take VAT from the ordinary rows only", async () => {
+      const { body } = await expectPasses(
+        { ...baseData, items: [item(100, "24"), item(50, "24", { reversed_vat_id: 1 })] },
+        [{ id: 1, total_net_price: 100, vat_amount: 24 }, { id: 2, total_net_price: 50, vat_amount: 12 }],
+        undefined, undefined, true,
+      );
+      expect(body.vat_price).toBe(24);
+      expect(body.gross_price).toBe(174);
+    });
+
     it("a reverse-charge credit note −100 / 0 / −100 passes", async () => {
       const { body } = await expectPasses(
         { ...baseData, items: [item(-100, "24", { reversed_vat_id: 1 })] },
@@ -693,6 +729,29 @@ describe("previewPurchaseInvoiceTotals — createAndSetTotals rules before any w
       );
       expect(body.vat_price).toBe(0);
       expect(body.gross_price).toBe(-100);
+    });
+  });
+
+  describe("header gross = net + invoice VAT", () => {
+    it("refuses an explicit gross that is not net + VAT before create (100 / 24 / 150)", async () => {
+      await expectRefusedBeforeCreate({ ...baseData, items: [item(100, "24")] }, 24, 150, true, "purchase_totals_mismatch");
+    });
+
+    it("builds an omitted gross from the invoice VAT, not the item VAT (10.03 + 2.40 = 12.43)", async () => {
+      const { preview, body } = await expectPasses(
+        { ...baseData, items: [item(10.03, "24")] },
+        [{ id: 1, total_net_price: 10.03, vat_amount: 2.41 }],
+        2.4, undefined, true,
+      );
+      expect(preview).toMatchObject({ ok: true, vat: 2.4, gross: 12.43 });
+      expect(body.gross_price).toBe(12.43);
+    });
+
+    it("refuses a folded non-VAT gross that differs from the items' gross", async () => {
+      await expectRefusedBeforeCreate(
+        { ...baseData, items: [item(10, "-", { project_no_vat_gross_price: 12 }), item(20, "-", { project_no_vat_gross_price: 24 })] },
+        0, 40, false, "purchase_totals_mismatch",
+      );
     });
   });
 

@@ -1063,9 +1063,9 @@ describe("AccountingDocumentOperations.create", () => {
     // reaches the drift compare (an out-of-rule total is refused earlier,
     // also with zero mutation).
     ["item account", { items: [{ custom_title: "Teenus", cl_purchase_articles_id: 1, purchase_accounts_id: 5900, total_net_price: 10, vat_rate_dropdown: "20" }] }],
-    ["item amount", { items: [{ custom_title: "Teenus", cl_purchase_articles_id: 1, purchase_accounts_id: 5000, total_net_price: 10.01, vat_rate_dropdown: "20" }] }],
-    ["vat_price", { vatPrice: 2.01 }],
-    ["gross_price", { grossPrice: 999 }],
+    ["item amount", { items: [{ custom_title: "Teenus", cl_purchase_articles_id: 1, purchase_accounts_id: 5000, total_net_price: 10.01, vat_rate_dropdown: "20" }], grossPrice: 12.01 }],
+    ["vat_price", { vatPrice: 2.01, grossPrice: 12.01 }],
+    ["gross_price", { items: [{ custom_title: "Teenus", cl_purchase_articles_id: 1, purchase_accounts_id: 5000, total_net_price: 10.02, vat_rate_dropdown: "20" }], grossPrice: 12.02 }],
     ["base_gross_price", { baseGrossPrice: 55 }],
     ["liability account", { liabilityAccountsId: 2210 }],
     ["block_on_duplicate", { blockOnDuplicate: true }],

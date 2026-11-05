@@ -278,6 +278,22 @@ describe("non-VAT company: no reverse charge", () => {
   });
 });
 
+describe("reverseChargeRegisterRefusal", () => {
+  const rc = { custom_title: "Cloud", total_net_price: 100, vat_rate_dropdown: "24", vat_amount: 24, reversed_vat_id: 1 } as PurchaseInvoiceItem;
+  const ordinary = { custom_title: "Other", total_net_price: 100, vat_rate_dropdown: "24", vat_amount: 24 } as PurchaseInvoiceItem;
+  const { reverseChargeRegisterRefusal } = purchaseVatDefaults;
+  it("refuses any reverse charge for a company that is not fully VAT-registered", () => {
+    expect(reverseChargeRegisterRefusal({ vat_price: 0, items: [rc] }, false)).toMatch(/not fully VAT-registered/);
+    expect(reverseChargeRegisterRefusal({ vat_price: 0, items: [ordinary] }, false)).toBeUndefined();
+  });
+  it("for a full company accepts invoice VAT = ordinary rows' VAT and refuses a charged VAT on reverse-charge rows", () => {
+    expect(reverseChargeRegisterRefusal({ vat_price: 0, items: [rc] }, true)).toBeUndefined();
+    expect(reverseChargeRegisterRefusal({ vat_price: 24, items: [ordinary, rc] }, true)).toBeUndefined();
+    expect(reverseChargeRegisterRefusal({ vat_price: 24, items: [rc] }, true)).toMatch(/charged invoice VAT 24/);
+    expect(reverseChargeRegisterRefusal({ vat_price: 48, items: [ordinary, rc] }, true)).toBeDefined();
+  });
+});
+
 describe("M21 validateNonVatItem", () => {
   it("treats null as absence and rejects every normalized non-dash VAT conflict without mutation", () => {
     const validator = (purchaseVatDefaults as any).validateNonVatItem;
