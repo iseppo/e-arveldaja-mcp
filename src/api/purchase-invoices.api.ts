@@ -326,7 +326,7 @@ export function resolvePurchaseInvoiceTotals(input: {
     // Only a per-line rounding residue (≤ 1 cent per item) may be absorbed.
     // A larger gap means the explicit totals disagree with the items; a
     // reverse-charge item under a charged invoice VAT is refused.
-    const chargedVatDiff = roundMoney(vatPrice - chargedItemVat);
+    const chargedVatDiff = (cents(vatPrice) - cents(chargedItemVat)) / 100;
     if (Math.abs(chargedVatDiff) > roundMoney(0.01 * items.length) + 1e-9) {
       return {
         ok: false,
@@ -340,7 +340,7 @@ export function resolvePurchaseInvoiceTotals(input: {
   }
   // The residue is the gap to the CHARGED rows' VAT: a reverse-charge row's
   // self-assessed VAT is never part of it, and never absorbs it.
-  const vatDiff = vatPrice !== undefined ? roundMoney(vatPrice - chargedItemVat) : 0;
+  const vatDiff = vatPrice !== undefined ? (cents(vatPrice) - cents(chargedItemVat)) / 100 : 0;
   if (items && items.length > 0 && vatPrice !== undefined && isVatRegistered && vatDiff !== 0) {
     const lastItem = items[items.length - 1]!;
     if (isReversed(lastItem)) {

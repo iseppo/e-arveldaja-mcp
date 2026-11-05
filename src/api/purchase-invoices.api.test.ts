@@ -719,6 +719,17 @@ describe("previewPurchaseInvoiceTotals — createAndSetTotals rules before any w
       expect(previewPurchaseInvoiceTotals({ ...baseData, items: [item(-0.03, "24")] } as never, -0.005, -0.03, true)).toMatchObject({ ok: false, code: "purchase_totals_mismatch" });
     });
 
+    it("computes the VAT residue in whole cents: a fractional-cent header VAT that rounds to the row VAT has no residue", () => {
+      const ordinary = previewPurchaseInvoiceTotals({ ...baseData, items: [item(4.19, "24")] } as never, 1.005, 5.2, true);
+      expect(ordinary).toMatchObject({ ok: true, gross: 5.2 });
+      expect(ordinary).not.toHaveProperty("lastItemGross");
+      const rcLast = previewPurchaseInvoiceTotals(
+        { ...baseData, items: [item(4.19, "24"), item(1, "24", { reversed_vat_id: 1 })] } as never, 1.005, 6.2, true,
+      );
+      expect(rcLast).toMatchObject({ ok: true, gross: 6.2 });
+      expect(rcLast).not.toHaveProperty("lastItemGross");
+    });
+
     it("a reverse-charge item with a charged header VAT (V 24 / G 124) is refused before create", async () => {
       await expectRefusedBeforeCreate(
         { ...baseData, items: [item(100, "24", { reversed_vat_id: 1 })] },
