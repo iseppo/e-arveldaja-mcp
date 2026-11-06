@@ -64,6 +64,11 @@ import {
 import { buildOwnerExpenseVatReviewGuidance } from "../estonian-accounting-guidance.js";
 import { todayInTallinn } from "../local-date.js";
 import { isStrictDate } from "../strict-date.js";
+import type { RuntimeSafetyContext } from "../runtime-safety-context.js";
+import type { PlanRecord, StoredExecutionPlan, PlanStoreErrorCode } from "../plan-store.js";
+import { canonicalPlanJson, stripUndefinedDeep } from "./camt-plan.js";
+
+const DIVIDEND_PLAN_DOMAIN = "dividend_package";
 
 function requiresOwnerExpenseVatReview(accountName: string | undefined, description: string): boolean {
   const { isPassengerCar, isEntertainmentOrHospitality } = classifyExpenseForVat(`${accountName ?? ""} ${description}`);
@@ -259,7 +264,10 @@ export async function computeOwnerExpenseJournalProjection(
   if (deductible_vat_amount !== undefined && deductible_vat_amount < 0) {
     return { ok: false, error: toolError({ error: `deductible_vat_amount must not be negative (got ${deductible_vat_amount}).` }) };
   }
-  const vatRegistered = await isCompanyVatRegistered(api);
+  const vatRegistered = await isCompanyVatRegistered(api, {
+    purchaseDate: effective_date,
+    ...(vat_deduction_mode === "none" ? { preRegistrationVatDeductionApproved: false } : {}),
+  });
   const vatAcc = vat_account ?? DEFAULT_VAT_ACCOUNT;
   const payAcc = payable_account ?? DEFAULT_OWNER_PAYABLE_ACCOUNT;
   // Round the gross VAT whether it came from vat_rate or was supplied
@@ -593,13 +601,17 @@ export async function bookOwnerExpenseFromProjection(
  */
 export interface DividendPackagePayload {
   dry_run?: true;
+  plan_handle?: string;
   error?: string;
   error_code?:
     | DividendCapacityHoldCode
     | "approved_annual_report_figures_required"
     | "approved_report_year_out_of_range"
     | "dividend_target_invalid"
-    | "dividend_key_conflict";
+    | "dividend_key_conflict"
+    | "plan_handle_required"
+    | "plan_drift"
+    | PlanStoreErrorCode;
   missing?: string[];
   holds?: DividendCapacityHold[];
   details?: string[];
@@ -683,7 +695,7 @@ export async function bookOwnerExpenseReimbursement(
   return bookOwnerExpenseFromProjection(api, projected.projection, options);
 }
 
-export function registerEstonianTaxTools(server: McpServer, api: ApiContext): void {
+export function registerEstonianTaxTools(server: McpServer, api: ApiContext, runtimeSafetyContext: RuntimeSafetyContext): void {
 
   registerTool(server, "prepare_dividend_package",
     `Calculate dividend CIT (${currentCitRate().formatted} from ${CIT_RATE_TIMELINE[CIT_RATE_TIMELINE.length - 1].from}; earlier dates date-gated) and create draft journal entries. ` +
@@ -695,7 +707,7 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
     "Hard-blocks a net dividend above that, or a gross (net + CIT) that would push net assets below share capital + restricted reserves (lg 2, unconfirmed and later journals reserved), unless force=true; force never lifts a hold or a ledger imbalance. Reports max_net_dividend. " +
     "One journal per shareholder+date: identical retry → duplicate, different amount → dividend_key_conflict. " +
     "Attach the profit-distribution decision to the journal with attach_document. " +
-    "Previews by default (dry_run=true): show the preview and get explicit user approval, then call again with dry_run=false to create the draft journal.",
+    "Previews by default (dry_run=true), returning a single-use plan_handle: after explicit user approval, call with identical inputs, dry_run=false and that handle. Changed inputs or proposed journal refuse with plan_drift; nothing is written.",
     {
       net_dividend: z.number().finite().describe("Net dividend amount to shareholder (EUR)"),
       shareholder_client_id: coerceId.describe("Shareholder client ID"),
@@ -712,9 +724,29 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
       restricted_reserve_accounts: z.array(z.number().int()).optional().describe("Accounts whose balances ÄS §157(2) makes non-distributable (net assets must stay above share capital + these reserves). Default: auto-detect every 'Kohustuslik reservkapital' account (active or inactive) AND always the standard reserve number 2940, so a funded-but-renamed 2940 is never missed; only booked balances raise the floor, so unfunded accounts add nothing. If your chart has REPURPOSED 2940 to a distributable reserve, pass this list explicitly (e.g. [] for no floor, or your real reserve account) to override the 2940 default. Explicit accounts need only exist (inactive OK)."),
       force: z.boolean().optional().describe("Book even if the ÄS § 157 lg 1 or lg 2 amount check fails (only alongside e.g. a capital reduction). Never overrides a hold (approved-report mismatch, unverified amounts, history or draft holds, invalid targets) or a ledger-imbalance block. Default false."),
       dry_run: z.boolean().optional().describe("Preview calculation, legality checks, and postings without creating a journal (default true). Set false only after the user explicitly approves the previewed journal."),
+      plan_handle: z.string().optional().describe("Required with dry_run=false: single-use handle from the approved preview, with the same inputs"),
     },
     { ...create, title: "Prepare Dividend Distribution" },
-    async ({ net_dividend: rawNetDividend, shareholder_client_id, effective_date, approved_report_year, approved_retained_earnings, approved_profit_for_year, ledger_difference_acknowledged, retained_earnings_account, dividend_payable_account, tax_payable_account, income_tax_expense_account, share_capital_account, restricted_reserve_accounts, force, dry_run = true }) => {
+    async ({ net_dividend: rawNetDividend, shareholder_client_id, effective_date, approved_report_year, approved_retained_earnings, approved_profit_for_year, ledger_difference_acknowledged, retained_earnings_account, dividend_payable_account, tax_payable_account, income_tax_expense_account, share_capital_account, restricted_reserve_accounts, force, dry_run = true, plan_handle }) => {
+      const refusePlan = (error_code: string, error: string) => toolError({ error_code, error, note: "Nothing was written." });
+      const normalizedArgs = stripUndefinedDeep({
+        net_dividend: rawNetDividend, shareholder_client_id, effective_date, approved_report_year,
+        approved_retained_earnings, approved_profit_for_year, ledger_difference_acknowledged,
+        retained_earnings_account, dividend_payable_account, tax_payable_account, income_tax_expense_account,
+        share_capital_account, restricted_reserve_accounts, force: force === true,
+      }) as PlanRecord;
+      let boundPlan: StoredExecutionPlan | undefined;
+      if (!dry_run) {
+        if (!plan_handle) return refusePlan("plan_handle_required", "Run the dividend preview and obtain approval, then pass its plan_handle with dry_run=false.");
+        try {
+          boundPlan = runtimeSafetyContext.planStore.consume(plan_handle, DIVIDEND_PLAN_DOMAIN);
+        } catch (error) {
+          return refusePlan((error as { code?: string }).code ?? "plan_handle_invalid", "The approved dividend plan is unavailable. Run a new preview.");
+        }
+        if (canonicalPlanJson(boundPlan.normalizedArgs) !== canonicalPlanJson(normalizedArgs)) {
+          return refusePlan("plan_drift", "The dividend inputs differ from the approved preview. Run and approve a new preview.");
+        }
+      }
       // Estonian CIT rate on dividends: date-keyed per TuMS § 50
       // (20/80 pre-2025, 22/78 from 2025-01-01).
       const citRate = getCitRateForDate(effective_date);
@@ -923,6 +955,10 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
         postings,
       };
       const calculation = { net_dividend, cit_rate: citRate.formatted, cit_amount: cit, gross_dividend: grossDividend };
+      const proposalFingerprint = canonicalPlanJson({ ...journalData, document_number: documentNumber });
+      if (boundPlan && (boundPlan.privatePayload as { fingerprint?: unknown }).fingerprint !== proposalFingerprint) {
+        return refusePlan("plan_drift", "The proposed dividend journal changed after preview. Run and approve a new preview.");
+      }
       const bookingSummary = {
         retained_earnings_account: retainedAccount,
         retained_earnings_debit: net_dividend,
@@ -1273,11 +1309,18 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
         }
 
         if (dry_run) {
+          const planHandle = runtimeSafetyContext.planStore.issue(DIVIDEND_PLAN_DOMAIN, {
+            normalizedArgs, sourceIdentities: [], liveSnapshot: {},
+            commands: [{ id: "dividend", category: "dividend_journal" }],
+            counts: { journals: 1 }, totals: { net_dividend, cit, gross_dividend: grossDividend },
+            exclusions: [], reviews: [], privatePayload: { fingerprint: proposalFingerprint },
+          });
           return {
             content: [{
               type: "text",
               text: toMcpJson({
                 dry_run: true,
+                plan_handle: planHandle,
                 calculation,
                 booking: bookingSummary,
                 proposed_journal: { ...journalData, title: wrapUntrustedOcr(journalData.title), document_number: documentNumber },
@@ -1288,7 +1331,7 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
                 net_assets_check: netAssetsCheck,
                 ...(warnings.length > 0 && { warnings }),
                 compliance_notes: complianceNotes,
-                note: "No journal created. Set dry_run=false to execute.",
+                note: "No journal created. After approval, pass the same inputs, dry_run=false and this single-use plan_handle. Execution rechecks the fresh ledger.",
               }),
             }],
           };

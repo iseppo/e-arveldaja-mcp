@@ -1120,7 +1120,7 @@ class ReadingDocumentOperations {
       // The printed order / cart number goes into the notes; several distinct ones bind nothing.
       const orderReferenceNote = printedOrderReferenceNote(packet);
       if (supplierClient?.id !== undefined) {
-        isVatReg = await isCompanyVatRegistered(this.api);
+        isVatReg = await isCompanyVatRegistered(this.api, { purchaseDate: values.invoice_date });
         knownIban = sameIban(values.supplier_iban, supplierClient.bank_account_no) ? values.supplier_iban ?? undefined : undefined;
         const suggestion = await computeBookingSuggestion(this.api, { clients_id: supplierClient.id, description: currentDescription(input.booking) });
         bookingNotes = decisionNotes(suggestion);
@@ -1361,7 +1361,7 @@ class ReadingDocumentOperations {
           if (canonicalPlanJson(decisionNotes(suggestion)) !== canonicalPlanJson(plan.booking_notes) || requiredDimensionChoices(suggestion, source).length) {
             holds.push({ code: "reading_booking_drift" });
           }
-          isVatReg = await isCompanyVatRegistered(this.api);
+          isVatReg = await isCompanyVatRegistered(this.api, { purchaseDate: final.invoice_date });
           const knownIban = sameIban(final.supplier_iban, supplierClient.bank_account_no) ? final.supplier_iban ?? undefined : undefined;
           const reference = printedPaymentReference(packet);
           booking = await buildReadingBooking(this.api, final, plan.supplier_client_id, plan.items_source as unknown as ReadingItemsSource,
@@ -1528,7 +1528,7 @@ class ReadingDocumentOperations {
       if (latest.status !== "PROJECT" || draftFingerprint(latest) !== plan.draft_fingerprint) {
         return fail<ConfirmReadingResult>("draft_changed", "The draft changed after it was created and reviewed; it is not registered. Review it in e-arveldaja.", "never");
       }
-      const confirmVatReg = await isCompanyVatRegistered(this.api);
+      const confirmVatReg = await isCompanyVatRegistered(this.api, { purchaseDate: latest.create_date });
       const reverseChargeRefusal = reverseChargeRegisterRefusal(latest, confirmVatReg);
       if (reverseChargeRefusal !== undefined) {
         return fail<ConfirmReadingResult>("reverse_charge_register_refused", `The draft is not registered: ${reverseChargeRefusal}. Review it in e-arveldaja.`, "never");

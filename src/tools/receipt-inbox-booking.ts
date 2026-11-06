@@ -7,6 +7,7 @@ import { DEFAULT_LIABILITY_ACCOUNT } from "../accounting-defaults.js";
 import { roundMoney } from "../money.js";
 import { REDUCED_VAT_RATES, STANDARD_VAT_RATE_TIMELINE, standardVatRateOn, vatRatesInForceOn } from "../estonian-tax-rules.js";
 import { isProjectTransaction } from "../transaction-status.js";
+import { PurchaseVatHistoricalReviewError } from "../company-vat-status.js";
 import { snapshotBankTransaction, compareBankTransactionMaterial, snapshotLinkedInvoice, TransactionMaterialDriftError } from "../banking/transaction-material-snapshot.js";
 import { withPurchaseInvoiceLock, scanPurchaseIntakeDuplicates } from "../documents/purchase-invoice-lock.js";
 import { draftFingerprint, draftReadbackMismatches } from "../documents/purchase-draft-verification.js";
@@ -161,7 +162,7 @@ export function resolveReceiptVatRateDropdown(
  * Notes carry codes and numbers only (no untrusted text).
  */
 export function prepareReceiptInvoiceItem(
-  context: Pick<ReceiptProcessingContext, "isVatRegistered" | "purchaseArticlesWithVat">,
+  context: Pick<ReceiptProcessingContext, "isVatRegistered" | "purchaseArticlesWithVat" | "fullVatRegistrationFrom">,
   extracted: ExtractedReceiptFields,
   bookingSuggestion: BookingSuggestion,
   description: string,
@@ -177,11 +178,14 @@ export function prepareReceiptInvoiceItem(
  * last row); otherwise the single synthetic item. The checks of prepareReceiptInvoiceItem apply.
  */
 export function prepareReceiptInvoiceItems(
-  context: Pick<ReceiptProcessingContext, "isVatRegistered" | "purchaseArticlesWithVat">,
+  context: Pick<ReceiptProcessingContext, "isVatRegistered" | "purchaseArticlesWithVat" | "fullVatRegistrationFrom">,
   extracted: ExtractedReceiptFields,
   bookingSuggestion: BookingSuggestion,
   description: string,
 ): { ok: true; items: PurchaseInvoiceItem[]; grossTotal: number } | { ok: false; notes: string[] } {
+  if (context.isVatRegistered && context.fullVatRegistrationFrom && extracted.invoice_date && extracted.invoice_date < context.fullVatRegistrationFrom) {
+    return { ok: false, notes: [new PurchaseVatHistoricalReviewError(extracted.invoice_date, context.fullVatRegistrationFrom).message] };
+  }
   const itemNetAmount = extracted.total_net
     ?? (extracted.total_gross !== undefined && extracted.total_vat !== undefined
       ? roundMoney(extracted.total_gross - extracted.total_vat)

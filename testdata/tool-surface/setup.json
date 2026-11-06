@@ -2,9 +2,9 @@
   "profile": "setup",
   "measurement": {
     "toolCount": 131,
-    "toolsListBytes": 154155,
-    "descriptionsBytes": 23217,
-    "inputSchemasBytes": 99379,
+    "toolsListBytes": 156072,
+    "descriptionsBytes": 23761,
+    "inputSchemasBytes": 100752,
     "largestTool": {
       "name": "import_wise_transactions",
       "bytes": 5627
@@ -2356,7 +2356,7 @@
         "openWorldHint": false,
         "readOnlyHint": false
       },
-      "description": "Create a draft purchase invoice. Direct-call contract: pass exact invoice vat_price/gross_price; non-EUR requires cl_currencies_id + currency_rate (foreign units per 1 EUR, e.g. USD 1.08); base_* may lock actual EUR settlement.",
+      "description": "Create a draft purchase invoice. Purchases before full VAT registration require explicit owner review of historical deduction. Direct-call contract: pass exact invoice vat_price/gross_price; non-EUR requires cl_currencies_id + currency_rate (foreign units per 1 EUR, e.g. USD 1.08); base_* may lock actual EUR settlement.",
       "execution": {
         "taskSupport": "forbidden"
       },
@@ -2446,6 +2446,10 @@
           "number": {
             "description": "Invoice number",
             "type": "string"
+          },
+          "pre_registration_vat_deduction_approved": {
+            "description": "Only after owner review of a purchase dated before full VAT registration: false = no input-VAT deduction (non-deductible rows required); true = owner approved a statutory deduction exception. Omit to hold for review.",
+            "type": "boolean"
           },
           "term_days": {
             "description": "Payment term in days",
@@ -2584,7 +2588,7 @@
         "openWorldHint": false,
         "readOnlyHint": false
       },
-      "description": "Confirm and lock a purchase invoice without changing approved totals. Totals correction requires a fresh approved preview.",
+      "description": "Confirm and lock a purchase invoice without changing approved totals. Purchases before full VAT registration require explicit owner review of historical deduction. Totals correction requires a fresh approved preview.",
       "execution": {
         "taskSupport": "forbidden"
       },
@@ -2650,6 +2654,10 @@
           "plan_handle": {
             "pattern": "^[A-Za-z0-9_-]{43}$",
             "type": "string"
+          },
+          "pre_registration_vat_deduction_approved": {
+            "description": "Only after owner review of a purchase dated before full VAT registration: false = no input-VAT deduction (non-deductible rows required); true = owner approved a statutory deduction exception. Omit to hold for review.",
+            "type": "boolean"
           },
           "recalculate_totals": {
             "type": "boolean"
@@ -4370,7 +4378,7 @@
         "openWorldHint": false,
         "readOnlyHint": false
       },
-      "description": "Calculate dividend CIT (22/78 from 2025-01-01; earlier dates date-gated) and create draft journal entries. Only the NET dividend debits retained earnings; the CIT books as income-tax expense (P&L 'Tulumaks', Kulud 8900–8999). ÄS § 157 lg 1 starts from the owner's APPROVED annual report: pass approved_report_year and, from that report's balance sheet, approved_retained_earnings = line 'Eelmiste perioodide jaotamata kasum (kahjum)' and approved_profit_for_year = line 'Aruandeaasta kasum (kahjum)'. Ask the owner or read them from the approved report; never compute them from the books. The tool cross-checks them against the ledger at that year end (a difference holds the dividend) and subtracts every equity distribution booked since, drafts and later dates included. Hard-blocks a net dividend above that, or a gross (net + CIT) that would push net assets below share capital + restricted reserves (lg 2, unconfirmed and later journals reserved), unless force=true; force never lifts a hold or a ledger imbalance. Reports max_net_dividend. One journal per shareholder+date: identical retry → duplicate, different amount → dividend_key_conflict. Attach the profit-distribution decision to the journal with attach_document. Previews by default (dry_run=true): show the preview and get explicit user approval, then call again with dry_run=false to create the draft journal.",
+      "description": "Calculate dividend CIT (22/78 from 2025-01-01; earlier dates date-gated) and create draft journal entries. Only the NET dividend debits retained earnings; the CIT books as income-tax expense (P&L 'Tulumaks', Kulud 8900–8999). ÄS § 157 lg 1 starts from the owner's APPROVED annual report: pass approved_report_year and, from that report's balance sheet, approved_retained_earnings = line 'Eelmiste perioodide jaotamata kasum (kahjum)' and approved_profit_for_year = line 'Aruandeaasta kasum (kahjum)'. Ask the owner or read them from the approved report; never compute them from the books. The tool cross-checks them against the ledger at that year end (a difference holds the dividend) and subtracts every equity distribution booked since, drafts and later dates included. Hard-blocks a net dividend above that, or a gross (net + CIT) that would push net assets below share capital + restricted reserves (lg 2, unconfirmed and later journals reserved), unless force=true; force never lifts a hold or a ledger imbalance. Reports max_net_dividend. One journal per shareholder+date: identical retry → duplicate, different amount → dividend_key_conflict. Attach the profit-distribution decision to the journal with attach_document. Previews by default (dry_run=true), returning a single-use plan_handle: after explicit user approval, call with identical inputs, dry_run=false and that handle. Changed inputs or proposed journal refuse with plan_drift; nothing is written.",
       "execution": {
         "taskSupport": "forbidden"
       },
@@ -4419,6 +4427,10 @@
           "net_dividend": {
             "description": "Net dividend amount to shareholder (EUR)",
             "type": "number"
+          },
+          "plan_handle": {
+            "description": "Required with dry_run=false: single-use handle from the approved preview, with the same inputs",
+            "type": "string"
           },
           "restricted_reserve_accounts": {
             "description": "Accounts whose balances ÄS §157(2) makes non-distributable (net assets must stay above share capital + these reserves). Default: auto-detect every 'Kohustuslik reservkapital' account (active or inactive) AND always the standard reserve number 2940, so a funded-but-renamed 2940 is never missed; only booked balances raise the floor, so unfunded accounts add nothing. If your chart has REPURPOSED 2940 to a distributable reserve, pass this list explicitly (e.g. [] for no floor, or your real reserve account) to override the 2940 default. Explicit accounts need only exist (inactive OK).",
@@ -4778,7 +4790,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Dry-run calendar-year close per RIK's e-arveldaja method: unresolved items, balance check, existing-close detection, and the two drafts — Dec 31 result entry (profit D 9000 / K 2970) and Jan 1 transfer (D 2970 / K 2960). Revenue/expense accounts are not zeroed.",
+      "description": "Dry-run calendar-year close per RIK's e-arveldaja method: unresolved items, balance check, existing-close detection, and the two drafts — Dec 31 result entry (profit D 9000 / K 2970) and Jan 1 transfer (D 2970 / K 2960). Revenue/expense accounts are not zeroed. Returns a single-use plan_handle for execution after owner approval; changed options or proposals require a new preview.",
       "execution": {
         "taskSupport": "forbidden"
       },
@@ -4786,8 +4798,12 @@
         "$schema": "http://json-schema.org/draft-07/schema#",
         "additionalProperties": false,
         "properties": {
+          "allow_additional_transfer": {
+            "description": "Acknowledge that a smaller same-direction 2970 → 2960 transfer for the year already exists on 1 January and include its proposed remainder in the reviewed plan (transfers on other dates or ambiguous ones always need manual review)",
+            "type": "boolean"
+          },
           "reserve_capital_account": {
-            "description": "Reserve capital account override for reserve_capital_amount",
+            "description": "Reserve capital account override for reserve_capital_amount; must independently be an Omakapital reserve, distinct from the other closing accounts",
             "maximum": 9007199254740991,
             "minimum": -9007199254740991,
             "type": "integer"
@@ -4849,7 +4865,7 @@
         "openWorldHint": false,
         "readOnlyHint": false
       },
-      "description": "Create the missing RIK year-end closing entries from prepare_year_end_close as draft journals (never books an existing entry twice). Requires confirm=true; review/register separately.",
+      "description": "Create the missing RIK year-end closing entries from prepare_year_end_close as draft journals (never books an existing entry twice). Requires confirm=true and the single-use plan_handle from the owner's approved preview, with identical year/options and fresh proposals; drift refuses before writing. Review/register separately.",
       "execution": {
         "taskSupport": "forbidden"
       },
@@ -4858,15 +4874,19 @@
         "additionalProperties": false,
         "properties": {
           "allow_additional_transfer": {
-            "description": "Acknowledge that a smaller same-direction 2970 → 2960 transfer for the year already exists on 1 January and book the proposed remainder anyway (transfers on other dates or ambiguous ones always need manual review)",
+            "description": "Acknowledge that a smaller same-direction 2970 → 2960 transfer for the year already exists on 1 January and include its proposed remainder in the reviewed plan (transfers on other dates or ambiguous ones always need manual review)",
             "type": "boolean"
           },
           "confirm": {
             "description": "Must be true to create the closing journal entries",
             "type": "boolean"
           },
+          "plan_handle": {
+            "description": "Required single-use handle from the approved prepare_year_end_close preview; use the same year and options",
+            "type": "string"
+          },
           "reserve_capital_account": {
-            "description": "Reserve capital account override for reserve_capital_amount",
+            "description": "Reserve capital account override for reserve_capital_amount; must independently be an Omakapital reserve, distinct from the other closing accounts",
             "maximum": 9007199254740991,
             "minimum": -9007199254740991,
             "type": "integer"

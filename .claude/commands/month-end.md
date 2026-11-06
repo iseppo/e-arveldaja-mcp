@@ -140,6 +140,16 @@ Call `run_accounting_report` with report="missing_documents", `date_from`: YYYY-
 
 Report the per-section counts of records without their own directly attached document — purchase invoices, manual journals, and bank transactions (RPS requires a source document on every entry); list the returned rows, and call again with `detail: "full"` when a section is `truncated`. The counts are attachment-only: the journal and transaction sections can include drafts (PROJECT rows) and bank payments linked to an invoice whose own document carries the evidence. Check the linked invoice before calling a source document missing, and never suggest attaching a duplicate copy to such a payment.
 
+<!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:limited-vat -->
+Capability condition for `limited-vat`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `limited_vat`. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.
+
+## Step 4b: Limited taxpayer VAT (only for status `limited`)
+
+Call `limited_vat` with `mode: "status"`. Only when `status` is `limited`: after the month's purchase invoices are confirmed and before the 20th of the next month, call `limited_vat` with `mode: "month"` and `month` (dry run). This is the company's own VAT on foreign services (KMS § 21), not the KMD settlement entries above. Show the owner the proposed journal (`PKM-YYYY-MM`), the KMD figures (rows 1, 4, 6/7 — "verify against the e-MTA KMD instructions") and `payment_deadline`. Offer each `review_items` entry inline (an unclassified supplier: yes/no "counts as a KMS § 10 lg 5 service" → `supplier_classifications`). Only after approval call it again with the same arguments, `execute: true` and the `plan_handle`. `already_booked` needs nothing; a `limited_vat_journal_conflict` needs the owner's review of the named journal. Status `none` with `registration_check` candidates: mention the possible registration duty and offer `mode: "guide"`. Status `unknown` with a `company_vat_status_lookup_*` `reason` (EMTA's KMKR query could not settle the VAT number): show the `explanation` and offer the owner's one-time confirmation inline (`mode: "set_status"`, `status: "full"`, or `"limited"` with `effective_from`; preview, then approval).
+
+Finish any approved VAT booking before Step 5. Read all statements below after that booking, so the summary includes its VAT expense and liability.
+<!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:limited-vat -->
+
 ## Step 5: Compute financial statements
 
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:standard -->
@@ -181,14 +191,6 @@ Call `run_accounting_report` with report="balance_sheet" and `date_to`: the last
 
 Verify balanced (assets = liabilities + equity).
 
-<!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:limited-vat -->
-Capability condition for `limited-vat`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `limited_vat`. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.
-
-## Step 5b: Limited taxpayer VAT (only for status `limited`)
-
-Call `limited_vat` with `mode: "status"`. Only when `status` is `limited`: after the month's purchase invoices are confirmed and before the 20th of the next month, call `limited_vat` with `mode: "month"` and `month` (dry run). This is the company's own VAT on foreign services (KMS § 21), not the KMD settlement entries above. Show the owner the proposed journal (`PKM-YYYY-MM`), the KMD figures (rows 1, 4, 6/7 — "verify against the e-MTA KMD instructions") and `payment_deadline`. Offer each `review_items` entry inline (an unclassified supplier: yes/no "counts as a KMS § 10 lg 5 service" → `supplier_classifications`). Only after approval call it again with the same arguments, `execute: true` and the `plan_handle`. `already_booked` needs nothing; a `limited_vat_journal_conflict` needs the owner's review of the named journal. Status `none` with `registration_check` candidates: mention the possible registration duty and offer `mode: "guide"`. Status `unknown` with a `company_vat_status_lookup_*` `reason` (EMTA's KMKR query could not settle the VAT number): show the `explanation` and offer the owner's one-time confirmation inline (`mode: "set_status"`, `status: "full"`, or `"limited"` with `effective_from`; preview, then approval).
-<!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:limited-vat -->
-
 ## Step 6: Summary report
 
 ```
@@ -214,5 +216,5 @@ If blockers exist, list specific actions needed. Offer to help fix them.
 Capability condition for `year-end`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `prepare_year_end_close`. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.
 
 
-For December (the last month of a calendar fiscal year), offer the year-end close next: `prepare_year_end_close` with `year` (RIK method; dry run).
+For December (the last month of a calendar fiscal year), offer the year-end close next: `prepare_year_end_close` with `year` and the proposed reserve/transfer options (RIK method; dry run). Show the proposed journals and review items. After explicit owner approval, pass the returned single-use `plan_handle`, the same year/options and `confirm: true` to `execute_year_end_close`. A `plan_drift` refusal requires a fresh preview and approval; created journals remain drafts for separate review and registration.
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:year-end -->

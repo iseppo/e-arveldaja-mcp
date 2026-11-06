@@ -1367,6 +1367,8 @@ class ClassificationOperationsImpl implements ClassificationOperations {
             notes.push(`Transaction ${transaction.id} matches an open purchase invoice; skipped — reconcile instead.`);
             continue;
           }
+          // Resolve historical VAT before supplier resolution can create a client.
+          await isCompanyVatRegistered(api, { purchaseDate: transaction.date });
           const supplierResolution = await resolveSupplierFromTransaction(api, clients, transaction, !dryRun, group.category);
           const supplier = supplierResolution.client;
           const supplierId = supplier?.id;

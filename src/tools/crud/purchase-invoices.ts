@@ -31,7 +31,7 @@ import type { RuntimeSafetyContext } from "../../runtime-safety-context.js";
 import { PURCHASE_INVOICE_PDF_CONFIRM_DOMAIN } from "../../purchase-invoice-confirm-plan.js";
 import { PlanStoreError } from "../../plan-store.js";
 import { withPurchaseInvoiceLock } from "../../documents/purchase-invoice-lock.js";
-import { isCompanyVatRegistered } from "../../company-vat-status.js";
+import { isCompanyVatRegistered, PurchaseVatHistoricalReviewError } from "../../company-vat-status.js";
 import {
   coerceId,
   idParam,
@@ -56,6 +56,10 @@ const purchaseInvoiceTotalsCorrectionApprovalSchema = z.object({
   correction_required: z.boolean(),
   approval_digest: z.string().regex(/^[0-9a-f]{64}$/),
 }).strict();
+
+const historicalVatReviewParam = z.boolean().optional().describe(
+  "Only after owner review of a purchase dated before full VAT registration: false = no input-VAT deduction (non-deductible rows required); true = owner approved a statutory deduction exception. Omit to hold for review.",
+);
 
 function totalsCorrectionToolError(error: PurchaseInvoiceTotalsCorrectionError) {
   return toolError({
@@ -91,7 +95,7 @@ export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext,
   });
 
   registerTool(server, "create_purchase_invoice",
-    "Create a draft purchase invoice. Direct-call contract: pass exact invoice vat_price/gross_price; non-EUR requires cl_currencies_id + currency_rate (foreign units per 1 EUR, e.g. USD 1.08); base_* may lock actual EUR settlement.",
+    "Create a draft purchase invoice. Purchases before full VAT registration require explicit owner review of historical deduction. Direct-call contract: pass exact invoice vat_price/gross_price; non-EUR requires cl_currencies_id + currency_rate (foreign units per 1 EUR, e.g. USD 1.08); base_* may lock actual EUR settlement.",
     {
       clients_id: coerceId.describe("Supplier client ID"),
       client_name: z.string().describe("Supplier name"),
@@ -113,13 +117,23 @@ export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext,
       notes: z.string().optional().describe("Notes"),
       bank_ref_number: z.string().optional().describe("Payment reference number"),
       bank_account_no: z.string().optional().describe("Supplier bank account"),
+      pre_registration_vat_deduction_approved: historicalVatReviewParam,
     }, { ...create, title: "Create Purchase Invoice" }, async (rawParams) => {
       // Strip any sandbox markers round-tripped from a wrapped read off EVERY field
       // (client name, number, bank refs, notes, item titles) so no marker is
       // persisted to the invoice or the audit log regardless of which field it lands in.
       const params = desandboxAllStrings(rawParams);
       const client_name = params.client_name;
-      const isVatReg = await isCompanyVatRegistered(api);
+      let isVatReg: boolean;
+      try {
+        isVatReg = await isCompanyVatRegistered(api, {
+          purchaseDate: params.create_date,
+          preRegistrationVatDeductionApproved: params.pre_registration_vat_deduction_approved,
+        });
+      } catch (error) {
+        if (error instanceof PurchaseVatHistoricalReviewError) return toolError(error);
+        throw error;
+      }
       // Parse items from the RAW payload, THEN deep-clean the parsed objects: if
       // items arrives as a JSON string, stripping it before parse would leave the
       // wrapper's framing newlines inside a nested title. Parse-then-clean unwraps.
@@ -354,13 +368,14 @@ export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext,
     });
 
   registerTool(server, "confirm_purchase_invoice",
-    "Confirm and lock a purchase invoice without changing approved totals. Totals correction requires a fresh approved preview.",
+    "Confirm and lock a purchase invoice without changing approved totals. Purchases before full VAT registration require explicit owner review of historical deduction. Totals correction requires a fresh approved preview.",
     {
       ...idParam.shape,
       plan_handle: z.string().regex(/^[A-Za-z0-9_-]{43}$/).optional(),
       recalculate_totals: z.boolean().optional(),
       approved_correction: purchaseInvoiceTotalsCorrectionApprovalSchema.optional(),
-    }, { ...destructive, title: "Confirm Purchase Invoice" }, async ({ id, plan_handle, recalculate_totals, approved_correction }) => {
+      pre_registration_vat_deduction_approved: historicalVatReviewParam,
+    }, { ...destructive, title: "Confirm Purchase Invoice" }, async ({ id, plan_handle, recalculate_totals, approved_correction, pre_registration_vat_deduction_approved }) => {
       let expectedDraftFingerprint: string | undefined;
       if (plan_handle !== undefined) {
         if (!runtimeSafetyContext) return toolError({ category: "runtime_safety_context_required", error: "Confirmation plan runtime unavailable.", mutation_occurred: false });
@@ -386,7 +401,18 @@ export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext,
         );
       }
 
-      const isVatReg = await isCompanyVatRegistered(api);
+      api.purchaseInvoices.invalidateListCache();
+      const draft = await api.purchaseInvoices.get(id);
+      let isVatReg: boolean;
+      try {
+        isVatReg = await isCompanyVatRegistered(api, {
+          purchaseDate: draft.create_date,
+          preRegistrationVatDeductionApproved: pre_registration_vat_deduction_approved,
+        });
+      } catch (error) {
+        if (error instanceof PurchaseVatHistoricalReviewError) return toolError(error);
+        throw error;
+      }
       // Non-VAT: the fresh chart for the register proof (GitHub #63).
       const chart = isVatReg ? {} : { accounts: await api.readonly.getAccounts({ fresh: true }) };
       let result;

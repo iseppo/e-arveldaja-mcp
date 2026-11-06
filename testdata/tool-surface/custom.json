@@ -2,9 +2,9 @@
   "profile": "custom",
   "measurement": {
     "toolCount": 85,
-    "toolsListBytes": 95832,
-    "descriptionsBytes": 13210,
-    "inputSchemasBytes": 62222,
+    "toolsListBytes": 96608,
+    "descriptionsBytes": 13398,
+    "inputSchemasBytes": 62810,
     "largestTool": {
       "name": "import_wise_transactions",
       "bytes": 5627
@@ -1464,7 +1464,7 @@
         "openWorldHint": false,
         "readOnlyHint": false
       },
-      "description": "Create a draft purchase invoice. Direct-call contract: pass exact invoice vat_price/gross_price; non-EUR requires cl_currencies_id + currency_rate (foreign units per 1 EUR, e.g. USD 1.08); base_* may lock actual EUR settlement.",
+      "description": "Create a draft purchase invoice. Purchases before full VAT registration require explicit owner review of historical deduction. Direct-call contract: pass exact invoice vat_price/gross_price; non-EUR requires cl_currencies_id + currency_rate (foreign units per 1 EUR, e.g. USD 1.08); base_* may lock actual EUR settlement.",
       "execution": {
         "taskSupport": "forbidden"
       },
@@ -1554,6 +1554,10 @@
           "number": {
             "description": "Invoice number",
             "type": "string"
+          },
+          "pre_registration_vat_deduction_approved": {
+            "description": "Only after owner review of a purchase dated before full VAT registration: false = no input-VAT deduction (non-deductible rows required); true = owner approved a statutory deduction exception. Omit to hold for review.",
+            "type": "boolean"
           },
           "term_days": {
             "description": "Payment term in days",
@@ -1692,7 +1696,7 @@
         "openWorldHint": false,
         "readOnlyHint": false
       },
-      "description": "Confirm and lock a purchase invoice without changing approved totals. Totals correction requires a fresh approved preview.",
+      "description": "Confirm and lock a purchase invoice without changing approved totals. Purchases before full VAT registration require explicit owner review of historical deduction. Totals correction requires a fresh approved preview.",
       "execution": {
         "taskSupport": "forbidden"
       },
@@ -1758,6 +1762,10 @@
           "plan_handle": {
             "pattern": "^[A-Za-z0-9_-]{43}$",
             "type": "string"
+          },
+          "pre_registration_vat_deduction_approved": {
+            "description": "Only after owner review of a purchase dated before full VAT registration: false = no input-VAT deduction (non-deductible rows required); true = owner approved a statutory deduction exception. Omit to hold for review.",
+            "type": "boolean"
           },
           "recalculate_totals": {
             "type": "boolean"

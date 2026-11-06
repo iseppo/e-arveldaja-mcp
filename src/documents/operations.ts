@@ -210,7 +210,7 @@ export async function computeEffectiveBooking(
 ): Promise<OperationOutcome<EffectiveBookingModel>> {
   const supplier = await api.clients.get(booking.supplierClientId);
   const supplierName = desandboxText(supplier.name);
-  const isVatReg = await isCompanyVatRegistered(api);
+  const isVatReg = await isCompanyVatRegistered(api, { purchaseDate: booking.invoiceDate });
   const purchaseArticles = await getPurchaseArticlesWithVat(api);
   const rawItems = desandboxAllStrings(parsePurchaseInvoiceItems(booking.items));
   // Same guard as create_purchase_invoice and create_purchase_invoice_from_pdf:
@@ -1057,7 +1057,7 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
 
     // GitHub #63 (P4): a non-VAT draft is read fresh; one carrying a VAT account
     // registers only when the non-deductible proof accepts it on a fresh chart.
-    const confirmVatReg = await isCompanyVatRegistered(this.api);
+    const confirmVatReg = await isCompanyVatRegistered(this.api, { purchaseDate: draft.create_date });
     const reverseChargeRefusal = reverseChargeRegisterRefusal(draft, confirmVatReg);
     if (reverseChargeRefusal !== undefined) {
       return fail("reverse_charge_register_refused",
