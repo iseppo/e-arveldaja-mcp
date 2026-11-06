@@ -2,9 +2,9 @@
   "profile": "standard",
   "measurement": {
     "toolCount": 128,
-    "toolsListBytes": 153568,
-    "descriptionsBytes": 23495,
-    "inputSchemasBytes": 99257,
+    "toolsListBytes": 153953,
+    "descriptionsBytes": 23753,
+    "inputSchemasBytes": 99384,
     "largestTool": {
       "name": "import_wise_transactions",
       "bytes": 5627
@@ -4198,7 +4198,7 @@
         "openWorldHint": false,
         "readOnlyHint": false
       },
-      "description": "Clone previous-month sale invoices into DRAFT recurring invoices. dry_run=true previews; invoice numbers are auto-assigned.",
+      "description": "Clone previous-month confirmed sale invoices. dry_run=true (default) previews the exact batch and returns a single-use plan_handle. After owner approval, execute with dry_run=false, that handle and unchanged arguments. Changed source invoices or batch require a fresh preview. Default creates DRAFTs; auto_confirm=true immediately registers them. Invoice numbers are auto-assigned.",
       "execution": {
         "taskSupport": "forbidden"
       },
@@ -4217,6 +4217,10 @@
           "invoice_ids": {
             "description": "Comma-separated source invoice IDs to copy (default: all confirmed from source month)",
             "pattern": "^\\d+(?:\\s*,\\s*\\d+)*$",
+            "type": "string"
+          },
+          "plan_handle": {
+            "description": "Single-use handle from the owner-approved preview; required with dry_run=false",
             "type": "string"
           },
           "source_month": {

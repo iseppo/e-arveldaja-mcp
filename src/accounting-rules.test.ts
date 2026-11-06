@@ -1857,15 +1857,18 @@ describe("M23 connection-scoped accounting-rule storage", () => {
     }
   });
 
-  it("M23 server bootstrap initializes accounting rules from the live connection state", () => {
+  it("M23 server bootstrap initializes accounting rules from the invocation snapshot with a live-state fallback", () => {
     // createMcpServer (and this accounting-rules init block) moved into the
     // src/server/create-server.ts orchestrator during the runtime-bootstrap
     // decomposition; server-bootstrap.ts is now a thin re-export barrel.
     const source = readFileSync(join(process.cwd(), "src", "server", "create-server.ts"), "utf8");
     expect(source).toContain('initAccountingRulesConnection');
-    const call = source.match(/initAccountingRulesConnection\(\(\) => \(\{[\s\S]*?\}\)\);/)?.[0] ?? "";
-    expect(call).toContain('allConfigs[connectionState.activeIndex]?.name ?? "setup"');
-    expect(call).toContain('buildConnectionFingerprint(allConfigs[connectionState.activeIndex]!.config)');
+    const call = source.match(/initAccountingRulesConnection\(\(\) => \{[\s\S]*?\n  \}\);/)?.[0] ?? "";
+    expect(call).toContain('const snapshot = invocationStorage.getStore()');
+    expect(call).toContain('if (snapshot) assertSnapshotCurrent(connectionState, snapshot)');
+    expect(call).toContain('allConfigs[snapshot?.index ?? connectionState.activeIndex]');
+    expect(call).toContain('name: config?.name ?? "setup"');
+    expect(call).toContain('buildConnectionFingerprint(config.config)');
     expect(call).toContain(': "setup"');
     expect(call).not.toContain("connectionFingerprints[");
   });

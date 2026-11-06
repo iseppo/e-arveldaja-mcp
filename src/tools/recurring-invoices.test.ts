@@ -1,8 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
-import { computeRecurringClone, registerRecurringInvoiceTools } from "./recurring-invoices.js";
+import { computeRecurringClone, registerRecurringInvoiceTools, type RecurringInvoicePayload } from "./recurring-invoices.js";
 import { canonicalBusinessText } from "../mcp-json.js";
-import { parseMcpResponse } from "../__fixtures__/mcp-response.js";
+import { parseMcpResponse, parseToolPayload } from "../__fixtures__/mcp-response.js";
+import { createTestRuntimeSafetyContext } from "../__fixtures__/runtime-safety.js";
 
 function buildSaleInvoice(overrides: Record<string, unknown> = {}) {
   return {
@@ -62,7 +63,7 @@ function setupRecurringTool(options: {
     },
   } as any;
 
-  registerRecurringInvoiceTools(server, api);
+  registerRecurringInvoiceTools(server, api, createTestRuntimeSafetyContext());
 
   const registration = server.registerTool.mock.calls.find((call: unknown[]) => call[0] === "create_recurring_sale_invoices");
   if (!registration) throw new Error("Tool was not registered");
@@ -70,7 +71,14 @@ function setupRecurringTool(options: {
   return {
     server,
     api,
-    handler: registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>,
+    // Legacy clone-behavior tests execute an approved preview automatically;
+    // recurring-invoices-plan.test.ts calls the raw handler to test the gate.
+    handler: async (args: Record<string, unknown>) => {
+      const handler = registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+      if (args.dry_run !== false) return handler(args);
+      const preview = parseToolPayload<RecurringInvoicePayload>((await handler({ ...args, dry_run: true })).content[0]!.text);
+      return handler({ ...args, plan_handle: preview.plan_handle });
+    },
   };
 }
 
@@ -187,6 +195,8 @@ describe("recurring invoices tool", () => {
     const { api, handler } = setupRecurringTool({ listAllInvoices: [sourceInvoice] });
     // The first (batch) read does not see the clone; the pre-create re-read does.
     (api.saleInvoices.listAll as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce([sourceInvoice]) // approved preview
+      .mockResolvedValueOnce([sourceInvoice]) // execution drift check
       .mockResolvedValueOnce([sourceInvoice])
       .mockResolvedValue([sourceInvoice, cloneMadeElsewhere]);
 
@@ -198,7 +208,7 @@ describe("recurring invoices tool", () => {
     })).content[0]!.text);
 
     expect(api.saleInvoices.create).not.toHaveBeenCalled();
-    expect(api.saleInvoices.invalidateListCache).toHaveBeenCalledTimes(2);
+    expect(api.saleInvoices.invalidateListCache).toHaveBeenCalledTimes(3);
     expect(payload.results).toEqual([expect.objectContaining({ status: "skipped_existing", existing_id: 98 })]);
   });
 
@@ -207,6 +217,8 @@ describe("recurring invoices tool", () => {
     const second = buildSaleInvoice({ id: 2, number: "ARV-2" });
     const { api, handler } = setupRecurringTool({ listAllInvoices: [first, second] });
     (api.saleInvoices.listAll as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce([first, second]) // approved preview
+      .mockResolvedValueOnce([first, second]) // execution drift check
       .mockResolvedValueOnce([first, second]) // batch read
       .mockResolvedValueOnce([first, second]) // re-read before source 1
       .mockRejectedValueOnce(new Error("upstream 503")); // re-read before source 2
@@ -242,19 +254,19 @@ describe("recurring invoices tool", () => {
       source_month: "2026-01",
       target_date: "2026-02-01",
       target_journal_date: "2026-02-01",
-      dry_run: false,
+      dry_run: true,
     });
 
     const payload = parseMcpResponse(result.content[0]!.text);
 
-    expect(payload.created).toBe(0);
-    expect(payload.skipped_existing).toBe(1);
+    expect(payload.would_create).toBe(0);
+    expect(payload.would_skip_existing).toBe(1);
     expect(payload.results).toEqual([
       expect.objectContaining({
         source_id: 1,
         existing_id: 99,
         existing_number: "ARV-99",
-        status: "skipped_existing",
+        status: "would_skip_existing",
       }),
     ]);
     expect(api.saleInvoices.create).not.toHaveBeenCalled();
@@ -312,7 +324,7 @@ describe("recurring invoices tool", () => {
     })).content[0]!.text);
     expect(payload.source_count).toBe(1);
     expect(payload.created).toBe(1);
-    expect(api.saleInvoices.get).toHaveBeenCalledTimes(1);
+    expect(api.saleInvoices.get).toHaveBeenCalledTimes(3);
     expect(api.saleInvoices.get).toHaveBeenCalledWith(1);
   });
 
@@ -345,7 +357,8 @@ describe("recurring invoices tool", () => {
       source_month: "2026-01", target_date: "2026-02-01", target_journal_date: "2026-02-01", invoice_ids: "1,2,3", dry_run: false,
     })).content[0]!.text);
     expect(executed.created).toBe(1);
-    expect(executed.create_errors).toBe(2);
+    expect(executed.create_errors).toBe(0);
+    expect(executed.results).toHaveLength(1); // only the approved eligible source is executed
     expect(api.saleInvoices.create).toHaveBeenCalledTimes(1);
   });
 
@@ -354,9 +367,9 @@ describe("recurring invoices tool", () => {
     const { api, handler } = setupRecurringTool({ listAllInvoices: [] });
     api.saleInvoices.get.mockResolvedValue(credit);
     const payload = parseMcpResponse((await handler({
-      source_month: "2026-01", target_date: "2026-02-01", target_journal_date: "2026-02-01", invoice_ids: "2", dry_run: false,
+      source_month: "2026-01", target_date: "2026-02-01", target_journal_date: "2026-02-01", invoice_ids: "2", dry_run: true,
     })).content[0]!.text);
-    expect(payload.created).toBe(0);
+    expect(payload.would_create).toBe(0);
     expect((payload.results as Array<Record<string, unknown>>)[0]).toEqual(expect.objectContaining({
       status: "error", error: expect.stringContaining("CREDIT_INVOICE"),
     }));
@@ -416,10 +429,10 @@ describe("recurring invoices tool", () => {
     });
     const { api, handler } = setupRecurringTool({ listAllInvoices: [sourceInvoice, existingClone] });
     const payload = parseMcpResponse((await handler({
-      source_month: "2026-01", target_date: "2026-02-05", target_journal_date: "2026-02-05", dry_run: false,
+      source_month: "2026-01", target_date: "2026-02-05", target_journal_date: "2026-02-05", dry_run: true,
     })).content[0]!.text);
-    expect(payload.created).toBe(0);
-    expect(payload.skipped_existing).toBe(1);
+    expect(payload.would_create).toBe(0);
+    expect(payload.would_skip_existing).toBe(1);
     expect(api.saleInvoices.create).not.toHaveBeenCalled();
   });
 
@@ -563,13 +576,12 @@ describe("recurring invoices tool", () => {
       source_month: "2026-01",
       target_date: "2026-02-01",
       target_journal_date: "2026-02-01",
-      dry_run: false,
+      dry_run: true,
     });
 
     const payload = parseMcpResponse(result.content[0]!.text);
 
-    expect(payload.created).toBe(0);
-    expect(payload.errors).toBe(1);
+    expect(payload.would_create).toBe(0);
     expect(payload.results).toEqual([
       expect.objectContaining({
         source_id: 1,
