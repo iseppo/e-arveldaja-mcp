@@ -536,7 +536,7 @@ export function kmdFigures(invoices: readonly LimitedVatIncludedInvoice[]): Limi
     row_4_vat: sum(invoices, invoice => invoice.vat),
     row_6_eu_services_value: sum(invoices.filter(invoice => invoice.supplier_area === "eu"), invoice => invoice.base_eur),
     row_7_non_eu_services_value: sum(invoices.filter(invoice => invoice.supplier_area === "non_eu"), invoice => invoice.base_eur),
-    note: "Kontrolli ridu e-MTA KMD juhendi järgi (rida 6 = ELi tarnija, rida 7 = muu välismaa tarnija). See server KMD-d ei esita; kui e-arveldaja toetab piiratud maksukohustuslase KMD-d ise, kasuta seda.",
+    note: "Rida 6 = ELi tarnija, rida 7 = ELi-väline tarnija. e-arveldaja KMD-s: kustuta rida \"sh pöördmaksustamisega seotud käive\" ja rida 5 (sisendkäibemaksu maha ei arvata); kui küsitakse, täida rida 12 käsitsi. See server KMD-d ei esita.",
   };
 }
 

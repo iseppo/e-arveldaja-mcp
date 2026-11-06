@@ -247,6 +247,37 @@ describe("limited_vat mode month", () => {
     expect(refused.text).toContain("liability_account");
   });
 
+  it("RIK #15766149: credits the standard output-VAT account 2511 by default, even when 2510 exists", async () => {
+    const state = baseState({ accounts: [
+      makeAccount(5000, "D", "Kulud", "Tarkvara ja IT-teenused"),
+      makeAccount(2510, "C", "Kohustused", "Käibemaksu võlg (km.kogumiskonto)"),
+      makeAccount(2511, "C", "Kohustused", "Käibemaks müügil (täismäär)"),
+    ] });
+    const { call } = setup(state);
+    await setLimited(call);
+    const dry = parseToolPayload<LimitedVatMonthPayload>((await call({ mode: "month", month: "2026-03", supplier_classifications: [{ clients_id: 10, classification: "counts" }] })).text);
+    expect(dry.status).toBe("ready_for_approval");
+    expect(dry.proposed_journal!.postings).toEqual([
+      { accounts_id: 5000, accounts_dimensions_id: null, type: "D", amount: 12 },
+      { accounts_id: 2511, accounts_dimensions_id: null, type: "C", amount: 12 },
+    ]);
+  });
+
+  it("RIK #15766149: refuses the 2510 collection account as liability_account (the KMD-based entry credits it itself)", async () => {
+    const state = baseState({ accounts: [
+      makeAccount(5000, "D", "Kulud", "Tarkvara ja IT-teenused"),
+      makeAccount(2510, "C", "Kohustused", "Käibemaksu võlg (km.kogumiskonto)"),
+      makeAccount(2511, "C", "Kohustused", "Käibemaks müügil (täismäär)"),
+    ] });
+    const { call } = setup(state);
+    await setLimited(call);
+    const refused = await call({ mode: "month", month: "2026-03", liability_account: 2510 });
+    expect(refused.result.isError).toBe(true);
+    expect(refused.text).toContain("limited_vat_liability_account_is_collection");
+    expect(refused.text).toContain("2511");
+    expect(state.writes).toEqual([]);
+  });
+
   it.each(["override", "automatic"])("T2: refuses an expense account as the %s VAT liability target", async (selection) => {
     const state = baseState({ accounts: [makeAccount(5000, "D", "Kulud", "Käibemaksukohustis")] });
     const { call } = setup(state);
