@@ -19,7 +19,6 @@ import {
   statementPeriodFromFileName,
   conversionEvidenceDigest,
   usdCentsToEurCents,
-  usdPoolRecordKey,
   validateUsdPool,
   withUsdPoolLock,
   type ConversionEvidence,

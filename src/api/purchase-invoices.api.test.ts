@@ -1,21 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { PurchaseInvoicesApi, previewPurchaseInvoiceTotals } from "./purchase-invoices.api.js";
 import { cache } from "./base-resource.js";
-import { HttpError, type HttpClient } from "../http-client.js";
+import { HttpError } from "../http-client.js";
 import { draftFingerprint } from "../documents/purchase-draft-verification.js";
 
 vi.mock("../logger.js", () => ({ log: vi.fn() }));
 vi.mock("../progress.js", () => ({ reportProgress: vi.fn().mockResolvedValue(undefined) }));
-
-function makeClient(namespace = "connection:0"): HttpClient {
-  return {
-    cacheNamespace: namespace,
-    get: vi.fn(),
-    post: vi.fn(),
-    patch: vi.fn().mockResolvedValue({ code: 200, messages: [] }),
-    delete: vi.fn(),
-  } as unknown as HttpClient;
-}
 
 function h05Invoice(overrides: Record<string, unknown> = {}) {
   return {

@@ -42,10 +42,6 @@ function setup(options: {
   return { runtime, api, handler };
 }
 
-const AMBIGUOUS_BANKS = [
-  fixtureBankAccount({ accounts_dimensions_id: 7, iban_code: "EE111111111111111111", account_no: "EE111111111111111111" }),
-  fixtureBankAccount({ accounts_dimensions_id: 8, iban_code: "EE222222222222222222", account_no: "EE222222222222222222" }),
-];
 const AMBIGUOUS_DIMS = [fixtureAccountDimension({ id: 7 }), fixtureAccountDimension({ id: 8 })];
 
 // Two candidate dimensions that BOTH carry the statement IBAN: rung 2 (unique

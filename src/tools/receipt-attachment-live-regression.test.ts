@@ -4,10 +4,9 @@ vi.mock("../bank-posting-duplicate-guard.js", () => ({ checkIntakeCashDuplicates
 import { receiptAttachmentTransport, type ReceiptTransportOptions } from "../__fixtures__/receipt-attachment-transport.js";
 import { cache } from "../api/base-resource.js";
 import { HttpError } from "../http-client.js";
-import { PurchaseInvoiceDraftVerificationError, PurchaseInvoiceTotalsCorrectionError } from "../api/purchase-invoices.api.js";
+import { PurchaseInvoiceDraftVerificationError } from "../api/purchase-invoices.api.js";
 import { createAndMaybeMatchPurchaseInvoice } from "./receipt-inbox-booking.js";
 import { sha256Hex } from "./receipt-inbox-files.js";
-import { draftFingerprint } from "../documents/purchase-draft-verification.js";
 
 const bytes = Buffer.from("approved synthetic receipt bytes");
 const snapshot: any = { file: { name: "receipt.pdf", path: "/tmp/receipt.pdf", extension: ".pdf", file_type: "pdf" }, bytes, sha256: sha256Hex(bytes) };

@@ -8,7 +8,6 @@ import { createTestRuntimeSafetyContext } from "../__fixtures__/runtime-safety.j
 import { createExecutionPlanPageHandler } from "../plan-tools.js";
 import {
   LIGHTYEAR_TRADES_PLAN_DOMAIN,
-  LIGHTYEAR_DISTRIBUTIONS_PLAN_DOMAIN,
 } from "./lightyear-plan.js";
 import { randomBytes } from "node:crypto";
 import { HttpError } from "../http-client.js";

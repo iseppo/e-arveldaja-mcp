@@ -449,7 +449,7 @@ describe("H06-C cross-process create-once", () => {
     await acquired;
     let createStarted!: () => void;
     const createSignal = new Promise<void>(resolveCreate => { createStarted = resolveCreate; });
-    create.mockImplementationOnce(async data => {
+    create.mockImplementationOnce(async () => {
       createStarted();
       return { code: 200, messages: [], created_object_id: 999 };
     });

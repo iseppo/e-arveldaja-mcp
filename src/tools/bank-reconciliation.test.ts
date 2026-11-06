@@ -3,7 +3,6 @@ import { z } from "zod";
 import { registerBankReconciliationTools, matchScore, type ReconcileBankTransactionsPayload } from "./bank-reconciliation.js";
 import { parseToolPayload } from "../__fixtures__/mcp-response.js";
 import type {
-  ReconCompactPayload,
   ReconExactMatchPayload,
   ReconInterAccountPayload,
   ReconPlanErrorPayload,
