@@ -1055,6 +1055,34 @@ describe("pdf workflow tools", () => {
       expect(api.purchaseInvoices.confirmWithTotals).not.toHaveBeenCalled();
     });
 
+    it("R2 refuses direct PDF creation when non-VAT own-company identity lookup fails", async () => {
+      const filePath = createTempInvoiceFile("identity-unavailable.pdf", "%PDF-pdf-bytes");
+      mockedResolveFileInput.mockResolvedValue({ path: filePath });
+      const own = { id: 99, name: "Testija Ostja OÜ", code: "16000001", invoice_vat_no: "" };
+      const { handler, api } = setupPdfWorkflowTool("create_purchase_invoice_from_pdf", {
+        clients: { get: vi.fn().mockResolvedValue(own), listAll: vi.fn().mockResolvedValue([own]) },
+        readonly: {
+          getVatInfo: vi.fn().mockResolvedValue({ vat_number: "" }),
+          getInvoiceInfo: vi.fn().mockRejectedValue(new Error("503 invoice settings unavailable")),
+        },
+      });
+
+      const response = await handler(args(filePath, {
+        supplier_client_id: 99,
+        items: JSON.stringify([{ cl_purchase_articles_id: 45, custom_title: "Internet subscription", purchase_accounts_id: 5230, total_net_price: 124, vat_rate_dropdown: "-" }]),
+        vat_price: 0,
+      }));
+
+      expect(response.isError).toBe(true);
+      const payload = parseToolPayload<CreatePurchaseInvoiceFromPdfFailurePayload>(response.content[0]!.text);
+      expect(payload).toMatchObject({ category: "own_company_identity_unavailable", mutation_occurred: false });
+      expect(payload.error).toContain("Nothing was written.");
+      expect(api.readonly.getInvoiceInfo).toHaveBeenCalledWith({ fresh: true });
+      expect(api.purchaseInvoices.createAndSetTotals).not.toHaveBeenCalled();
+      expect(api.purchaseInvoices.uploadDocument).not.toHaveBeenCalled();
+      expect(api.purchaseInvoices.confirmWithTotals).not.toHaveBeenCalled();
+    });
+
     it("refuses an exact live supplier + invoice-number duplicate before any write", async () => {
       const filePath = createTempInvoiceFile("dupnum.pdf", "%PDF-pdf-bytes");
       mockedResolveFileInput.mockResolvedValue({ path: filePath });

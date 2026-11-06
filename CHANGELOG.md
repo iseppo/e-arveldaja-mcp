@@ -10,6 +10,8 @@
 
 ### Fixed
 
+- **Invoices wait when your company cannot be identified well enough to rule out booking to itself.** Details: document preparation and creation, and direct PDF creation, return `own_company_identity_unavailable` before issuing a booking plan or writing when neither a usable own-company name nor a VAT-derived own registry code is available, including when `/invoice_info` fails for a non-VAT company. Retry when the company settings are readable again.
+
 - **Automatic payment booking now keeps the accounts and VAT treatment you approved, even if a later history lookup fails.** Details: classification apply compares each newly resolved supplier and booking with its approved per-transaction projection before creation; a changed account, dimension, VAT configuration or total holds that payment as `plan_drift`.
 - **An invoice cannot be booked to your own company by accidentally choosing its client record.** Details: document preparation and creation, including explicit supplier overrides and direct PDF creation, check the actual selected client against the active company's identity and refuse self-suppliers before writing.
 - **VAT settings corrected after a preview are checked again before booking.** Details: receipt-batch and classification execution bypass the `/vat_info` reference-data cache before resolving VAT treatment and comparing the approved plan; changed treatment requires a new preview.

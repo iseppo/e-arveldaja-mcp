@@ -13,7 +13,7 @@ import { createTestRuntimeSafetyContext } from "../__fixtures__/runtime-safety.j
 import { registerPdfWorkflowTools } from "../tools/pdf-workflow.js";
 import { registerPurchaseInvoiceTools } from "../tools/crud/purchase-invoices.js";
 import { issuePurchaseInvoiceConfirmPlan } from "../purchase-invoice-confirm-plan.js";
-import { readingApi } from "../__fixtures__/document-reading/verified-draft.js";
+import { readingApi, SUPPLIER_ID } from "../__fixtures__/document-reading/verified-draft.js";
 
 vi.mock("../audit-log.js", async importOriginal => ({ ...await importOriginal<typeof import("../audit-log.js")>(), logAudit: vi.fn() }));
 
@@ -126,6 +126,8 @@ describe("actual public PDF create → reviewed confirm registration", () => {
 function directWorld(runtime = createTestRuntimeSafetyContext()) {
   const fake = fakeEarveldaja();
   const api = readingApi({ withHistory: false });
+  // Replacing the reading fixture's readonly API must retain its own-company identity.
+  vi.spyOn(fake.readonly, "getInvoiceInfo").mockResolvedValue({ invoice_company_name: "Ostja AS" });
   Object.assign(api, { purchaseInvoices: fake.purchaseInvoices, readonly: fake.readonly });
   const server = { registerTool: vi.fn() };
   registerPdfWorkflowTools(server as never, api, runtime);
@@ -154,7 +156,7 @@ describe("PDF plan failure ownership and consume guards", () => {
       const original = w.fake.purchaseInvoices.get.bind(w.fake.purchaseInvoices);
       vi.spyOn(w.fake.purchaseInvoices, "get").mockImplementation(async id => ({ ...await original(id), notes: "unexpected" }));
     }
-    const result = payload(await w.handler("create_purchase_invoice_from_pdf")(sourceArgs()));
+    const result = payload(await w.handler("create_purchase_invoice_from_pdf")({ ...sourceArgs(), supplier_client_id: SUPPLIER_ID }));
     expect(result, JSON.stringify(result)).toMatchObject({ confirmation_status: "held", mutation_occurred: true,
       automatic_retry_forbidden: true, document_uploaded: true });
     expect(result.created_invoice_id).toBeTypeOf("number");

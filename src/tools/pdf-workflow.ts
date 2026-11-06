@@ -35,6 +35,7 @@ import { resolveSupplierDefault } from "../resolution/supplier-default-resolutio
 import { computeMinOcrConfidence, mixedVatRateLinesText, detectCurrencyEquivalentAmbiguity, extractOrderReferences, extractReceiptFieldsFromText, inferSupplierCountry, toIsoDate, type FieldProvenance, type ExtractedReceiptFields } from "./receipt-extraction.js";
 import { resolveSupplierInternal, type SupplierResolution } from "./supplier-resolution.js";
 import { isOwnCompanyClient, resolveOwnCompanyIdentifiers } from "./own-company-identity.js";
+import { normalizeCompanyName } from "../company-name.js";
 import { buildExtractionConfidenceSignals } from "./receipt-inbox.js";
 import { textHazardSignals } from "./document-text-hazards.js";
 import {
@@ -1359,6 +1360,9 @@ export function registerCreatePurchaseInvoiceFromPdfTool(server: McpServer, api:
       const supplier = await api.clients.get(params.supplier_client_id);
       const allClients = await api.clients.listAll().catch(() => [supplier]);
       const own = await resolveOwnCompanyIdentifiers(api, allClients, { fresh: true });
+      if (normalizeCompanyName(own.ownCompanyName) === "" && !own.ownCompanyRegistryCode?.trim()) {
+        return toolError({ category: "own_company_identity_unavailable", error: "Your own company's name and registry code could not be established, so the selected supplier cannot be checked against your own company. Retry when invoice settings are available. Nothing was written.", retry: "never", mutation_occurred: false } satisfies CreatePurchaseInvoiceFromPdfFailurePayload);
+      }
       if (isOwnCompanyClient(supplier, own)) {
         return toolError({ category: "supplier_is_own", error: "The selected supplier is the active company itself. Select the invoice's vendor and review again. Nothing was written.", retry: "never", mutation_occurred: false } satisfies CreatePurchaseInvoiceFromPdfFailurePayload);
       }
