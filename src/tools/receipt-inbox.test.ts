@@ -1957,6 +1957,16 @@ describe("invalidated-status + invoice-number normalization in receipt duplicate
     expect(findDuplicateInvoice([inv({ number: "INV-1O23" })], 7, "AUTO-20260301-X", "2026-03-01", 50)).toBeUndefined();
   });
 
+  it("blank-number amount/date duplicates require the same normalized currency", async () => {
+    const { findDuplicateInvoice } = await import("./receipt-inbox-matching.js");
+    expect(findDuplicateInvoice([inv({ number: "", cl_currencies_id: "USD" })], 7, "INV-EUR", "2026-03-01", 50, "EUR")).toBeUndefined();
+    expect(findDuplicateInvoice([inv({ number: "USD-1", cl_currencies_id: "USD" })], 7, "", "2026-03-01", 50, "EUR")).toBeUndefined();
+    expect(findDuplicateInvoice([inv({ number: "", cl_currencies_id: " usd " })], 7, "USD-1", "2026-03-01", 50, "usd"))
+      .toMatchObject({ reason: "supplier_amount_date", invoice_id: 5 });
+    expect(findDuplicateInvoice([inv({ number: "" })], 7, "EUR-1", "2026-03-01", 50))
+      .toMatchObject({ reason: "supplier_amount_date", invoice_id: 5 });
+  });
+
   it("payment-receipt cross-reference does not link to a VOID invoice", async () => {
     const { buildReferencedInvoiceForPaymentReceipt } = await import("./receipt-inbox.js");
     expect(buildReferencedInvoiceForPaymentReceipt("INV-2024-01", [inv({ status: "VOID" })], { client_id: 7 })?.matched).toBe(false);

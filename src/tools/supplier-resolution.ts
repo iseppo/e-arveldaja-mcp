@@ -99,7 +99,8 @@ export interface SupplierResolutionOptions {
   /**
    * Fail closed: the caller needs the own-company name to exclude self. Without
    * a non-blank `ownCompanyName` (invoice_info failed, absent or blank) no new
-   * client is previewed or created; existing clients still match.
+   * client is previewed or created. Existing clients may match without the
+   * name only when `ownCompanyRegistryCode` was derived from the company's VAT.
    */
   ownCompanyNameRequired?: boolean;
   /**
@@ -208,6 +209,19 @@ export async function resolveSupplierInternal(
   execute: boolean,
   options?: SupplierResolutionOptions,
 ): Promise<SupplierResolution> {
+  // Match the receipt-batch identity gate before ANY existing-client match:
+  // a newly VAT-registered company's own client can still carry blank/old VAT,
+  // so VAT alone cannot exclude it when invoice settings supplied no name.
+  if (options?.ownCompanyNameRequired === true &&
+      normalizeCompanyName(options.ownCompanyName) === "" && !options.ownCompanyRegistryCode?.trim()) {
+    return {
+      found: false,
+      created: false,
+      requires_manual_review: true,
+      code: "own_company_identity_unavailable",
+      reason: "Your own company's name could not be read from e-arveldaja (invoice settings), and your registry code could not be found from your VAT number either, so it cannot be ruled out that this supplier is your own company. Nothing was created. Retry later, or choose the supplier yourself.",
+    };
+  }
   // Match half — delegated to the pure, extracted match-decision core
   // (self-match #14/#22, H13 strong-identifier conflict, normalized/fuzzy name
   // tiers, and the desandboxText write-boundary canonicalization). Behavior is

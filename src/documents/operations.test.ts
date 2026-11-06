@@ -387,6 +387,35 @@ describe("AccountingDocumentOperations.create", () => {
     expect(api.purchaseInvoices.confirm).not.toHaveBeenCalled();
   }
 
+  it("R2 refuses the actual own-company booking supplier despite a correctly resolved vendor", async () => {
+    const { path, api, ops } = createSetup();
+    const own = fixtureClient({ id: 99, name: "Seppo AI OÜ", code: "16000001", invoice_vat_no: "EE123456789" });
+    api.clients.listAll.mockResolvedValue([supplier(), own]);
+    vi.mocked(api.clients.get).mockResolvedValue(own);
+    const outcome = await ops.prepare({ source: { file_path: path }, booking: { ...bookingFields(), supplierClientId: 99 } });
+    expect(outcome).toMatchObject({ ok: false, error: { code: "supplier_is_own" } });
+    expectNoWrites(api);
+  });
+
+  it("R2 refuses an explicit own-company supplier override before issuing a plan", async () => {
+    const { path, api, ops } = createSetup();
+    const own = fixtureClient({ id: 99, name: "Seppo AI OÜ", code: "16000001", invoice_vat_no: "EE123456789" });
+    api.clients.listAll.mockResolvedValue([supplier(), own]);
+    const outcome = await ops.prepare({ source: { file_path: path }, overrides: { supplier_client_id: 99 }, booking: bookingFields() });
+    expect(outcome).toMatchObject({ ok: false, error: { code: "supplier_is_own" } });
+    expectNoWrites(api);
+  });
+
+  it("R2 rechecks actual supplier against fresh own-company identity before creation", async () => {
+    const { path, sha256, api, ops } = createSetup();
+    const handle = await prepareBookingHandle(ops, path);
+    api.readonly.getInvoiceInfo.mockResolvedValue({ invoice_company_name: "ACME OÜ" });
+    const outcome = await ops.create({ ...baseCreateInput(path, sha256), planHandle: handle });
+    expect(outcome).toMatchObject({ ok: false, error: { code: "supplier_is_own" } });
+    expect(api.readonly.getInvoiceInfo).toHaveBeenCalledWith({ fresh: true });
+    expectNoWrites(api);
+  });
+
   // A document addressed to another company would be booked whole into the
   // wrong books: prepare issues no handle, and create re-checks the document.
   const docWithBuyer = (buyer: string): Awaited<ReturnType<typeof parseDocument>> => {
@@ -545,10 +574,8 @@ describe("AccountingDocumentOperations.create", () => {
     // The fixture company's own VAT is EE123456789.
     vi.mocked(api.clients.get).mockResolvedValue(fixtureClient({ id: 5454, name: "Seppo AI OÜ", code: null, invoice_vat_no: "EE123456789", is_supplier: true }));
     const outcome = await ops.prepare({ source: { file_path: path }, booking: { ...bookingFields(), supplierClientId: 5454 } });
-    expect(outcome.ok).toBe(true);
-    if (!outcome.ok) return;
-    expect(outcome.value.bookingProjection?.supplier_identifier_acknowledged).toBeUndefined();
-    expect(outcome.value.planHandle).toBeUndefined();
+    expect(outcome).toMatchObject({ ok: false, error: { code: "supplier_is_own" } });
+    expectNoWrites(api);
   });
 
   it("create re-reads the acknowledged client: a registry code edited since prepare is plan_drift, zero writes", async () => {

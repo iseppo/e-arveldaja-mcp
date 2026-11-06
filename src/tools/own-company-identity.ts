@@ -1,6 +1,8 @@
 import type { ApiContext } from "./crud/shared.js";
 import type { Client } from "../types/api.js";
 import { deriveOwnCompanyRegistryCode } from "./receipt-inbox.js";
+import { normalizeVatValue } from "../document-identifiers.js";
+import { sameCompanyIdentity } from "../company-name.js";
 
 /**
  * The active company's own VAT number and registry code, used to keep receipt
@@ -21,6 +23,15 @@ export interface OwnCompanyIdentifiers {
   ownIbans?: string[];
   /** The company's own name (`invoice_info.invoice_company_name`) — the buyer, never the supplier. */
   ownCompanyName?: string;
+}
+
+/** Check the actual selected client, including explicit booking overrides. */
+export function isOwnCompanyClient(client: Pick<Client, "name" | "code" | "invoice_vat_no">, own: OwnCompanyIdentifiers): boolean {
+  const vat = normalizeVatValue(client.invoice_vat_no);
+  const ownVat = normalizeVatValue(own.ownCompanyVat);
+  const code = client.code?.replace(/\D/g, "");
+  const ownCode = own.ownCompanyRegistryCode?.replace(/\D/g, "");
+  return Boolean((vat && vat === ownVat) || (code && code === ownCode) || sameCompanyIdentity(client.name, own.ownCompanyName));
 }
 
 /**

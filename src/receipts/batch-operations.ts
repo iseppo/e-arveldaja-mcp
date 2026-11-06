@@ -1081,7 +1081,7 @@ class ReceiptBatchOperationsImpl implements ReceiptBatchOperations {
         this.api.transactions.invalidateListCache();
         this.api.journals.invalidateListCache();
       }
-      const vatInfo = await this.api.readonly.getVatInfo();
+      const vatInfo = await this.api.readonly.getVatInfo(input.dryRun ? undefined : { fresh: true });
       const ownCompanyVat = vatInfo.vat_number?.trim() || undefined;
       const companyVatStatus = requireKnownCompanyVatStatus(await companyVatStatusFromInfo(vatInfo));
       const context: ReceiptProcessingContext = {
