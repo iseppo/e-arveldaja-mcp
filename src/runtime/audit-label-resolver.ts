@@ -83,7 +83,9 @@ export function createAuditLabelResolver(opts: {
 
     const pending = (async () => {
       try {
-        const invoiceInfo = await connectionContexts[index]!.readonly.getInvoiceInfo();
+        // Hidden lookup the user never asked for: its 401 must not feed the
+        // shared per-server 401 brake (stale connections would block healthy ones).
+        const invoiceInfo = await connectionContexts[index]!.readonly.getInvoiceInfo({ excludeFromAuthBrake: true });
         const hadPrevious = resolvedAuditCompanyNames.has(index);
         const previousCompanyName = resolvedAuditCompanyNames.get(index);
         failedResolutionAt.delete(index);

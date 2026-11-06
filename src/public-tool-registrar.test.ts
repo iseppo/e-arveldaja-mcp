@@ -151,7 +151,10 @@ describe("PublicToolRegistrar", () => {
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await Promise.all([bootstrap.server.connect(serverTransport), client.connect(clientTransport)]);
     try {
-      const response = await client.callTool({ name: "list_connections", arguments: {} });
+      // Connection/setup tools never send the lookup; any other tool resolves it first.
+      expect((await client.callTool({ name: "list_connections", arguments: {} })).isError).not.toBe(true);
+      expect(fetchMock).not.toHaveBeenCalled();
+      const response = await client.callTool({ name: "get_session_log", arguments: {} });
       expect(response.isError).not.toBe(true);
       expect(fetchMock).toHaveBeenCalledTimes(1);
       expect(String(fetchMock.mock.calls[0]![0])).toContain("/invoice_info");
@@ -171,7 +174,7 @@ describe("PublicToolRegistrar", () => {
     const [metadataClientTransport, metadataServerTransport] = InMemoryTransport.createLinkedPair();
     await Promise.all([metadataBootstrap.server.connect(metadataServerTransport), metadataClient.connect(metadataClientTransport)]);
     try {
-      const response = await metadataClient.callTool({ name: "list_connections", arguments: {} });
+      const response = await metadataClient.callTool({ name: "get_session_log", arguments: {} });
       expect(response.isError).not.toBe(true);
       expect(shouldNotFetch).not.toHaveBeenCalled();
     } finally {
