@@ -761,7 +761,12 @@ describe("receipt_batch when the own-company identity read fails (identity revie
         (await handler({ folder_path: FOLDER, accounts_dimensions_id: 100, detail: "full", ...args })).content[0]!.text);
   }
 
-  it("existing-supplier receipts are still processed; a new supplier is held with a reason and zero writes", async () => {
+  const OWN_VAT_CLIENT = { id: 3, name: "Testija Ostja OÜ", code: "87654321", invoice_vat_no: "EE102809963", is_client: true, is_supplier: false, is_deleted: false, cl_code_country: "EST" };
+  const EXISTING_CLIENT = { id: 7, name: EXISTING_NAME, code: EXISTING_CODE, is_client: false, is_supplier: true, is_deleted: false, cl_code_country: "EST" };
+  const unavailable = () => new HttpError("temporary", 503, "GET", "/invoice_info");
+
+  /** Two receipts: existing.pdf (supplier client 7) and new.pdf (a supplier the register confirms, no client yet). */
+  function setupBatch(clients: Array<Record<string, unknown>>, getInvoiceInfo: ReturnType<typeof vi.fn>) {
     const setupFetch = globalThis.fetch;
     vi.stubGlobal("fetch", (url: string, init?: RequestInit) => {
       if (url.startsWith(EMTA_KMKR_ORIGIN)) return setupFetch(url, init);
@@ -777,15 +782,32 @@ describe("receipt_batch when the own-company identity read fails (identity revie
     // Snapshots are <index>.pdf in listing order: 0.pdf is existing.pdf, 1.pdf is new.pdf.
     vi.mocked(parseDocument).mockImplementation((async (path: string) =>
       parsed(path.endsWith("1.pdf") ? PRINT_RECEIPT : EXISTING_RECEIPT)) as never);
-    const { api, rec } = makeApi([
-      { id: 7, name: EXISTING_NAME, code: EXISTING_CODE, is_client: false, is_supplier: true, is_deleted: false, cl_code_country: "EST" },
-    ]);
-    const getInvoiceInfo = vi.fn().mockRejectedValue(new HttpError("temporary", 503, "GET", "/invoice_info"));
+    const { api, rec } = makeApi(clients);
     (api as unknown as { readonly: Record<string, unknown> }).readonly.getInvoiceInfo = getInvoiceInfo;
-    const run = receiptBatchHandler(api);
+    return { run: receiptBatchHandler(api), rec };
+  }
 
+  it("(a) the first read fails, the fresh retry succeeds: an ordinary batch", async () => {
+    const getInvoiceInfo = vi.fn().mockRejectedValueOnce(unavailable()).mockResolvedValue({ invoice_company_name: "Testija Ostja OÜ" });
+    const { run, rec } = setupBatch([EXISTING_CLIENT], getInvoiceInfo);
     const dryPayload = await run({ mode: "dry_run" });
-    expect(getInvoiceInfo).toHaveBeenCalled();
+    expect(getInvoiceInfo).toHaveBeenCalledTimes(2);
+    expect(getInvoiceInfo.mock.calls[1]![0]).toEqual({ fresh: true });
+    expect(dryPayload.protection_state).toBeUndefined();
+    const dry = dryPayload.result;
+    expect(fileStatus(dry.results)).toEqual([["existing.pdf", "dry_run_preview"], ["new.pdf", "dry_run_preview"]]);
+    if (!dry.approved_manifest || !dry.plan_handles) throw new Error("dry run minted no approval");
+    const created = (await run({ mode: "create", approved_manifest: dry.approved_manifest, plan_handle: dry.plan_handles.create })).result;
+    expect(fileStatus(created.results)).toEqual([["existing.pdf", "created"], ["new.pdf", "created"]]);
+    expect(rec.clientsCreate).toHaveBeenCalledTimes(1);
+    expect(rec.invoicesCreate).toHaveBeenCalledTimes(2);
+  });
+
+  it("(b) both reads fail, our registry code is known from our VAT: the existing supplier is booked, the new one held", async () => {
+    const getInvoiceInfo = vi.fn().mockRejectedValue(unavailable());
+    const { run, rec } = setupBatch([OWN_VAT_CLIENT, EXISTING_CLIENT], getInvoiceInfo);
+    const dryPayload = await run({ mode: "dry_run" });
+    expect(getInvoiceInfo).toHaveBeenCalledTimes(2);
     expect(dryPayload.protection_state).toBeUndefined();
     const dry = dryPayload.result;
     const rows = dry.results as Row[];
@@ -800,6 +822,31 @@ describe("receipt_batch when the own-company identity read fails (identity revie
     // The existing supplier's invoice is the only write; the held receipt wrote nothing.
     expect(rec.invoicesCreate).toHaveBeenCalledTimes(1);
     expect(rec.invoicesCreate.mock.calls[0]![0]).toMatchObject({ clients_id: 7, number: "B-5" });
+    expect(rec.clientsCreate).not.toHaveBeenCalled();
+    expect(rec.confirm).not.toHaveBeenCalled();
+  });
+
+  it("(c) both reads fail and our registry code cannot be found from our VAT: every receipt is held, zero writes", async () => {
+    const getInvoiceInfo = vi.fn().mockRejectedValue(unavailable());
+    const { run, rec } = setupBatch([EXISTING_CLIENT], getInvoiceInfo);
+    const dryPayload = await run({ mode: "dry_run" });
+    expect(dryPayload.protection_state).toBeUndefined();
+    const dry = dryPayload.result;
+    const rows = dry.results as Row[];
+    expect(fileStatus(rows)).toEqual([["existing.pdf", "needs_review"], ["new.pdf", "needs_review"]]);
+    for (const row of rows) {
+      expect(row.supplier_resolution?.code).toBe("own_company_identity_unavailable");
+      expect(row.notes.join(" ")).toContain("own company's name could not be read");
+    }
+    // The owner still sees what was read.
+    expect((rows[0] as unknown as { extracted?: { invoice_number?: string } }).extracted?.invoice_number).toBe("B-5");
+
+    for (const mode of ["create", "create_and_confirm"] as const) {
+      if (!dry.approved_manifest || !dry.plan_handles) break;
+      const executed = (await run({ mode, approved_manifest: dry.approved_manifest, plan_handle: dry.plan_handles[mode] })).result;
+      expect(fileStatus(executed.results)).toEqual([["existing.pdf", "needs_review"], ["new.pdf", "needs_review"]]);
+    }
+    expect(rec.invoicesCreate).not.toHaveBeenCalled();
     expect(rec.clientsCreate).not.toHaveBeenCalled();
     expect(rec.confirm).not.toHaveBeenCalled();
   });

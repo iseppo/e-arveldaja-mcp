@@ -1104,17 +1104,16 @@ describe("process_receipt_batch own-company identity protection (M09)", () => {
     return { handler, api, create };
   }
 
-  it("degrades (dry_run) when invoice_info transiently fails: runs without the own-company name", async () => {
-    const { handler } = setup(vi.fn().mockRejectedValue(new HttpError("temporary", 503, "GET", "/invoice_info")));
+  it("holds every receipt (dry_run) when invoice_info fails twice and no registry code derives from our VAT", async () => {
+    const getInvoiceInfo = vi.fn().mockRejectedValue(new HttpError("temporary", 503, "GET", "/invoice_info"));
+    const { handler } = setup(getInvoiceInfo);
     const result = await handler({ folder_path: "/tmp/receipts", accounts_dimensions_id: 10 });
     const payload = parseMcpResponse(result.content[0]!.text);
+    expect(getInvoiceInfo).toHaveBeenCalledTimes(2);
+    expect(getInvoiceInfo.mock.calls[1]![0]).toEqual({ fresh: true });
     expect(payload.protection_state).toBeUndefined();
-    expect(payload.mode).toBe("DRY_RUN");
-    // The resolver gets no own name, so it holds any new supplier itself
-    // (own_company_identity_unavailable); an existing supplier still matches.
-    const options = vi.mocked(resolveSupplierInternal).mock.calls.at(-1)![4];
-    expect(options).toMatchObject({ ownCompanyNameRequired: true });
-    expect(options).not.toHaveProperty("ownCompanyName");
+    expect(payload.results[0]).toMatchObject({ status: "needs_review", supplier_resolution: { code: "own_company_identity_unavailable" } });
+    expect(resolveSupplierInternal).not.toHaveBeenCalled();
   });
 
   it("still refuses a create without the dry-run manifest when invoice_info transiently fails", async () => {
@@ -1125,7 +1124,7 @@ describe("process_receipt_batch own-company identity protection (M09)", () => {
     expect(create).not.toHaveBeenCalled();
   });
 
-  it("books a manifest-valid existing-supplier receipt despite a transient identity failure", async () => {
+  it("books a manifest-valid receipt when the fresh retry of a failed identity read succeeds", async () => {
     const getInvoiceInfo = vi.fn().mockResolvedValue({ invoice_company_name: "My Company OÜ" });
     const { handler, create } = setup(getInvoiceInfo);
     const approval = await dryRunApproval(handler, { folder_path: "/tmp/receipts", accounts_dimensions_id: 10 });
