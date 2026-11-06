@@ -90,7 +90,11 @@ describe("T5 historical purchase VAT review", () => {
 
   it("holds the shared document booking path before selecting deductible VAT defaults", async () => {
     const { api } = harness("create_purchase_invoice");
-    const documentApi = { ...api, clients: { get: vi.fn().mockResolvedValue({ id: 1, name: "Cleaning OÜ" }) } };
+    const documentApi = { ...api, clients: {
+      get: vi.fn().mockResolvedValue({ id: 1, name: "Cleaning OÜ" }),
+      // Own-company record (VAT-derived registry code) so the own-company veto can run.
+      listAll: vi.fn().mockResolvedValue([{ id: 1, name: "Cleaning OÜ", code: "10000001" }, { id: 2, name: "Own OÜ", code: "12345678", invoice_vat_no: "EE123456789" }]),
+    } };
     await expect(computeEffectiveBooking(documentApi as never, {
       supplierClientId: 1, invoiceNumber: "OCT-31", invoiceDate: "2026-10-31", journalDate: "2026-10-31",
       termDays: 14, items: purchase.items,
