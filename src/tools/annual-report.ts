@@ -471,9 +471,9 @@ interface ExistingCloseJournals {
 // API INITIAL opening journals are never closing entries.
 function findExistingCloseJournals(allJournals: Journal[], year: number, ids: CloseAccounts): ExistingCloseJournals {
   const live = allJournals.filter((journal) => !journal.is_deleted && !isOpeningBalanceJournal(journal));
-  // A legacy close zeroed P&L INTO 2970 — a title-only look-alike that never
+  // A legacy close zeroed P&L INTO 2970 — a YECL-numbered journal that never
   // touches 2970 is not a close (it stays excluded from the P&L, though).
-  const legacy = live.filter((journal) => isYearEndClosingJournal(journal, year) &&
+  const legacy = live.filter((journal) => isYearEndClosingJournal(journal, year, ids.currentYearProfit) &&
     (journal.postings ?? []).some((posting) => !posting.is_deleted && posting.accounts_id === ids.currentYearProfit));
   return {
     legacy,
@@ -702,16 +702,16 @@ async function analyzeYearEndClose(
     api.saleInvoices.listAll(),
     api.purchaseInvoices.listAll(),
   ]);
+  const ids = resolveCloseAccounts(accounts, options.reserveCapitalAccount);
   const [yearEndBalances, yearProfitAndLossBalances] = await Promise.all([
     computeAllBalances(api, undefined, to, { preloadedAccounts: accounts, preloadedJournals: allJournals }),
     computeAllBalances(api, from, to, {
       preloadedAccounts: accounts,
       preloadedJournals: allJournals,
-      journalFilter: (journal) => !isYearEndClosingJournal(journal, year),
+      journalFilter: (journal) => !isYearEndClosingJournal(journal, year, ids.currentYearProfit),
     }),
   ]);
 
-  const ids = resolveCloseAccounts(accounts, options.reserveCapitalAccount);
   const reserveAmount = roundMoney(options.reserveCapitalAmount ?? 0);
   const accountErrors = validateAccounts(accounts, [
     { id: ids.calculatedResult, label: "Calculated result account (Arvestuslik koondtulemus)" },
@@ -1095,6 +1095,7 @@ export async function buildAnnualReportData(api: ApiContext, year: number): Prom
   ]);
 
   const preloaded = { preloadedAccounts: accounts, preloadedJournals: allJournals };
+  const closeAccounts = resolveCloseAccounts(accounts);
   // Start-of-period position for the cash flow's working-capital deltas and
   // opening equity (ROE). Normally the balances at the prior year-end; but when
   // the selected opening balance is dated INSIDE the report year (first year on
@@ -1112,12 +1113,11 @@ export async function buildAnnualReportData(api: ApiContext, year: number): Prom
       : computeAllBalances(api, undefined, priorTo, preloaded),
     computeAllBalances(api, from, to, {
       ...preloaded,
-      journalFilter: (journal) => !isYearEndClosingJournal(journal, year),
+      journalFilter: (journal) => !isYearEndClosingJournal(journal, year, closeAccounts.currentYearProfit),
     }),
   ]);
 
   const cashAccountIds = new Set(accounts.filter(isCashFlowCashAccount).map(account => account.id));
-  const closeAccounts = resolveCloseAccounts(accounts);
   const currentYearProfitAccountId = closeAccounts.currentYearProfit;
   const calculatedResultAccountId = closeAccounts.calculatedResult;
   const warnings: string[] = [];
@@ -1410,6 +1410,7 @@ export async function buildAnnualReportData(api: ApiContext, year: number): Prom
   const cashFlow = calculateAnnualCashFlow({
     accounts, journals: allJournals, dateFrom: from, dateTo: to,
     baseOperating: baseCashFromOperatingActivities, calculatedResultAccount: calculatedResultAccountId,
+    currentYearProfitAccount: currentYearProfitAccountId,
     categoryRule: getCashFlowCategoryRule, evidence: cashFlowEvidence,
   });
   const netCashFromOperatingActivities = cashFlow.operating_bridge.adjusted_total;

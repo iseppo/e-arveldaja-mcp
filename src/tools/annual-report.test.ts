@@ -643,6 +643,20 @@ describe("buildAnnualReportData", () => {
     expect(await m20Profit([...makeM20BaseJournals(), closingJournal])).toBe(50);
   });
 
+  it("M20 keeps a Dec-31 accrual titled like a year-end close (no 2970 posting) in P&L and out of prepare duplicates", async () => {
+    const accrual = makeJournal("2025-12-31", [
+      makePosting(5990, "D", 15),
+      makePosting(2920, "C", 15),
+    ], { id: 1103, registered: true, title: "Aasta lõppkanne 2025 – periodiseerimised" });
+    const journals = [...makeM20BaseJournals(), accrual];
+
+    const payload = await m20Prepare(journals);
+    const profit = await m20Profit(journals);
+
+    expect.soft(payload.existing_year_end_close_journals).toEqual([]);
+    expect.soft(profit).toBe(35);
+  });
+
   it("M20 prepare detects Estonian and English title-only closes as existing", async () => {
     const journals = [
       ...makeM20BaseJournals(),
@@ -762,10 +776,12 @@ describe("buildAnnualReportData", () => {
       effective_date: "2025-12-31",
       document_number: "YECL-2025",
       title: "Aasta lõppkanne 2025",
+      postings: [makePosting(3100, "D", 60), makePosting(2970, "C", 60)],
     };
+    const noProfitPosting = [makePosting(5990, "D", 60), makePosting(2920, "C", 60)];
     const vectors: Array<{
       name: string;
-      journal: Pick<Journal, "document_number" | "effective_date" | "title">;
+      journal: Pick<Journal, "document_number" | "effective_date" | "title" | "postings">;
       year?: number;
       expected: boolean;
     }> = [
@@ -773,6 +789,9 @@ describe("buildAnnualReportData", () => {
       { name: "valid inferred Estonian title", journal: { ...canonical, document_number: null }, expected: true },
       { name: "valid inferred English title", journal: { ...canonical, document_number: null, title: "YEAR-END CLOSE 2025" }, expected: true },
       { name: "valid explicit year", journal: canonical, year: 2025, expected: true },
+      { name: "document without 2970 posting", journal: { ...canonical, postings: noProfitPosting }, expected: true },
+      { name: "title-only without 2970 posting", journal: { ...canonical, document_number: null, postings: noProfitPosting }, expected: false },
+      { name: "title-only with deleted 2970 posting", journal: { ...canonical, document_number: null, postings: [{ ...makePosting(2970, "C", 60), is_deleted: true }] }, expected: false },
       { name: "missing date", journal: { ...canonical, effective_date: undefined as unknown as string }, expected: false },
       { name: "empty date", journal: { ...canonical, effective_date: "" }, expected: false },
       { name: "invalid date", journal: { ...canonical, effective_date: "not-a-date" }, expected: false },
@@ -792,7 +811,7 @@ describe("buildAnnualReportData", () => {
     ];
 
     for (const vector of vectors) {
-      expect.soft(detector(vector.journal, vector.year), vector.name).toBe(vector.expected);
+      expect.soft(detector(vector.journal, vector.year, 2970), vector.name).toBe(vector.expected);
     }
   });
 
@@ -1799,11 +1818,11 @@ describe("RIK year-end close (Äriühingu majandusaasta lõpetamiskanded e-arvel
       expect(acknowledged.docs).toEqual([]);
     });
 
-    it("a title-only legacy look-alike that never posts to 2970 is not entry 1 (still excluded from the P&L)", async () => {
+    it("a title-only legacy look-alike that never posts to 2970 is not entry 1 and stays in the P&L", async () => {
       const lookAlike = makeJournal("2025-12-31", [makePosting(5990, "D", 5), makePosting(1020, "C", 5)], { id: 3503, title: "Aasta lõppkanne 2025" });
       const payload = await prepare([...profitYear(), lookAlike]);
       expect(payload.existing_year_end_close_journals).toEqual([]);
-      expect(payload.current_year_result.net_profit).toBe(50);
+      expect(payload.current_year_result.net_profit).toBe(45);
       expect(docNumbers(payload)).toEqual(["YEC-RESULT-2025", "YEC-RETAINED-2025"]);
     });
 
