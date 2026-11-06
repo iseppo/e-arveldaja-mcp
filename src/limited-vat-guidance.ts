@@ -5,7 +5,7 @@
  * only the facts verified on LIMITED_VAT_GUIDANCE_VERIFIED_AT are stated.
  */
 
-export const LIMITED_VAT_GUIDANCE_VERIFIED_AT = "2026-11-04";
+export const LIMITED_VAT_GUIDANCE_VERIFIED_AT = "2026-11-07";
 
 export interface LimitedVatGuidanceSection {
   id: "why" | "what_it_means" | "how_to_register" | "after_registering" | "monthly_routine" | "oss_caveat";
@@ -74,9 +74,10 @@ const SECTIONS: readonly LimitedVatGuidanceSection[] = [
     id: "monthly_routine",
     title: "Igakuine töö",
     paragraphs: [
-      "Pärast kuu ostuarvete kinnitamist ja enne järgmise kuu 20. kuupäeva: käivita limited_vat mode \"month\" selle kuu kohta (eelvaade), kinnita tarnijate liigitus ja vaata kanne üle; pärast omaniku nõusolekut loob server kande PKM-AAAA-KK (deebet kulukontod, kreedit käibemaksukohustis) ja kinnitab selle.",
-      "Väljund annab ka KMD read: rida 1 ja rida 4 (maksustatav väärtus ja käibemaks) ning saadud teenused rida 6 (ELi tarnija) / rida 7 (muu välismaa tarnija) — kontrolli neid e-MTA KMD juhendi järgi.",
-      "See server KMD-d ei esita. Kui e-arveldaja toetab piiratud maksukohustuslase KMD-d ise, kasuta seda.",
+      "Pärast kuu ostuarvete kinnitamist ja enne järgmise kuu 20. kuupäeva: käivita limited_vat mode \"month\" selle kuu kohta (eelvaade), kinnita tarnijate liigitus ja vaata kanne üle; pärast omaniku nõusolekut loob server kande PKM-AAAA-KK (deebet kulukontod, kreedit 2511 \"Käibemaks müügil (täismäär)\") ja kinnitab selle.",
+      "Käibedeklaratsioon e-arveldajas (RIK-i juhis, 06.11.2026): rida 1 ja rida 4 on maksustatav väärtus ja käibemaks; saadud teenuse väärtus läheb ritta 6 (ELi tarnija) või ritta 7 (ELi-väline tarnija). Need summad on limited_vat mode \"month\" väljundis. Kui KMD on eeltäidetud, kustuta rida \"sh pöördmaksustamisega seotud käive\" ja rida 5: piiratud maksukohustuslane sisendkäibemaksu maha ei arva. Kui salvestamisel küsitakse rida 12 (tasumisele kuuluv käibemaks), täida see käsitsi.",
+      "Esitatud KMD alusel teeb e-arveldaja ise kande D 2511 / K 2510. Seepärast krediteerib PKM-kanne kontot 2511, mitte 2510: pärast KMD kannet on 2511 null ja võlg on kontol 2510. Kontot 2510 PKM-kandes ei kasutata.",
+      "See server KMD-d ei esita.",
       "Maksu tasumine EMTA-le käib nagu tavaliselt ettemaksukonto (1516) kaudu: pangamakse EMTA-le broneeritakse ettemaksukonto täiendusena.",
     ],
   },
@@ -95,6 +96,7 @@ const SOURCES: readonly LimitedVatGuidanceSource[] = [
   { title: "EMTA käsiraamat: piiratud maksukohustuslasena registreerimine" },
   { title: "Rahandusministeeriumi kommentaar (jaanuar 2026): teenuste puhul maksuvaba piirmäära ei ole" },
   { title: "EMTA KMKR numbri kontroll", url: LIMITED_VAT_NUMBER_CHECK_URL },
+  { title: "RIK e-arveldaja kasutajatugi, pöördumine #15766149 (06.11.2026): piiratud maksukohustuslase KMD e-arveldajas, KMD rida 7" },
 ];
 
 export function buildLimitedVatGuidance(): LimitedVatGuidance {

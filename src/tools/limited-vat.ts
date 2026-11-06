@@ -70,8 +70,18 @@ export const LIMITED_VAT_MONTH_DOMAIN = "limited_vat_month";
 /** Upper bound on purchase-invoice detail reads in one month run. */
 const MAX_MONTH_CANDIDATES = 300;
 
-/** "Käibemaksukohustis" / "Arvestatud käibemaks" / "Käibemaksuvõlg" — never guessed beyond these names. */
-const VAT_LIABILITY_NAME_RE = /^(käibemaksukohustis|arvestatud käibemaks|käibemaksuv[õo]lg)$/iu;
+/**
+ * The output-VAT account the KMD-based entry clears. e-arveldaja books every
+ * filed KMD as "EMTA KMD alusel kanne" D 2511 (output VAT) / C 1510 (input VAT)
+ * / remainder to 2510 (live-verified on Seppo AI 2025-2026; RIK confirmed the
+ * D2511/K2510 entry for a limited taxpayer, request #15766149). The PKM journal
+ * must therefore credit the output-VAT account, never the collection account,
+ * or the debt is counted twice. Standard chart name first, then the legacy
+ * names; never guessed beyond these.
+ */
+const VAT_LIABILITY_NAME_RE = /^(käibemaks müügil \(täismäär\)|käibemaksukohustis|arvestatud käibemaks)$/iu;
+/** The KMD collection account (standard 2510 "Käibemaksu võlg (km.kogumiskonto)"); the KMD-based entry credits it itself. */
+const VAT_COLLECTION_NAME_RE = /(km\.?\s*kogumiskonto|^käibemaksu\s*v[õo]lg\b)/iu;
 
 function respond(payload: unknown): CallToolResult {
   return { content: [{ type: "text", text: toMcpJson(payload) }] };
@@ -408,12 +418,17 @@ function resolveLiabilityAccount(accounts: Account[], override: number | undefin
   const found = override ?? findAccountByName(accounts, VAT_LIABILITY_NAME_RE);
   if (found === undefined) {
     return {
-      error: refuse("limited_vat_liability_account_unresolved", "No VAT liability account (\"Käibemaksukohustis\" / \"Arvestatud käibemaks\" / \"Käibemaksuvõlg\") was found in the chart. Pass liability_account explicitly (the account number); it is never guessed."),
+      error: refuse("limited_vat_liability_account_unresolved", "No output-VAT account (\"Käibemaks müügil (täismäär)\", standard 2511; or \"Käibemaksukohustis\" / \"Arvestatud käibemaks\") was found in the chart. Pass liability_account explicitly (the account number of the output-VAT account the KMD entry clears, not the 2510 collection account); it is never guessed."),
     };
   }
   const account = accounts.find(entry => entry.id === found);
   if (!account || account.is_valid === false || account.account_type_est !== "Kohustused") {
     return { error: refuse("limited_vat_liability_account_invalid", `Account ${found} must be an active liability account (Kohustused) in the chart.`) };
+  }
+  if (VAT_COLLECTION_NAME_RE.test((account.name_est ?? "").trim())) {
+    return {
+      error: refuse("limited_vat_liability_account_is_collection", `Account ${found} ("${account.name_est}") is the VAT collection account. The entry e-arveldaja makes from the filed KMD already credits it (D 2511 / K 2510), so crediting it here would count the VAT twice. Use the output-VAT account (standard 2511 "Käibemaks müügil (täismäär)"). / See on käibemaksu kogumiskonto; KMD alusel kanne krediteerib seda ise (D 2511 / K 2510), siin krediteerimine kahekordistaks võla. Kasuta kontot 2511.`),
+    };
   }
   return found;
 }
@@ -782,7 +797,7 @@ export function registerLimitedVatTool(
       status: z.enum(["none", "limited", "full"]).optional().describe("set_status: the company VAT status"),
       effective_from: z.string().refine(isStrictDate, { message: "Expected valid YYYY-MM-DD date" }).optional().describe("set_status: first day the status applies (required for limited: the day the obligation arose)"),
       month: monthSchema.optional().describe("month: the month to compute (YYYY-MM)"),
-      liability_account: z.number().int().positive().optional().describe("month: VAT liability account number (default: by name 'Käibemaksukohustis' / 'Arvestatud käibemaks' / 'Käibemaksuvõlg'; never guessed)"),
+      liability_account: z.number().int().positive().optional().describe("month: output-VAT account number the PKM journal credits (default: by name 'Käibemaks müügil (täismäär)' = standard 2511, else 'Käibemaksukohustis' / 'Arvestatud käibemaks'; the 2510 collection account is refused because the KMD-based entry credits it; never guessed)"),
       supplier_classifications: z.array(z.object({
         clients_id: z.number().int().positive(),
         classification: z.enum(["counts", "excluded"]),
