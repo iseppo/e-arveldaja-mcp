@@ -71,7 +71,6 @@ import {
 } from "../receipts/batch-operations.js";
 import {
   receiptApprovedManifestRequiredError,
-  receiptIdentityRetryableError,
   renderReceiptBatchCompact,
   renderReceiptBatchFull,
   type ReceiptBatchCompactInput,
@@ -836,9 +835,10 @@ export function deriveOwnCompanyRegistryCode(
  *    configuration — older API clients / test stubs never had it, and VAT-based
  *    self-match still protects booking. Stay best-effort: `available` with no
  *    name, preserving the pre-M09 behaviour.
- *  - **Endpoint present but the call throws** (e.g. a transient 5xx): we cannot
- *    tell whether identity would have blocked a self-match, so we FAIL CLOSED
- *    (`retryable_error`) rather than silently book with weakened protection.
+ *  - **Endpoint present but the call throws** (e.g. a transient 5xx):
+ *    `retryable_error`. The accounting-inbox receipt dry run fails closed on it;
+ *    `receipt_batch` runs without the name (existing suppliers match, new
+ *    suppliers are held per item as `own_company_identity_unavailable`).
  */
 export async function loadOwnCompanyIdentity(
   api: ApiContext,
@@ -1435,13 +1435,11 @@ export function registerReceiptInboxTools(
         : undefined,
     );
     const workflowFolderPath = receiptFolder.path;
-    // M09: the active company's identity feeds the #22 self-match guard. If a
-    // PRESENT invoice_info endpoint fails transiently, fail closed BEFORE any
-    // snapshot/mutation instead of booking with weakened protection.
+    // The active company's name feeds the #22 self-match guard. If invoice_info
+    // fails, degrade as resolve_supplier does: run without the name, so existing
+    // suppliers still match, while every receipt that would create a new supplier
+    // is held per item (`own_company_identity_unavailable`, ownCompanyNameRequired).
     const ownCompanyIdentity = await loadOwnCompanyIdentity(api);
-    if (ownCompanyIdentity.status === "retryable_error") {
-      return { ok: false, error: receiptIdentityRetryableError(ownCompanyIdentity.reason) };
-    }
     // H15: creating/confirming without the dry-run manifest is refused so the
     // approved-bytes binding below cannot be bypassed.
     if (!dryRun && args.approved_manifest === undefined) {
@@ -1467,7 +1465,9 @@ export function registerReceiptInboxTools(
       ...(args.transaction_date_to !== undefined ? { transactionDateTo: args.transaction_date_to } : {}),
       ...(normalizedApprovedManifest !== undefined ? { approvedManifest: normalizedApprovedManifest } : {}),
       directoryAccessOptions: directoryAccessOptions(receiptFolder.expectedCanonicalPath),
-      ...(ownCompanyIdentity.invoiceCompanyName !== undefined ? { ownCompanyName: ownCompanyIdentity.invoiceCompanyName } : {}),
+      ...(ownCompanyIdentity.status === "available" && ownCompanyIdentity.invoiceCompanyName !== undefined
+        ? { ownCompanyName: ownCompanyIdentity.invoiceCompanyName }
+        : {}),
       ...(args.plan_handle !== undefined ? { planHandle: args.plan_handle } : {}),
       ...(dryRun && receiptFolder.sourceBinding !== undefined ? { sourceBinding: receiptFolder.sourceBinding } : {}),
     });
