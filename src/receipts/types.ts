@@ -49,6 +49,12 @@ export interface ReceiptBatchRunInput {
   /** invoice_company_name from the already-loaded own-company identity. */
   readonly ownCompanyName?: string;
   /**
+   * invoice_info failed (after its retry), so the name is missing for a
+   * transient reason. Without a registry code derived from our VAT, every
+   * receipt is then held (`own_company_identity_unavailable`).
+   */
+  readonly ownCompanyNameUnavailable?: boolean;
+  /**
    * Whether this dry run should mint approval handles (default true).
    *
    * The plan store holds at most MAX_ACTIVE_EXECUTION_PLANS live plans and

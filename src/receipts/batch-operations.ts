@@ -362,6 +362,8 @@ interface ProcessSingleReceiptOptions {
   ownCompanyRegistryCode?: string;
   ownIbans?: string[];
   ownCompanyName?: string;
+  /** Hold the receipt: our name is unavailable and no registry code derives from our VAT. */
+  ownIdentityUnavailable?: boolean;
   bankTransactions: Transaction[];
   executionMode: ReceiptBatchExecutionMode;
   legacyExecuteCreate: boolean;
@@ -490,6 +492,11 @@ function likelyAlreadyBookedMatch(
   return exact.length === 1 && exact[0]!.id === duplicate.invoice_id ? duplicate : undefined;
 }
 
+const OWN_IDENTITY_UNAVAILABLE_REASON =
+  "Your own company's name could not be read from e-arveldaja (invoice settings), and your registry code could not be found " +
+  "from your VAT number either, so it cannot be ruled out that this document's supplier is your own company; nothing was created. " +
+  "Retry later, or choose the supplier yourself.";
+
 async function processSingleReceipt(
   api: ApiContext,
   context: ReceiptProcessingContext,
@@ -601,6 +608,19 @@ async function processSingleReceipt(
       notes.push("Missing supplier name, confident invoice number, invoice date, or gross total required for auto-booking.");
       maybeAddLlmFallbackNote(notes, llmFallback);
       return buildNeedsReviewResult(file, classification, extracted, llmFallback, notes);
+    }
+
+    // #22 needs our registry code to refuse ourselves as the supplier. With
+    // neither our name nor a VAT-derived code, no supplier can be trusted.
+    if (options.ownIdentityUnavailable) {
+      signals.supplier_resolution_failed = true;
+      const reason = OWN_IDENTITY_UNAVAILABLE_REASON;
+      notes.push(reason);
+      const fallback = summarize();
+      maybeAddLlmFallbackNote(notes, fallback);
+      return buildNeedsReviewResult(file, classification, extracted, fallback, notes, {
+        supplier_resolution: { found: false, created: false, requires_manual_review: true, code: "own_company_identity_unavailable", reason },
+      });
     }
 
     // A blank or missing own-company name is unavailable: no new supplier is
@@ -1077,6 +1097,8 @@ class ReceiptBatchOperationsImpl implements ReceiptBatchOperations {
         ownCompanyVat,
         input.ownCompanyName,
       );
+      // invoice_info failed: run only while the #22 guard keeps full strength.
+      const ownIdentityUnavailable = input.ownCompanyNameUnavailable === true && ownCompanyRegistryCode === undefined;
       const ownIbans = await loadOwnIbans(this.api);
       const allTransactions = await this.api.transactions.listAll();
       const selectedTransactions = selectBatchBankTransactions(allTransactions, input.accountsDimensionsId, {
@@ -1161,6 +1183,7 @@ class ReceiptBatchOperationsImpl implements ReceiptBatchOperations {
             ownCompanyRegistryCode,
             ownIbans,
             ownCompanyName: input.ownCompanyName,
+            ...(ownIdentityUnavailable ? { ownIdentityUnavailable: true } : {}),
             bankTransactions,
             executionMode,
             legacyExecuteCreate,

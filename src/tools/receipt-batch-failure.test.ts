@@ -1104,40 +1104,41 @@ describe("process_receipt_batch own-company identity protection (M09)", () => {
     return { handler, api, create };
   }
 
-  it("fails closed (dry_run) when invoice_info transiently fails", async () => {
-    const { handler } = setup(vi.fn().mockRejectedValue(new HttpError("temporary", 503, "GET", "/invoice_info")));
+  it("holds every receipt (dry_run) when invoice_info fails twice and no registry code derives from our VAT", async () => {
+    const getInvoiceInfo = vi.fn().mockRejectedValue(new HttpError("temporary", 503, "GET", "/invoice_info"));
+    const { handler } = setup(getInvoiceInfo);
     const result = await handler({ folder_path: "/tmp/receipts", accounts_dimensions_id: 10 });
     const payload = parseMcpResponse(result.content[0]!.text);
-    expect(payload).toMatchObject({ category: "manual_review_required", protection_state: "retryable_error" });
+    expect(getInvoiceInfo).toHaveBeenCalledTimes(2);
+    expect(getInvoiceInfo.mock.calls[1]![0]).toEqual({ fresh: true });
+    expect(payload.protection_state).toBeUndefined();
+    expect(payload.results[0]).toMatchObject({ status: "needs_review", supplier_resolution: { code: "own_company_identity_unavailable" } });
+    expect(resolveSupplierInternal).not.toHaveBeenCalled();
   });
 
-  it("blocks create before any mutation when invoice_info transiently fails", async () => {
+  it("still refuses a create without the dry-run manifest when invoice_info transiently fails", async () => {
     const { handler, create } = setup(vi.fn().mockRejectedValue(new HttpError("temporary", 503, "GET", "/invoice_info")));
     const result = await handler({ folder_path: "/tmp/receipts", accounts_dimensions_id: 10, execution_mode: "create" });
     const payload = parseMcpResponse(result.content[0]!.text);
-    expect(payload).toMatchObject({ category: "manual_review_required", protection_state: "retryable_error" });
+    expect(payload).toMatchObject({ category: "approved_manifest_required" });
     expect(create).not.toHaveBeenCalled();
   });
 
-  it("blocks a manifest-valid create purely on the transient identity failure", async () => {
-    // Stronger than the no-manifest case: obtain a valid approved_manifest from a
-    // successful dry_run, then fail invoice_info on the create call. The request
-    // is fully mutation-eligible (H15 satisfied), so only the M09 identity guard
-    // can be blocking it.
+  it("books a manifest-valid receipt when the fresh retry of a failed identity read succeeds", async () => {
     const getInvoiceInfo = vi.fn().mockResolvedValue({ invoice_company_name: "My Company OÜ" });
     const { handler, create } = setup(getInvoiceInfo);
-    const dry = parseMcpResponse((await handler({ folder_path: "/tmp/receipts", accounts_dimensions_id: 10 })).content[0]!.text);
-    expect(dry.approved_manifest).toBeDefined();
+    const approval = await dryRunApproval(handler, { folder_path: "/tmp/receipts", accounts_dimensions_id: 10 });
 
     getInvoiceInfo.mockRejectedValueOnce(new HttpError("temporary", 503, "GET", "/invoice_info"));
     const result = parseMcpResponse((await handler({
       folder_path: "/tmp/receipts",
       accounts_dimensions_id: 10,
       execution_mode: "create",
-      approved_manifest: dry.approved_manifest,
+      approved_manifest: approval.approved_manifest,
+      plan_handle: approval.plan_handles.create,
     })).content[0]!.text);
-    expect(result).toMatchObject({ category: "manual_review_required", protection_state: "retryable_error" });
-    expect(create).not.toHaveBeenCalled();
+    expect(result.protection_state).toBeUndefined();
+    expect(create).toHaveBeenCalledTimes(1);
   });
 
   it("stays best-effort (continues) when the invoice_info endpoint is absent", async () => {

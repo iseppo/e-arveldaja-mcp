@@ -10,6 +10,10 @@ import { createAndMaybeMatchPurchaseInvoice } from "../tools/receipt-inbox-booki
 import { sha256Hex } from "../tools/receipt-inbox-files.js";
 import { renderReceiptBatchCompact } from "./presenter.js";
 import { EMTA_KMKR_ORIGIN } from "../emta-kmkr.js";
+import { registerReceiptInboxTools } from "../tools/receipt-inbox.js";
+import { HttpError } from "../http-client.js";
+import { parseToolPayload } from "../__fixtures__/mcp-response.js";
+import type { ReceiptBatchFullPayload } from "./presenter.js";
 
 // P2 E1 / E1b / E3 through the REAL receipt_batch path: real extraction, real
 // supplier resolution (registry lookup = stubbed fetch), real gating and booking.
@@ -716,5 +720,134 @@ describe("two receipts of one new verified supplier (review 2026-11-04 MINOR 3)"
     expect(rec.clientsCreate).toHaveBeenCalledTimes(1);
     expect(rec.invoicesCreate).toHaveBeenCalledTimes(2);
     expect(rec.invoicesCreate.mock.calls.map(call => (call[0] as { number?: string }).number)).toEqual(["A-17", "A-18"]);
+  });
+});
+
+describe("receipt_batch when the own-company identity read fails (identity review r2)", () => {
+  const EXISTING_CODE = "12345678";
+  const EXISTING_NAME = "Näidis Tarnija OÜ";
+  const EXISTING_RECEIPT = [
+    EXISTING_NAME,
+    `Reg. nr ${EXISTING_CODE}`,
+    "Arve nr B-5",
+    "Kuupäev 16.03.2026",
+    "Summa ilma KM-ta 100,00",
+    "Käibemaks 24% 24,00",
+    "Kokku 124,00 EUR",
+  ];
+  const EXISTING_REGISTRY = {
+    status: "OK",
+    data: [{ ...ARIREGISTER_AUTOCOMPLETE_TELIA.data[0], company_id: 1, reg_code: Number(EXISTING_CODE), name: EXISTING_NAME, historical_names: [] }],
+  };
+
+  type Row = { file: unknown; status: string; notes: string[]; supplier_resolution?: { code?: string; client?: { id?: number } } };
+  const fileStatus = (rows: unknown[]) => (rows as Row[]).map(row => [
+    // The file name is sandbox-wrapped in the output; find it inside the file record.
+    JSON.stringify(row.file).includes("existing.pdf") ? "existing.pdf" : JSON.stringify(row.file).includes("new.pdf") ? "new.pdf" : "?",
+    row.status,
+  ]);
+
+  function receiptBatchHandler(api: never) {
+    const server = { registerTool: vi.fn() };
+    registerReceiptInboxTools(server as never, api, createTestRuntimeSafetyContext(), {
+      enableLightyear: true, exposeGranularTools: false, exposeSetupTools: false, enableTaxTools: true,
+      enableReferenceAdmin: true, enableAnnualReport: true, enableSales: true, enableProducts: true,
+    });
+    const registration = server.registerTool.mock.calls.find(([name]) => name === "receipt_batch");
+    if (!registration) throw new Error("receipt_batch was not registered");
+    const handler = registration[registration.length - 1] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+    return async (args: Record<string, unknown>) =>
+      parseToolPayload<{ result: ReceiptBatchFullPayload; protection_state?: unknown }>(
+        (await handler({ folder_path: FOLDER, accounts_dimensions_id: 100, detail: "full", ...args })).content[0]!.text);
+  }
+
+  const OWN_VAT_CLIENT = { id: 3, name: "Testija Ostja OÜ", code: "87654321", invoice_vat_no: "EE102809963", is_client: true, is_supplier: false, is_deleted: false, cl_code_country: "EST" };
+  const EXISTING_CLIENT = { id: 7, name: EXISTING_NAME, code: EXISTING_CODE, is_client: false, is_supplier: true, is_deleted: false, cl_code_country: "EST" };
+  const unavailable = () => new HttpError("temporary", 503, "GET", "/invoice_info");
+
+  /** Two receipts: existing.pdf (supplier client 7) and new.pdf (a supplier the register confirms, no client yet). */
+  function setupBatch(clients: Array<Record<string, unknown>>, getInvoiceInfo: ReturnType<typeof vi.fn>) {
+    const setupFetch = globalThis.fetch;
+    vi.stubGlobal("fetch", (url: string, init?: RequestInit) => {
+      if (url.startsWith(EMTA_KMKR_ORIGIN)) return setupFetch(url, init);
+      const body = JSON.stringify(url.includes(EXISTING_CODE) ? EXISTING_REGISTRY : ARIREGISTER_AUTOCOMPLETE_TELIA);
+      return Promise.resolve({ ok: true, headers: { get: () => String(body.length) }, text: () => Promise.resolve(body) });
+    });
+    vi.mocked(readdir).mockResolvedValue([
+      { name: "existing.pdf", isFile: () => true },
+      { name: "new.pdf", isFile: () => true },
+    ] as never);
+    vi.mocked(readFile).mockImplementation((async (path: unknown) =>
+      Buffer.from(String(path).includes("new") ? "receipt new" : "receipt existing")) as never);
+    // Snapshots are <index>.pdf in listing order: 0.pdf is existing.pdf, 1.pdf is new.pdf.
+    vi.mocked(parseDocument).mockImplementation((async (path: string) =>
+      parsed(path.endsWith("1.pdf") ? PRINT_RECEIPT : EXISTING_RECEIPT)) as never);
+    const { api, rec } = makeApi(clients);
+    (api as unknown as { readonly: Record<string, unknown> }).readonly.getInvoiceInfo = getInvoiceInfo;
+    return { run: receiptBatchHandler(api), rec };
+  }
+
+  it("(a) the first read fails, the fresh retry succeeds: an ordinary batch", async () => {
+    const getInvoiceInfo = vi.fn().mockRejectedValueOnce(unavailable()).mockResolvedValue({ invoice_company_name: "Testija Ostja OÜ" });
+    const { run, rec } = setupBatch([EXISTING_CLIENT], getInvoiceInfo);
+    const dryPayload = await run({ mode: "dry_run" });
+    expect(getInvoiceInfo).toHaveBeenCalledTimes(2);
+    expect(getInvoiceInfo.mock.calls[1]![0]).toEqual({ fresh: true });
+    expect(dryPayload.protection_state).toBeUndefined();
+    const dry = dryPayload.result;
+    expect(fileStatus(dry.results)).toEqual([["existing.pdf", "dry_run_preview"], ["new.pdf", "dry_run_preview"]]);
+    if (!dry.approved_manifest || !dry.plan_handles) throw new Error("dry run minted no approval");
+    const created = (await run({ mode: "create", approved_manifest: dry.approved_manifest, plan_handle: dry.plan_handles.create })).result;
+    expect(fileStatus(created.results)).toEqual([["existing.pdf", "created"], ["new.pdf", "created"]]);
+    expect(rec.clientsCreate).toHaveBeenCalledTimes(1);
+    expect(rec.invoicesCreate).toHaveBeenCalledTimes(2);
+  });
+
+  it("(b) both reads fail, our registry code is known from our VAT: the existing supplier is booked, the new one held", async () => {
+    const getInvoiceInfo = vi.fn().mockRejectedValue(unavailable());
+    const { run, rec } = setupBatch([OWN_VAT_CLIENT, EXISTING_CLIENT], getInvoiceInfo);
+    const dryPayload = await run({ mode: "dry_run" });
+    expect(getInvoiceInfo).toHaveBeenCalledTimes(2);
+    expect(dryPayload.protection_state).toBeUndefined();
+    const dry = dryPayload.result;
+    const rows = dry.results as Row[];
+    expect(fileStatus(rows)).toEqual([["existing.pdf", "dry_run_preview"], ["new.pdf", "needs_review"]]);
+    expect(rows[0]!.supplier_resolution?.client?.id).toBe(7);
+    expect(rows[1]!.supplier_resolution?.code).toBe("own_company_identity_unavailable");
+    expect(rows[1]!.notes.join(" ")).toContain("own company's name could not be read");
+    if (!dry.approved_manifest || !dry.plan_handles) throw new Error("dry run minted no approval");
+
+    const created = (await run({ mode: "create", approved_manifest: dry.approved_manifest, plan_handle: dry.plan_handles.create })).result;
+    expect(fileStatus(created.results)).toEqual([["existing.pdf", "created"], ["new.pdf", "needs_review"]]);
+    // The existing supplier's invoice is the only write; the held receipt wrote nothing.
+    expect(rec.invoicesCreate).toHaveBeenCalledTimes(1);
+    expect(rec.invoicesCreate.mock.calls[0]![0]).toMatchObject({ clients_id: 7, number: "B-5" });
+    expect(rec.clientsCreate).not.toHaveBeenCalled();
+    expect(rec.confirm).not.toHaveBeenCalled();
+  });
+
+  it("(c) both reads fail and our registry code cannot be found from our VAT: every receipt is held, zero writes", async () => {
+    const getInvoiceInfo = vi.fn().mockRejectedValue(unavailable());
+    const { run, rec } = setupBatch([EXISTING_CLIENT], getInvoiceInfo);
+    const dryPayload = await run({ mode: "dry_run" });
+    expect(dryPayload.protection_state).toBeUndefined();
+    const dry = dryPayload.result;
+    const rows = dry.results as Row[];
+    expect(fileStatus(rows)).toEqual([["existing.pdf", "needs_review"], ["new.pdf", "needs_review"]]);
+    for (const row of rows) {
+      expect(row.supplier_resolution?.code).toBe("own_company_identity_unavailable");
+      expect(row.notes.join(" ")).toContain("own company's name could not be read");
+    }
+    // The owner still sees what was read.
+    expect((rows[0] as unknown as { extracted?: { invoice_number?: string } }).extracted?.invoice_number).toBe("B-5");
+
+    for (const mode of ["create", "create_and_confirm"] as const) {
+      if (!dry.approved_manifest || !dry.plan_handles) break;
+      const executed = (await run({ mode, approved_manifest: dry.approved_manifest, plan_handle: dry.plan_handles[mode] })).result;
+      expect(fileStatus(executed.results)).toEqual([["existing.pdf", "needs_review"], ["new.pdf", "needs_review"]]);
+    }
+    expect(rec.invoicesCreate).not.toHaveBeenCalled();
+    expect(rec.clientsCreate).not.toHaveBeenCalled();
+    expect(rec.confirm).not.toHaveBeenCalled();
   });
 });

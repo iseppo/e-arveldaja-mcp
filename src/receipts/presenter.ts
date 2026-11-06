@@ -31,19 +31,6 @@ import type {
 
 // --- Simple-failure envelopes (moved verbatim from the handler) --------------
 
-/** Own-company identity could not be loaded from a PRESENT invoice_info
- * endpoint (M09): fail closed rather than book with weakened self-match
- * protection. Byte-identical to the pre-refactor handler return. */
-export function receiptIdentityRetryableError(reason: string): CallToolResult {
-  return toolError({
-    error: "Could not load own-company identity; refusing to auto-process receipts",
-    category: "manual_review_required",
-    protection_state: "retryable_error",
-    reason,
-    next_action: "Retry once the invoice_info endpoint is reachable again.",
-  });
-}
-
 /** H15: creating/confirming without the dry-run manifest is refused so the
  * approved-bytes binding cannot be bypassed. Byte-identical to the handler. */
 export function receiptApprovedManifestRequiredError(): CallToolResult {

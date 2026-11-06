@@ -71,7 +71,6 @@ import {
 } from "../receipts/batch-operations.js";
 import {
   receiptApprovedManifestRequiredError,
-  receiptIdentityRetryableError,
   renderReceiptBatchCompact,
   renderReceiptBatchFull,
   type ReceiptBatchCompactInput,
@@ -836,21 +835,30 @@ export function deriveOwnCompanyRegistryCode(
  *    configuration — older API clients / test stubs never had it, and VAT-based
  *    self-match still protects booking. Stay best-effort: `available` with no
  *    name, preserving the pre-M09 behaviour.
- *  - **Endpoint present but the call throws** (e.g. a transient 5xx): we cannot
- *    tell whether identity would have blocked a self-match, so we FAIL CLOSED
- *    (`retryable_error`) rather than silently book with weakened protection.
+ *  - **Endpoint present but the call throws** (e.g. a transient 5xx): retried
+ *    once with a fresh (uncached) read; still failing is `retryable_error`.
+ *    The accounting-inbox receipt dry run fails closed on it. `receipt_batch`
+ *    runs only when the #22 guard keeps full strength without the name: our
+ *    registry code still derives from our VAT (existing suppliers match, new
+ *    suppliers are held per item); otherwise every receipt is held per item
+ *    (`own_company_identity_unavailable`, see `runBatch`).
  */
 export async function loadOwnCompanyIdentity(
   api: ApiContext,
 ): Promise<{ status: "available"; invoiceCompanyName?: string } | { status: "retryable_error"; reason: string }> {
   const fn = api.readonly.getInvoiceInfo;
   if (typeof fn !== "function") return { status: "available" };
+  let info: Awaited<ReturnType<typeof fn>>;
   try {
-    const info = await fn.call(api.readonly);
-    return { status: "available", invoiceCompanyName: info.invoice_company_name?.trim() || undefined };
-  } catch (error) {
-    return { status: "retryable_error", reason: error instanceof Error ? error.message : String(error) };
+    info = await fn.call(api.readonly);
+  } catch {
+    try {
+      info = await fn.call(api.readonly, { fresh: true });
+    } catch (error) {
+      return { status: "retryable_error", reason: error instanceof Error ? error.message : String(error) };
+    }
   }
+  return { status: "available", invoiceCompanyName: info.invoice_company_name?.trim() || undefined };
 }
 
 /**
@@ -1435,13 +1443,10 @@ export function registerReceiptInboxTools(
         : undefined,
     );
     const workflowFolderPath = receiptFolder.path;
-    // M09: the active company's identity feeds the #22 self-match guard. If a
-    // PRESENT invoice_info endpoint fails transiently, fail closed BEFORE any
-    // snapshot/mutation instead of booking with weakened protection.
+    // The active company's name feeds the #22 self-match guard. If invoice_info
+    // still fails after the retry, runBatch decides per item: it proceeds only
+    // while our registry code derives from our VAT, else it holds every receipt.
     const ownCompanyIdentity = await loadOwnCompanyIdentity(api);
-    if (ownCompanyIdentity.status === "retryable_error") {
-      return { ok: false, error: receiptIdentityRetryableError(ownCompanyIdentity.reason) };
-    }
     // H15: creating/confirming without the dry-run manifest is refused so the
     // approved-bytes binding below cannot be bypassed.
     if (!dryRun && args.approved_manifest === undefined) {
@@ -1467,7 +1472,9 @@ export function registerReceiptInboxTools(
       ...(args.transaction_date_to !== undefined ? { transactionDateTo: args.transaction_date_to } : {}),
       ...(normalizedApprovedManifest !== undefined ? { approvedManifest: normalizedApprovedManifest } : {}),
       directoryAccessOptions: directoryAccessOptions(receiptFolder.expectedCanonicalPath),
-      ...(ownCompanyIdentity.invoiceCompanyName !== undefined ? { ownCompanyName: ownCompanyIdentity.invoiceCompanyName } : {}),
+      ...(ownCompanyIdentity.status === "available"
+        ? ownCompanyIdentity.invoiceCompanyName !== undefined ? { ownCompanyName: ownCompanyIdentity.invoiceCompanyName } : {}
+        : { ownCompanyNameUnavailable: true }),
       ...(args.plan_handle !== undefined ? { planHandle: args.plan_handle } : {}),
       ...(dryRun && receiptFolder.sourceBinding !== undefined ? { sourceBinding: receiptFolder.sourceBinding } : {}),
     });
