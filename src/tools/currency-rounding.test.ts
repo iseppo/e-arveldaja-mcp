@@ -4,6 +4,7 @@ import { parseMcpResponse } from "../mcp-json.js";
 import { parseToolPayload } from "../__fixtures__/mcp-response.js";
 import type { ReconcileCurrencyRoundingPayload } from "./currency-rounding.js";
 import { logAudit } from "../audit-log.js";
+import { createTestRuntimeSafetyContext } from "../__fixtures__/runtime-safety.js";
 
 vi.mock("../audit-log.js", () => ({ logAudit: vi.fn() }));
 
@@ -69,16 +70,28 @@ function setupTool(options: SetupOptions) {
     },
   } as any;
 
-  registerCurrencyRoundingTools(server, api);
+  const ctx = createTestRuntimeSafetyContext();
+  registerCurrencyRoundingTools(server, api, ctx);
   const registration = server.registerTool.mock.calls.find(
     ([name]: [string]) => name === "reconcile_currency_rounding",
   );
   if (!registration) throw new Error("Tool was not registered");
+  const rawHandler = registration[2] as (
+    args: Record<string, unknown>,
+  ) => Promise<{ content: Array<{ text: string }>; isError?: boolean }>;
   return {
     api,
-    handler: registration[2] as (
-      args: Record<string, unknown>,
-    ) => Promise<{ content: Array<{ text: string }> }>,
+    ctx,
+    rawHandler,
+    // Reviewed execute: an `execute: true` call without a plan_handle first
+    // previews with the same arguments and passes that dry run's handle.
+    handler: async (args: Record<string, unknown>) => {
+      if (args.execute !== true || "plan_handle" in args) return rawHandler(args);
+      const preview = parseToolPayload<ReconcileCurrencyRoundingPayload>(
+        (await rawHandler({ ...args, execute: false })).content[0]!.text,
+      );
+      return rawHandler({ ...args, plan_handle: preview.plan_handle });
+    },
   };
 }
 
@@ -822,7 +835,8 @@ describe("reconcile_currency_rounding", () => {
       linked_transaction_ids: [801],
       contributing_transaction_ids: [801],
     });
-    expect(api.transactions.get).toHaveBeenCalledTimes(1);
+    // Once in the reviewed dry run, once in execute's fresh rescan.
+    expect(api.transactions.get).toHaveBeenCalledTimes(2);
     expect(journalCreate).toHaveBeenCalledWith(expect.objectContaining({
       postings: [
         { accounts_id: 2120, accounts_dimensions_id: 44, type: "D", amount: 0.5 },
@@ -1523,5 +1537,141 @@ describe("reconcile_currency_rounding", () => {
       expect(payload.candidates[0]!.proposed_action).toMatch(/no invoice lines/);
       expect(invoiceUpdate).not.toHaveBeenCalled();
     });
+  });
+});
+
+describe("reconcile_currency_rounding plan binding", () => {
+  // fx_difference: booked 90.50 EUR, paid 90.00 EUR → FX journal 0.50 EUR.
+  const fxInvoice = () => ({
+    id: 990, number: "USD-990", client_name: "Anthropic", status: "CONFIRMED",
+    payment_status: "PARTIALLY_PAID", cl_currencies_id: "USD",
+    net_price: 100, vat_price: 0, gross_price: 100, base_gross_price: 90.50,
+    liability_accounts_id: 2310, liability_accounts_dimensions_id: null,
+    create_date: "2026-05-01", transactions: [991],
+  });
+  const fxTx = () => ({
+    id: 991, status: "CONFIRMED", type: "C", description: OUT_MARKER, amount: 90.00, cl_currencies_id: "EUR", date: "2026-05-03",
+    items: [{ accounts_id: 2310, relation_table: "purchase_invoices", relation_id: 990, amount: 90.00, cl_currencies_id: "EUR" }],
+  });
+  // small_rounding: booked 17.10 EUR, paid 17.07 EUR → invoice PATCH.
+  const smallInvoice = () => ({
+    id: 980, number: "USD-980", client_name: "OpenAI", status: "CONFIRMED",
+    payment_status: "PARTIALLY_PAID", cl_currencies_id: "USD",
+    net_price: 20, vat_price: 0, gross_price: 20, base_net_price: 17.10, base_vat_price: 0, base_gross_price: 17.10,
+    liability_accounts_id: 2310, liability_accounts_dimensions_id: null,
+    create_date: "2026-05-01", transactions: [981],
+    items: [{ id: 5, custom_title: "API usage", total_net_price: 20, purchase_accounts_id: 5230 }],
+  });
+  const smallTx = () => ({
+    id: 981, status: "CONFIRMED", type: "C", description: OUT_MARKER, amount: 17.07, cl_currencies_id: "EUR",
+    items: [{ accounts_id: 2310, relation_table: "purchase_invoices", relation_id: 980, amount: 17.07, cl_currencies_id: "EUR" }],
+  });
+
+  function fixture() {
+    const invoices: Array<Record<string, unknown>> = [fxInvoice(), smallInvoice()];
+    const fx = fxTx();
+    const transactionsById: Record<number, unknown> = { 991: fx, 981: smallTx() };
+    const invoiceUpdate = vi.fn().mockResolvedValue({});
+    const journalCreate = vi.fn().mockResolvedValue({ created_object_id: 555 });
+    vi.mocked(logAudit).mockClear();
+    const tool = setupTool({ invoices, transactionsById, invoiceUpdate, journalCreate });
+    return { ...tool, invoices, fx, transactionsById, invoiceUpdate, journalCreate };
+  }
+  type Fixture = ReturnType<typeof fixture>;
+
+  async function preview(f: Fixture): Promise<ReconcileCurrencyRoundingPayload> {
+    return parseToolPayload<ReconcileCurrencyRoundingPayload>((await f.rawHandler({})).content[0]!.text);
+  }
+
+  function errorCode(result: { content: Array<{ text: string }> }): unknown {
+    return parseToolPayload<{ error_code?: string }>(result.content[0]!.text).error_code;
+  }
+
+  function expectNoWrites(f: Fixture): void {
+    expect(f.invoiceUpdate).not.toHaveBeenCalled();
+    expect(f.journalCreate).not.toHaveBeenCalled();
+    expect(vi.mocked(logAudit)).not.toHaveBeenCalled();
+  }
+
+  it("dry run returns a plan_handle; execute with it applies the reviewed candidates", async () => {
+    const f = fixture();
+    const dry = await preview(f);
+    expect(dry.mode).toBe("DRY_RUN");
+    expect(typeof dry.plan_handle).toBe("string");
+    expectNoWrites(f);
+
+    const result = await f.rawHandler({ execute: true, plan_handle: dry.plan_handle });
+    expect(result.isError).toBeFalsy();
+    const payload = parseToolPayload<ReconcileCurrencyRoundingPayload>(result.content[0]!.text);
+    expect(payload.mode).toBe("EXECUTED");
+    expect(payload.plan_handle).toBeUndefined();
+    expect(payload.summary.applied_success).toBe(2);
+    expect(f.invoiceUpdate).toHaveBeenCalledTimes(1);
+    expect(f.journalCreate).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses execute without a plan_handle before reading or writing anything", async () => {
+    const f = fixture();
+    const result = await f.rawHandler({ execute: true });
+    expect(result.isError).toBe(true);
+    expect(errorCode(result)).toBe("plan_handle_required");
+    expect(f.api.purchaseInvoices.listAll).not.toHaveBeenCalled();
+    expectNoWrites(f);
+  });
+
+  it("refuses with plan_drift and writes nothing when a payment changed after the dry run", async () => {
+    const f = fixture();
+    const dry = await preview(f);
+    // The FX invoice's payment now settles 90.20 EUR: residual 0.50 → 0.30.
+    f.fx.amount = 90.20;
+    f.fx.items[0]!.amount = 90.20;
+
+    const result = await f.rawHandler({ execute: true, plan_handle: dry.plan_handle });
+    expect(result.isError).toBe(true);
+    expect(errorCode(result)).toBe("plan_drift");
+    expectNoWrites(f);
+  });
+
+  it("refuses with plan_drift when an invoice's lines were edited after the dry run", async () => {
+    const f = fixture();
+    const dry = await preview(f);
+    f.invoices[1]!.items = [{ id: 5, custom_title: "API usage (edited)", total_net_price: 20, purchase_accounts_id: 5230 }];
+
+    const result = await f.rawHandler({ execute: true, plan_handle: dry.plan_handle });
+    expect(errorCode(result)).toBe("plan_drift");
+    expectNoWrites(f);
+  });
+
+  it("refuses with plan_drift when a new candidate appeared after the dry run", async () => {
+    const f = fixture();
+    const dry = await preview(f);
+    f.invoices.push({ ...fxInvoice(), id: 995, number: "USD-995", transactions: [996] });
+    f.transactionsById[996] = { ...fxTx(), id: 996, items: [{ ...fxTx().items[0]!, relation_id: 995 }] };
+
+    const result = await f.rawHandler({ execute: true, plan_handle: dry.plan_handle });
+    expect(errorCode(result)).toBe("plan_drift");
+    expectNoWrites(f);
+  });
+
+  it("refuses with plan_drift when execute arguments differ from the dry run", async () => {
+    const f = fixture();
+    const dry = await preview(f);
+    const result = await f.rawHandler({ execute: true, plan_handle: dry.plan_handle, max_candidates: 1 });
+    expect(errorCode(result)).toBe("plan_drift");
+    expectNoWrites(f);
+  });
+
+  it("a plan_handle is single-use", async () => {
+    const f = fixture();
+    const dry = await preview(f);
+    await f.rawHandler({ execute: true, plan_handle: dry.plan_handle });
+    f.invoiceUpdate.mockClear();
+    f.journalCreate.mockClear();
+    vi.mocked(logAudit).mockClear();
+
+    const again = await f.rawHandler({ execute: true, plan_handle: dry.plan_handle });
+    expect(again.isError).toBe(true);
+    expect(errorCode(again)).toBe("plan_handle_consumed");
+    expectNoWrites(f);
   });
 });

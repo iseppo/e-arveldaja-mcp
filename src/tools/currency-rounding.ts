@@ -1,4 +1,5 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
 import { toMcpJson } from "../mcp-json.js";
@@ -19,6 +20,12 @@ import { todayInTallinn } from "../local-date.js";
 import { isStrictDate } from "../strict-date.js";
 import { signedBankTransactionDirection } from "../bank-transaction-direction.js";
 import { loadProvenBankDirection } from "../bank-transaction-journal-direction.js";
+import { toolError } from "../tool-error.js";
+import { canonicalPlanJson } from "./camt-plan.js";
+import type { ExecutionPlanInput, PlanData, PlanRecord } from "../plan-store.js";
+import type { RuntimeSafetyContext } from "../runtime-safety-context.js";
+
+export const CURRENCY_ROUNDING_PLAN_DOMAIN = "currency_rounding";
 
 const SMALL_ROUNDING_THRESHOLD = 0.10; // up to 10 cents → in-place fix
 const FX_DIFFERENCE_LIMIT = 1.00;      // up to 1 EUR → FX journal posting
@@ -71,6 +78,8 @@ export interface ReconcileCurrencyRoundingPayload {
   };
   candidates: ReconcileCandidate[];
   applied?: Array<{ invoice_id: number; category: string; action: string; result: "success" | "error"; error?: string }>;
+  /** Dry run only: pass it with execute=true to apply exactly this reviewed candidate set. */
+  plan_handle?: string;
   note: string;
 }
 
@@ -429,11 +438,55 @@ function categorizeDiff(diff: number): "small_rounding" | "fx_difference" | "rev
   return "review";
 }
 
-export function registerCurrencyRoundingTools(server: McpServer, api: ApiContext): void {
+function refuse(errorCode: string, message: string): CallToolResult {
+  return toolError({ error: message, error_code: errorCode, note: "Nothing was written." });
+}
+
+/**
+ * What execute would write, per candidate: the invoice PATCH (proposed base/rate
+ * values and the lines it re-sends) or the FX journal (amount, direction via
+ * diff sign, accounts, date, title). Dry run binds it; execute refuses when the
+ * fresh scan differs.
+ */
+function candidateSetFingerprint(
+  candidates: readonly ReconcileCandidate[],
+  patchItemsByInvoice: ReadonlyMap<number, PurchaseInvoiceItem[]>,
+  fxAccounts: { gain: number; loss: number },
+): string {
+  return canonicalPlanJson({
+    fx_accounts: fxAccounts,
+    candidates: candidates.map(c => ({
+      invoice_id: c.invoice_id,
+      invoice_number: c.invoice_number,
+      currency: c.cl_currencies_id,
+      category: c.category,
+      already_reconciled: c.already_reconciled ?? false,
+      paid_eur: c.paid_eur,
+      diff_eur: c.diff_eur,
+      booked_eur: c.base_gross_price ?? null,
+      proposed_currency_rate: c.proposed_currency_rate,
+      proposed_base_gross_price: c.proposed_base_gross_price,
+      proposed_base_net_price: c.proposed_base_net_price,
+      proposed_base_vat_price: c.proposed_base_vat_price,
+      liability_account_id: c.liability_account_id,
+      liability_account_dimension_id: c.liability_account_dimension_id,
+      settlement_date: c.settlement_date,
+      invoice_date: c.invoice_date,
+      items: c.category === "small_rounding" ? patchItemsByInvoice.get(c.invoice_id) ?? null : undefined,
+    })),
+  });
+}
+
+export function registerCurrencyRoundingTools(
+  server: McpServer,
+  api: ApiContext,
+  runtimeSafetyContext: RuntimeSafetyContext,
+): void {
   registerTool(server, "reconcile_currency_rounding",
-    "Reconcile small PARTIALLY_PAID purchase-invoice currency residuals. DRY RUN by default; execute=true applies in-place fixes for <0.10 EUR or FX journals for 0.10-1.00 EUR.",
+    "Reconcile small PARTIALLY_PAID purchase-invoice currency residuals. DRY RUN by default and returns a plan_handle; execute=true + that plan_handle applies in-place fixes for <0.10 EUR or FX journals for 0.10-1.00 EUR only when a fresh scan still matches the reviewed candidates (otherwise plan_drift, nothing written).",
     {
       execute: z.boolean().optional().describe("Apply the proposed fixes (default false = dry run)"),
+      plan_handle: z.string().optional().describe("execute=true: the plan_handle from the reviewed dry run (required)"),
       max_candidates: z.number().int().positive().optional().describe("Limit to first N PARTIALLY_PAID invoices"),
       liability_accounts_id: z.number().int().positive().optional().describe("Deprecated compatibility assertion. When supplied, it must match the invoice liability account; it never overrides or supplies that account."),
       fx_gain_account_id: z.number().int().positive().optional().describe(`Account for FX gains (diff > 0, paid less than booked) — default: auto-detect combined "Kasum/kahjum valuutakursi muutustest" (standard ${DEFAULT_FX_GAIN_ACCOUNT})`),
@@ -442,12 +495,31 @@ export function registerCurrencyRoundingTools(server: McpServer, api: ApiContext
     { ...mutate, openWorldHint: true, title: "Reconcile Currency Rounding" },
     async ({
       execute,
+      plan_handle,
       max_candidates,
       liability_accounts_id,
       fx_gain_account_id,
       fx_loss_account_id,
     }) => {
       const dryRun = execute !== true;
+      const normalizedArgs: PlanRecord = {
+        max_candidates: max_candidates ?? null,
+        liability_accounts_id: liability_accounts_id ?? null,
+        fx_gain_account_id: fx_gain_account_id ?? null,
+        fx_loss_account_id: fx_loss_account_id ?? null,
+      };
+      let boundPlan: { normalizedArgs: PlanRecord; privatePayload: PlanData } | undefined;
+      if (!dryRun) {
+        if (!plan_handle) return refuse("plan_handle_required", "execute=true needs the plan_handle from the reviewed dry run.");
+        try {
+          boundPlan = runtimeSafetyContext.planStore.consume(plan_handle, CURRENCY_ROUNDING_PLAN_DOMAIN);
+        } catch (error) {
+          return refuse((error as { code?: string }).code ?? "plan_handle_invalid", "The reviewed currency-rounding plan could not be consumed. Run the dry run again.");
+        }
+        if (canonicalPlanJson(boundPlan.normalizedArgs) !== canonicalPlanJson(normalizedArgs)) {
+          return refuse("plan_drift", "max_candidates, liability_accounts_id or the FX account arguments differ from the reviewed dry run.");
+        }
+      }
       // Resolve the FX account by name against the company's actual chart. Both
       // the gain and the loss default to the SAME combined account "Kasum/kahjum
       // valuutakursi muutustest" (standard 8500) — the standard chart has one
@@ -659,6 +731,28 @@ export function registerCurrencyRoundingTools(server: McpServer, api: ApiContext
         });
       }
 
+      const fingerprint = candidateSetFingerprint(candidates, patchItemsByInvoice, { gain: fxGainAccount, loss: fxLossAccount });
+      let planHandle: string | undefined;
+      if (dryRun) {
+        const planInput: ExecutionPlanInput = {
+          normalizedArgs,
+          sourceIdentities: [],
+          liveSnapshot: { destructive: false },
+          commands: [{ id: "currency-rounding", category: "reconcile_currency_rounding" }],
+          counts: { candidates: candidates.length },
+          totals: {},
+          exclusions: [],
+          reviews: [],
+          privatePayload: { fingerprint },
+        };
+        planHandle = runtimeSafetyContext.planStore.issue(CURRENCY_ROUNDING_PLAN_DOMAIN, planInput);
+      } else {
+        const bound = boundPlan?.privatePayload as { fingerprint?: unknown } | null | undefined;
+        if (bound?.fingerprint !== fingerprint) {
+          return refuse("plan_drift", "The candidates changed after the dry run (payments, invoices, FX journals or accounts). Run the dry run again and review it.");
+        }
+      }
+
       const applied: Array<{
         invoice_id: number;
         category: string;
@@ -814,8 +908,9 @@ export function registerCurrencyRoundingTools(server: McpServer, api: ApiContext
             summary,
             candidates,
             ...(dryRun ? {} : { applied }),
+            ...(planHandle !== undefined ? { plan_handle: planHandle } : {}),
             note: dryRun
-              ? "Dry run. Re-run with execute=true to apply small_rounding patches and fx_difference journals. review-bucket items are never auto-applied."
+              ? "Dry run. After the owner approves, re-run with execute=true and this plan_handle (same arguments) to apply small_rounding patches and fx_difference journals; if anything changed meanwhile, execute refuses with plan_drift and writes nothing. review-bucket items are never auto-applied."
               : "Applied.",
           }),
         }],
