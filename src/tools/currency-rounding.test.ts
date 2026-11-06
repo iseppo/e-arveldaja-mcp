@@ -63,6 +63,7 @@ function setupTool(options: SetupOptions) {
       invalidateListCache: vi.fn(),
       listAll: vi.fn().mockResolvedValue(options.existingJournals ?? []),
       listAllWithPostings: vi.fn().mockResolvedValue(options.existingJournals ?? []),
+      get: vi.fn().mockImplementation((id: number) => Promise.resolve(options.existingJournals?.find(journal => journal.id === id))),
       create:
         options.journalCreate ??
         vi.fn().mockResolvedValue({ created_object_id: 555 }),
@@ -434,7 +435,14 @@ describe("reconcile_currency_rounding", () => {
       },
       // The paid-vs-booked residual persists after the FX journal is posted, so
       // the invoice is still PARTIALLY_PAID with the same diff on the next run.
-      existingJournals: [{ id: 777, document_number: "FX:102" }],
+      existingJournals: [{
+        id: 777, document_number: "FX:102", registered: true,
+        effective_date: "2026-05-01", cl_currencies_id: "EUR",
+        postings: [
+          { accounts_id: 2310, type: "D", amount: 0.5 },
+          { accounts_id: 8500, type: "C", amount: 0.5 },
+        ],
+      }],
       journalCreate,
       journalConfirm,
     });
@@ -448,6 +456,54 @@ describe("reconcile_currency_rounding", () => {
     expect(payload.summary.fx_already_reconciled).toBe(1);
     expect(payload.summary.applied_success).toBe(0);
     expect(payload.candidates[0].already_reconciled).toBe(true);
+  });
+
+  it.each([
+    { name: "unregistered draft", registered: false },
+    { name: "unknown registration", registered: undefined },
+    { name: "changed amount", registered: true, amount: 0.4 },
+    { name: "changed settlement date", registered: true, date: "2026-04-30" },
+    { name: "changed liability dimension", registered: true, dimension: 42 },
+    { name: "unavailable journal readback", registered: true, readbackError: true },
+  ])("keeps an existing FX $name for review without claiming completion or creating a duplicate", async ({ registered, ...change }) => {
+    const journalCreate = vi.fn();
+    const journalConfirm = vi.fn();
+    const amount = "amount" in change ? change.amount : 0.5;
+    const { handler, api } = setupTool({
+      invoices: [{
+        id: 990, number: "USD-990", client_name: "Vendor", status: "CONFIRMED",
+        payment_status: "PARTIALLY_PAID", cl_currencies_id: "USD",
+        gross_price: 100, base_gross_price: 90.5,
+        liability_accounts_id: 2310, create_date: "2026-05-01", transactions: [991],
+      }],
+      transactionsById: {
+        991: {
+          id: 991, status: "CONFIRMED", type: "C", description: OUT_MARKER,
+          amount: 90, cl_currencies_id: "EUR", date: "2026-05-01",
+          items: [{ accounts_id: 2310, relation_table: "purchase_invoices", relation_id: 990, amount: 90, cl_currencies_id: "EUR" }],
+        },
+      },
+      existingJournals: [{
+        id: 777, document_number: "FX:990", registered, cl_currencies_id: "EUR",
+        effective_date: "date" in change ? change.date : "2026-05-01",
+        postings: [
+          { accounts_id: 2310, accounts_dimensions_id: "dimension" in change ? change.dimension : null, type: "D", amount },
+          { accounts_id: 8500, type: "C", amount },
+        ],
+      }],
+      journalCreate, journalConfirm,
+    });
+    if ("readbackError" in change) api.journals.get.mockRejectedValue(new Error("temporary journal read failure"));
+
+    for (const execute of [false, true]) {
+      const payload = parseToolPayload<ReconcileCurrencyRoundingPayload>((await handler({ execute })).content[0]!.text);
+      expect(payload.summary).toMatchObject({ fx_already_reconciled: 0, fx_difference: 0, review: 1 });
+      expect(payload.candidates[0]).toMatchObject({ category: "review", already_reconciled: false, existing_fx_journal_id: 777 });
+      expect(payload.candidates[0]!.proposed_action).toMatch(/777/);
+      expect(payload.candidates[0]!.proposed_action).not.toMatch(/Already reconciled/);
+    }
+    expect(journalCreate).not.toHaveBeenCalled();
+    expect(journalConfirm).not.toHaveBeenCalled();
   });
 
   it("execute re-reads invoices, transactions and journals uncached before the gating reads; dry run stays cached", async () => {

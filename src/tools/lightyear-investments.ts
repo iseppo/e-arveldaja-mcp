@@ -6206,7 +6206,7 @@ export function registerLightyearTools(
           });
         }
 
-        // 1. Same-date idempotency first.
+        // 1. Keep same-date duplicate protection, but verify current prerequisites before success.
         const docKey = revaluationDocKey(key.lightyear_account, as_of);
         const documentNumber = formatDocNumber(docKey);
         let journals: Journal[];
@@ -6232,18 +6232,18 @@ export function registerLightyearTools(
               document_number: documentNumber, broker_net_cents: sameDate.fx_cents, postings: sameDate.postings, effective_date: sameDate.effective_date,
             }) === "ok";
           }
-          return matches ? done({ kind: "already_booked", checkpoint: sameDate }) : review("fx_revaluation_conflict", documentNumber);
+          if (!matches) return review("fx_revaluation_conflict", documentNumber);
         }
-        if (sameNumber.length > 0) return review("fx_revaluation_conflict", documentNumber);
+        if (!sameDate && sameNumber.length > 0) return review("fx_revaluation_conflict", documentNumber);
         // 2. Never back-dated.
-        if (view.checkpoints.some(c => c.as_of >= as_of)) return review("usd_pool_checkpoint_after_date");
+        if (!sameDate && view.checkpoints.some(c => c.as_of >= as_of)) return review("usd_pool_checkpoint_after_date");
         // 3. Whole chain, registered journals, completeness.
         const fundingTickers = KNOWN_CASH_EQUIVALENT_TICKERS;
         const tradeExtraction = extractTrades(rows, { fundingTickers });
         const distributionExtraction = extractDistributions(rows, tradeReservedConversionRefsWithFunding(rows, fundingTickers));
         const order = checkpointOrder("revaluation", as_of);
         const validated = await validateUsdPool({
-          api, store: usdPoolStore, key, until: order, newRecords: [order],
+          api, store: usdPoolStore, key, until: order, newRecords: sameDate ? [] : [order],
           statement: { ...statementPoolEvents(rows, tradeExtraction, distributionExtraction, fundingTickers), period },
           requireRegistered: true,
         });
@@ -6254,6 +6254,7 @@ export function registerLightyearTools(
         // 4. Quantity proof against the Lightyear holding.
         const state = poolStateAtEnd(snapshotState);
         if (state.usd_cents !== expectedCents) return review("usd_pool_quantity_mismatch", `replayed ${(state.usd_cents / 100).toFixed(2)} USD`);
+        if (sameDate) return done({ kind: "already_booked", checkpoint: sameDate });
         // 5. ECB target.
         if (!outcome.ok) return review(outcome.code);
         const target = usdCentsToEurCents(state.usd_cents, outcome.rate.rate);

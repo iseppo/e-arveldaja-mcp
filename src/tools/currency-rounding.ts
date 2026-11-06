@@ -17,6 +17,7 @@ import { applyPurchaseItemStructuralDefaults } from "./purchase-vat-defaults.js"
 import { desandboxAllStrings } from "../external-text-renderer.js";
 import { BookingGuard } from "../booking-guard.js";
 import { todayInTallinn } from "../local-date.js";
+import { postingSignature } from "../limited-vat.js";
 import { isStrictDate } from "../strict-date.js";
 import { signedBankTransactionDirection } from "../bank-transaction-direction.js";
 import { loadProvenBankDirection } from "../bank-transaction-journal-direction.js";
@@ -56,12 +57,14 @@ export interface ReconcileCandidate {
   liability_account_id: number | null;
   liability_account_dimension_id: number | null;
   provenance_error?: SettlementProvenanceError;
-  // True when an FX-difference journal (document_number "FX:{invoice_id}")
-  // already exists for this invoice. The paid-vs-booked diff persists after the
+  // True only when the existing registered FX journal matches this adjustment.
+  // The paid-vs-booked diff persists after the
   // FX journal is posted (the journal touches the liability/P&L accounts, not
   // the invoice's linked payments), so without this guard a second execute run
   // would create a duplicate FX journal for the same residual.
   already_reconciled?: boolean;
+  /** Existing draft or conflicting journal retained for review and duplicate protection. */
+  existing_fx_journal_id?: number;
 }
 
 export interface ReconcileCurrencyRoundingPayload {
@@ -461,6 +464,7 @@ function candidateSetFingerprint(
       currency: c.cl_currencies_id,
       category: c.category,
       already_reconciled: c.already_reconciled ?? false,
+      existing_fx_journal_id: c.existing_fx_journal_id,
       paid_eur: c.paid_eur,
       diff_eur: c.diff_eur,
       booked_eur: c.base_gross_price ?? null,
@@ -483,7 +487,7 @@ export function registerCurrencyRoundingTools(
   runtimeSafetyContext: RuntimeSafetyContext,
 ): void {
   registerTool(server, "reconcile_currency_rounding",
-    "Reconcile small PARTIALLY_PAID purchase-invoice currency residuals. DRY RUN by default and returns a plan_handle; execute=true + that plan_handle applies in-place fixes for <0.10 EUR or FX journals for 0.10-1.00 EUR only when a fresh scan still matches the reviewed candidates (otherwise plan_drift, nothing written).",
+    "Reconcile small PARTIALLY_PAID purchase-invoice currency residuals. DRY RUN by default and returns a plan_handle; execute=true + that plan_handle applies in-place fixes for <0.10 EUR or FX journals for 0.10-1.00 EUR only when a fresh scan still matches the reviewed candidates (otherwise plan_drift, nothing written). Existing FX drafts or journals that do not match the expected registered booking stay in review with their journal ID; no duplicate is created.",
     {
       execute: z.boolean().optional().describe("Apply the proposed fixes (default false = dry run)"),
       plan_handle: z.string().optional().describe("execute=true: the plan_handle from the reviewed dry run (required)"),
@@ -555,8 +559,6 @@ export function registerCurrencyRoundingTools(
       // does NOT block re-booking — the residual is still open, so the operator
       // invalidated it precisely to re-post it.
       const guard = await BookingGuard.load(api);
-      const isFxReconciled = (invoiceId: number): boolean =>
-        guard.find({ ns: "FX", id: String(invoiceId) }) !== undefined;
 
       const candidates: ReconcileCandidate[] = [];
       // Invoice lines re-sent with a small_rounding PATCH: the API refuses an
@@ -637,6 +639,8 @@ export function registerCurrencyRoundingTools(
         let proposedBaseGrossPrice: number | undefined;
         let proposedBaseNetPrice: number | undefined;
         let proposedBaseVatPrice: number | undefined;
+        let alreadyReconciled = false;
+        let existingFxJournalId: number | undefined;
 
         // A settlement that rounds to 0.00 EUR yields no rate (gross / 0) and
         // no FX basis: review it instead of proposing a correction.
@@ -688,8 +692,32 @@ export function registerCurrencyRoundingTools(
           // loss (D 8500, the same combined FX account) and credit liability.
           const isOverstated = diff > 0;
           const fxAccount = isOverstated ? fxGainAccount : fxLossAccount;
-          if (isFxReconciled(full.id!)) {
-            proposedAction = `Already reconciled — an FX journal (FX:${full.id}) exists for this invoice; skipping to avoid a duplicate.`;
+          const existing = guard.find({ ns: "FX", id: String(full.id!) });
+          if (existing) {
+            existingFxJournalId = existing.journal_id;
+            if (existing.registered) {
+              try {
+                const journal = await api.journals.get(existing.journal_id);
+                const expectedPostings = [
+                  { accounts_id: provenance.liabilityAccountId, accounts_dimensions_id: provenance.liabilityDimensionId, type: isOverstated ? "D" : "C", amount: Math.abs(diff) },
+                  { accounts_id: fxAccount, type: isOverstated ? "C" : "D", amount: Math.abs(diff) },
+                ];
+                alreadyReconciled = journal.id === existing.journal_id && journal.registered === true &&
+                  journal.is_deleted !== true && journal.document_number === `FX:${full.id}` &&
+                  journal.cl_currencies_id === "EUR" &&
+                  journal.effective_date === (provenance.settlementDate ?? full.create_date ?? todayInTallinn()) &&
+                  canonicalPlanJson(postingSignature(journal.postings ?? [])) === canonicalPlanJson(postingSignature(expectedPostings));
+              } catch {
+                // An unavailable readback cannot prove completion; retain the
+                // artifact as duplicate protection and expose it for review.
+              }
+            }
+            if (alreadyReconciled) {
+              proposedAction = `Already reconciled — registered FX journal (FX:${full.id}, id ${existing.journal_id}) matches this adjustment; skipping to avoid a duplicate.`;
+            } else {
+              category = "review";
+              proposedAction = `Flag for review — existing FX journal (FX:${full.id}, id ${existing.journal_id}) is unregistered or its expected booking could not be verified. Check its registration, date and postings; no duplicate will be created.`;
+            }
           } else {
             proposedAction = `Book ${Math.abs(diff).toFixed(2)} EUR FX adjustment journal: ${isOverstated ? `D ${provenance.liabilityAccountId} / C ${fxAccount} (FX gain — booked liability higher than Wise settlement)` : `D ${fxAccount} / C ${provenance.liabilityAccountId} (FX loss — booked liability lower than Wise settlement)`}.`;
           }
@@ -727,7 +755,8 @@ export function registerCurrencyRoundingTools(
           contributing_transaction_ids: provenance.contributingTransactionIds,
           liability_account_id: provenance.liabilityAccountId,
           liability_account_dimension_id: provenance.liabilityDimensionId ?? null,
-          already_reconciled: category === "fx_difference" && isFxReconciled(full.id!),
+          already_reconciled: alreadyReconciled,
+          ...(existingFxJournalId === undefined ? {} : { existing_fx_journal_id: existingFxJournalId }),
         });
       }
 
@@ -847,14 +876,14 @@ export function registerCurrencyRoundingTools(
                 },
               );
               if (outcome.status === "duplicate") {
-                // A concurrent run (or an in-snapshot journal the pre-scan
-                // missed) already booked this residual — treat as already
-                // reconciled rather than double-posting.
+                // The guard protects against another draft as well as a booked
+                // journal. Its existence alone does not prove reconciliation.
                 applied.push({
                   invoice_id: c.invoice_id,
                   category: c.category,
-                  action: `Already reconciled — FX journal (FX:${c.invoice_id}, id ${outcome.journal_id}) exists; skipped to avoid a duplicate.`,
-                  result: "success",
+                  action: `Review existing FX journal (FX:${c.invoice_id}, id ${outcome.journal_id}); skipped to avoid a duplicate.`,
+                  result: "error",
+                  error: "The existing journal was not verified by this plan. Run a fresh dry run to review its registration and booking.",
                 });
                 continue;
               }

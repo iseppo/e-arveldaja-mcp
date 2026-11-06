@@ -246,6 +246,8 @@ For transfers between your own bank accounts (counterparty matches company name 
 
 Call `reconcile_bank_transactions` with `mode: "inter_account_dry_run"` (add `target_accounts_dimensions_id` when there are 3+ bank accounts and the IBAN is missing). By default a matched pair keeps the outgoing leg; when the owner prefers the incoming account's row (for example its statement carries the better description), add `keep_side: "incoming"`.
 
+For a foreign-currency pair, both legs need an explicit EUR `base_amount` agreeing with any supplied `currency_rate`. Missing or conflicting EUR evidence is a `conflicting_transfer_amounts` review; do not substitute nominal currency or calculate a replacement from the rate alone.
+
 The dry run returns a `plan_handle` (<!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:standard -->
 Capability condition for `standard`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `confirm_transaction`. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.
 
