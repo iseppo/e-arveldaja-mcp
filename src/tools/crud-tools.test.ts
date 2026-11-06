@@ -2251,7 +2251,8 @@ describe("H05 correction tool inventory and workflow", () => {
     };
     const get = vi.fn()
       .mockResolvedValueOnce(initialInvoice)
-      .mockResolvedValueOnce({ ...initialInvoice, ...drift });
+      .mockResolvedValueOnce(initialInvoice)
+      .mockResolvedValue({ ...initialInvoice, ...drift });
     const patch = vi.fn().mockResolvedValue({ code: 200, messages: [] });
     const purchaseInvoices = new PurchaseInvoicesApi({
       cacheNamespace: `h05-public-${code}`,
@@ -2296,9 +2297,11 @@ describe("H05 correction tool inventory and workflow", () => {
       error,
       next_action: nextAction,
     });
-    expect(get).toHaveBeenCalledTimes(2);
+    expect(get).toHaveBeenCalledTimes(4);
     expect(get).toHaveBeenNthCalledWith(1, "/purchase_invoices/7");
     expect(get).toHaveBeenNthCalledWith(2, "/purchase_invoices/7");
+    expect(get).toHaveBeenNthCalledWith(3, "/purchase_invoices/7");
+    expect(get).toHaveBeenNthCalledWith(4, "/purchase_invoices/7");
     expect(patch).not.toHaveBeenCalled();
     expect(logAudit).not.toHaveBeenCalled();
   });

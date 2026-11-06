@@ -155,10 +155,18 @@ describe("limited VAT month computation", () => {
       expect(run("2026-03", prepaidWith([{ date: "2026-03-28", amount: 99.99 }])).reviews.map(review => review.code)).toEqual(["limited_vat_partial_prepayment"]);
     });
 
-    it("books two early payments that together cover the gross", () => {
-      const row = prepaidWith([{ date: "2026-03-20", amount: 60 }, { date: "2026-03-28", amount: 40 }]);
+    it("books two payments on the earliest date that together cover the gross", () => {
+      const row = prepaidWith([{ date: "2026-03-20", amount: 60 }, { date: "2026-03-20", amount: 40 }]);
       expect(run("2026-03", row).included).toEqual([expect.objectContaining({ invoice_id: 30, service_date: "2026-03-20" })]);
       expect(run("2026-04", row).reviews).toEqual([]);
+    });
+
+    it("T1: holds instalments on different dates even within one month", () => {
+      const row = prepaidWith([{ date: "2026-03-28", amount: 40 }, { date: "2026-03-20", amount: 60 }]);
+      for (const month of ["2026-03", "2026-04"]) {
+        expect(run(month, row).included).toEqual([]);
+        expect(run(month, row).reviews.map(review => review.code)).toEqual(["limited_vat_partial_prepayment"]);
+      }
     });
 
     it("keeps a payment on or after the invoice date unchanged (invoice month, no review)", () => {
@@ -204,7 +212,7 @@ describe("limited VAT month computation", () => {
       expect(codes(prepaidWith([{ date: "2026-03-20", amount: 160 }, { date: "2026-03-28", amount: -60 }]))).toEqual(["limited_vat_partial_prepayment"]);
       expect(codes(credit([{ date: "2026-03-20", amount: -60 }, { date: "2026-03-28", amount: 40 }]))).toEqual(["limited_vat_partial_prepayment"]);
       for (const signed of [[-60, -40], [60, 40]]) {
-        const row = credit(signed.map((amount, index) => ({ date: `2026-03-2${index}`, amount })));
+        const row = credit(signed.map(amount => ({ date: "2026-03-20", amount })));
         expect(run("2026-03", row).reviews).toEqual([]);
         expect(run("2026-03", row).included).toEqual([expect.objectContaining({ invoice_id: 33, vat: -24 })]);
       }

@@ -121,13 +121,14 @@ export function linkedPaymentAmount(transaction: Transaction, invoice: PurchaseI
 
 /**
  * Payments dated before the invoice date move the § 11 date only for the
- * prepaid part. `partial` = together they do not cover the invoice gross
+ * prepaid part. `partial` = payments on the earliest date do not cover the
+ * invoice gross
  * (invoice currency, integer cents, no tolerance); `unknown` = an early
  * payment's amount (or the gross) is not known, or its direction is not
  * proved: on an invoice every nonzero early amount must be positive; on a
  * credit note they must all share one sign (signed refunds or positive
  * magnitudes, never mixed). Undefined = no early payment, or the early
- * payments cover the whole gross.
+ * payments on the earliest date cover the whole gross.
  */
 export function partialPrepayment(invoice: PurchaseInvoice, payments: readonly LimitedVatPayment[]): "partial" | "unknown" | undefined {
   const early = earlyPayments(invoice, payments);
@@ -140,7 +141,9 @@ export function partialPrepayment(invoice: PurchaseInvoice, payments: readonly L
   const allNegative = cents.every(value => value < 0);
   const directionProved = grossCents > 0 ? allPositive : grossCents < 0 ? allPositive || allNegative : cents.length === 0;
   if (!directionProved) return "unknown";
-  const paidCents = Math.abs(cents.reduce((sum, value) => sum + value, 0));
+  const earliestDate = early.reduce((date, payment) => payment.date < date ? payment.date : date, early[0]!.date);
+  const paidCents = Math.abs(early.filter(payment => payment.date === earliestDate)
+    .reduce((sum, payment) => sum + Math.round(payment.amount! * 100), 0));
   return paidCents < Math.abs(grossCents) ? "partial" : undefined;
 }
 
@@ -312,7 +315,7 @@ export function computeLimitedVatMonth(
     const review = (code: LimitedVatReviewCode, message: string) =>
       result.reviews.push({ ...base, code, service_date: serviceDate, message });
     if (prepayment === "partial") {
-      review("limited_vat_partial_prepayment", "A payment dated before the invoice date covers only part of the invoice gross. Under KMS § 11 only the prepaid part arises on the payment day (that month, that day's ECB rate); the rest arises on the invoice date. Not included in either month (no automatic split): book this invoice's VAT by hand, or ask the accountant. / Enne arve kuupäeva tehtud ettemaks katab ainult osa arve summast. KMS § 11 järgi kuulub ettemaksu kuusse (ettemaksu päeva kursiga) ainult ettemakstud osa, ülejäänu arve kuupäeva kuusse. Arvet ei arvestata kummaski kuus — kirjenda selle arve käibemaks käsitsi või küsi raamatupidajalt.");
+      review("limited_vat_partial_prepayment", "Payments on the earliest prepayment date cover only part of the invoice gross. Under KMS § 11 each prepaid portion arises on its payment day (that month's VAT and that day's ECB rate); any unpaid remainder arises on the invoice date. Not included in any affected month (no automatic split): book this invoice's VAT by hand, or ask the accountant. / Esimese ettemaksupäeva maksed katavad ainult osa arve summast. KMS § 11 järgi kuulub iga ettemakstud osa selle maksepäeva kuusse ja kursiga; arve kuupäevaks tasumata osa arve kuupäeva kuusse. Arvet ei arvestata üheski puudutatud kuus — kirjenda selle arve käibemaks käsitsi või küsi raamatupidajalt.");
       continue;
     }
     if (prepayment === "unknown") {

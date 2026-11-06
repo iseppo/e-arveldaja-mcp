@@ -106,6 +106,14 @@ function extractAuthenticatedRunData(text: string): {
 }
 
 describe("registerPrompts", () => {
+  it("processes limited VAT before reading the statements used in the month-end summary (F6)", async () => {
+    const text = await getPromptText(setupPromptServer(), "month-end-close", { month: "2026-03" });
+    const vat = text.indexOf('Call `limited_vat` with `mode: "status"`');
+    expect(vat).toBeGreaterThan(-1);
+    for (const report of ["compute_trial_balance", "compute_profit_and_loss", "compute_balance_sheet"]) {
+      expect(text.indexOf(`Call \`${report}\``)).toBeGreaterThan(vat);
+    }
+  });
   it("keeps generated sales steps inside advertised-tool capability conditions", () => {
     const capabilitySection = (text: string, feature: string): string => {
       const start = `<!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:${feature} -->`;

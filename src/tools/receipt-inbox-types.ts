@@ -121,6 +121,7 @@ export interface ReceiptProcessingContext {
   purchaseArticlesWithVat: Awaited<ReturnType<typeof getPurchaseArticlesWithVat>>;
   accounts: Account[];
   isVatRegistered: boolean;
+  fullVatRegistrationFrom?: string | null;
   /** The company VAT status (src/company-vat-status.ts); drives the KMS § 21 advisory note only. */
   companyVatStatus?: "none" | "limited" | "full";
 }

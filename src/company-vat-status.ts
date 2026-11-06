@@ -495,7 +495,30 @@ export function requireKnownCompanyVatStatus(resolved: ResolvedCompanyVatStatus)
  */
 export async function isCompanyVatRegistered(
   api: { readonly: { getVatInfo(options?: { fresh?: boolean }): Promise<CompanyVatInfo> } },
-  deps: CompanyVatStatusDeps = {},
+  deps: CompanyVatStatusDeps & {
+    purchaseDate?: string | null;
+    /** Explicit owner review of historical deduction: false = no deduction; true = statutory exception approved. */
+    preRegistrationVatDeductionApproved?: boolean;
+  } = {},
 ): Promise<boolean> {
-  return requireKnownCompanyVatStatus(await resolveCompanyVatStatus(api, deps)) === "full";
+  const resolved = await resolveCompanyVatStatus(api, deps);
+  if (requireKnownCompanyVatStatus(resolved) !== "full") return false;
+  if (deps.purchaseDate && resolved.effective_from && deps.purchaseDate < resolved.effective_from) {
+    if (deps.preRegistrationVatDeductionApproved !== undefined) return deps.preRegistrationVatDeductionApproved;
+    throw new PurchaseVatHistoricalReviewError(deps.purchaseDate, resolved.effective_from);
+  }
+  return true;
+}
+
+export class PurchaseVatHistoricalReviewError extends Error {
+  readonly code = "purchase_vat_historical_review_required";
+  readonly mutation_occurred = false;
+  constructor(readonly purchase_date: string, readonly full_registration_from: string) {
+    super(`purchase_vat_historical_review_required: Purchase ${purchase_date} predates full VAT registration ${full_registration_from}. ` +
+      "Current registration does not prove historical input-VAT deduction. Nothing was written. " +
+      "Omanikule: arve on täieliku käibemaksukohustuse algusest varasem. Kontrolli varasemat staatust ja mahaarvamise õigust; sisendkäibemaksu automaatselt maha ei arvata. " +
+      "After owner review, use create_purchase_invoice / confirm_purchase_invoice with pre_registration_vat_deduction_approved:false for a non-deductible invoice, " +
+      "or true only for an approved statutory deduction exception. Correct an existing draft's VAT rows before confirming without deduction.");
+    this.name = "PurchaseVatHistoricalReviewError";
+  }
 }

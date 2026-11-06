@@ -1083,13 +1083,15 @@ class ReceiptBatchOperationsImpl implements ReceiptBatchOperations {
       }
       const vatInfo = await this.api.readonly.getVatInfo();
       const ownCompanyVat = vatInfo.vat_number?.trim() || undefined;
-      const companyVatStatus = requireKnownCompanyVatStatus(await companyVatStatusFromInfo(vatInfo));
+      const resolvedVatStatus = await companyVatStatusFromInfo(vatInfo);
+      const companyVatStatus = requireKnownCompanyVatStatus(resolvedVatStatus);
       const context: ReceiptProcessingContext = {
         clients: await this.api.clients.listAll(),
         purchaseInvoices: await this.api.purchaseInvoices.listAll(),
         purchaseArticlesWithVat: await getPurchaseArticlesWithVat(this.api),
         accounts: await this.api.readonly.getAccounts(),
         isVatRegistered: companyVatStatus === "full",
+        fullVatRegistrationFrom: companyVatStatus === "full" ? resolvedVatStatus.effective_from : null,
         companyVatStatus,
       };
       const ownCompanyRegistryCode = deriveOwnCompanyRegistryCode(

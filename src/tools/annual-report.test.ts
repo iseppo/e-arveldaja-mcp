@@ -10,6 +10,9 @@ import * as annualReport from "./annual-report.js";
 import { computeBalanceSheetReport, computeProfitAndLossReport } from "./financial-statements.js";
 import { UNTRUSTED_OCR_START_PREFIX } from "../mcp-json.js";
 import { parseMcpResponse } from "../__fixtures__/mcp-response.js";
+import { parseToolPayload } from "../__fixtures__/mcp-response.js";
+import { createTestRuntimeSafetyContext } from "../__fixtures__/runtime-safety.js";
+import type { YearEndClosePreview } from "./annual-report.js";
 import { makePosting, makeJournal } from "../__fixtures__/accounting.js";
 import { resetAccountingRulesCache } from "../accounting-rules.js";
 import { MutationIndeterminateError } from "../mutation-outcome.js";
@@ -54,9 +57,9 @@ describe("bounded cash evidence public annual report",()=>{
     if(review)expect(cf.unresolved_cash.receipt_total).toBe(70);
     else expect(cf.cash_movements.items[0]).toMatchObject({receipt_total:Math.max(net,0),payment_total:Math.max(-net,0)});
   });
-  it("exposes known cash gross despite a malformed noncash counterpart",async()=>{
-    const report=await buildAnnualReportData(createApi([makeJournal("2026-06-01",[makePosting(1020,"D",95),makePosting(5990,"C",108,undefined,{cl_currencies_id:"USD"})],{id:401})]),2026);
-    expect(report.cash_flow_statement).toMatchObject({status:"requires_review",unresolved_cash:{receipt_total:95,payment_total:0,net:95},evidence_coverage:{unvalued_cash_posting_count:0}});
+  it("holds annual statements when a foreign noncash counterpart has no EUR value (T3)",async()=>{
+    await expect(buildAnnualReportData(createApi([makeJournal("2026-06-01",[makePosting(1020,"D",95),makePosting(5990,"C",108,undefined,{cl_currencies_id:"USD"})],{id:401})]),2026))
+      .rejects.toThrow("posting_eur_amount_unverified");
   });
   it.each([60,100])("handles gross fixed asset with accumulated depreciation %s through annual adapter",async depreciation=>{
     const contra=makeAccount({id:1890,balance_type:"C",account_type_est:"Varad",account_type_eng:"Assets",name_est:"Akumuleeritud kulum",name_eng:"Accumulated depreciation"});
@@ -262,11 +265,23 @@ function setupTool(
     purchaseInvoices: options.purchaseInvoices,
     ...(options.journalsCreate !== undefined ? { journalsCreate: options.journalsCreate } : {}),
   });
-  registerAnnualReportTools(server, api);
+  registerAnnualReportTools(server, api, createTestRuntimeSafetyContext());
 
   const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === toolName);
   if (!registration) throw new Error(`Tool '${toolName}' was not registered`);
-  return registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+  type Handler = (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+  const handler = registration[2] as Handler;
+  if (toolName !== "execute_year_end_close") return handler;
+  // Legacy execution tests focus on accounting/partial writes; explicitly prepare
+  // the same proposal first. Plan-contract regressions use the raw handlers above.
+  const prepare = server.registerTool.mock.calls.find(([name]: [string]) => name === "prepare_year_end_close")![2] as Handler;
+  return async (args) => {
+    if (args.confirm !== true || args.plan_handle) return handler(args);
+    const preview = await prepare(args);
+    const payload = parseToolPayload<YearEndClosePreview | { error: string }>(preview.content[0]!.text);
+    if ("error" in payload) return preview;
+    return handler({ ...args, plan_handle: payload.plan_handle });
+  };
 }
 
 function extractEquity(report: Record<string, unknown>) {
@@ -303,6 +318,92 @@ function makeM20BaseJournals(): Journal[] {
     ], { id: 1005, registered: true }),
   ];
 }
+
+describe("year-end approved plan binding (T6/F4)", () => {
+  function setup() {
+    const journals = makeM20BaseJournals();
+    const journalsCreate = vi.fn().mockResolvedValue({ created_object_id: 9901 });
+    const api = createApi(journals, { journalsCreate });
+    const register = vi.fn<(name: string, config: unknown, callback: unknown) => unknown>();
+    const server = { registerTool: register } as unknown as Parameters<typeof registerAnnualReportTools>[0];
+    const ctx = createTestRuntimeSafetyContext();
+    registerAnnualReportTools(server, api, ctx);
+    const calls = register.mock.calls;
+    const tool = (name: string) => {
+      const callback = calls.find(([toolName]) => toolName === name)?.[2];
+      if (!callback) throw new Error(`Missing ${name}`);
+      return callback as unknown as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+    };
+    const prepare = tool("prepare_year_end_close");
+    const execute = tool("execute_year_end_close");
+    const preview = async (options: Record<string, unknown> = {}) => parseToolPayload<YearEndClosePreview>((await prepare({ year: 2025, ...options })).content[0]!.text);
+    return { journals, journalsCreate, api, ctx, execute, preview };
+  }
+
+  it("requires a reviewed preview handle before executing (T6/F4)", async () => {
+    const { execute, journalsCreate } = setup();
+    const result = await execute({ year: 2025, confirm: true });
+    expect(result.content[0]!.text).toContain("plan_handle_required");
+    expect(result.content[0]!.text).toContain("Nothing was written.");
+    expect(journalsCreate).not.toHaveBeenCalled();
+  });
+
+  it("holds fresh entries changed by an ordinary expense after preview (T6/F4)", async () => {
+    const { preview, journals, execute, journalsCreate } = setup();
+    const approved = await preview();
+    journals.push(makeJournal("2025-09-01", [makePosting(5990, "D", 20), makePosting(1020, "C", 20)], { id: 9910 }));
+    const result = await execute({ year: 2025, confirm: true, plan_handle: approved.plan_handle });
+    expect(result.content[0]!.text).toContain("plan_drift");
+    expect(journalsCreate).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { year: 2024 },
+    { reserve_capital_amount: 5 },
+    { reserve_capital_account: 2940 },
+    { allow_additional_transfer: true },
+  ])("holds changed close options %j (T6/F4)", async (changed) => {
+    const { preview, execute, journalsCreate } = setup();
+    const approved = await preview();
+    const result = await execute({ year: 2025, confirm: true, plan_handle: approved.plan_handle, ...changed });
+    expect(result.content[0]!.text).toContain("plan_drift");
+    expect(journalsCreate).not.toHaveBeenCalled();
+  });
+
+  it("executes an unchanged approved proposal once (T6/F4)", async () => {
+    const { preview, execute, journalsCreate } = setup();
+    const approved = await preview();
+    expect(approved.plan_handle).toBeTypeOf("string");
+    await execute({ year: 2025, confirm: true, plan_handle: approved.plan_handle });
+    expect(journalsCreate).toHaveBeenCalledTimes(2);
+    const result = await execute({ year: 2025, confirm: true, plan_handle: approved.plan_handle });
+    expect(result.content[0]!.text).toContain("plan_handle_consumed");
+    expect(journalsCreate).toHaveBeenCalledTimes(2);
+  });
+
+  it("holds a handle after changing company scope (T6/F4)", async () => {
+    const { preview, execute, ctx, journalsCreate } = setup();
+    const approved = await preview();
+    ctx.setScope({ connectionGeneration: 1 });
+    const result = await execute({ year: 2025, confirm: true, plan_handle: approved.plan_handle });
+    expect(result.content[0]!.text).toContain("plan_scope_mismatch");
+    expect(journalsCreate).not.toHaveBeenCalled();
+  });
+
+  it("binds the actual posting subaccount shown in the preview (T6/F4)", async () => {
+    const { preview, execute, api, journalsCreate } = setup();
+    const accounts = await api.readonly.getAccounts();
+    accounts.find((account) => account.id === 9000)!.allows_dimensions = true;
+    let dimension = 91;
+    api.readonly.getAccountDimensions = vi.fn(async () => [{ id: dimension, accounts_id: 9000, title_est: "Result" }]);
+    const approved = await preview();
+    expect(approved.proposed_journal_entries[0]!.postings[0]!.accounts_dimensions_id).toBe(91);
+    dimension = 92;
+    const result = await execute({ year: 2025, confirm: true, plan_handle: approved.plan_handle });
+    expect(result.content[0]!.text).toContain("plan_drift");
+    expect(journalsCreate).not.toHaveBeenCalled();
+  });
+});
 
 function makeM20ClosingJournal(
   id: number,
@@ -1343,7 +1444,7 @@ describe("execute_year_end_close partial-mutation visibility (F-YEAR-END-PARTIAL
     expect(journals.filter((journal) => String(journal.document_number ?? "").startsWith("YEC-")).map((journal) => journal.document_number).sort())
       .toEqual(["YEC-RESULT-2025", "YEC-RETAINED-2025"]);
     const payloads = results.map((result) => parseMcpResponse(result.content[0]!.text) as Record<string, any>);
-    expect(payloads.filter((payload) => payload.error === "Year-end close already exists")).toHaveLength(1);
+    expect(payloads.filter((payload) => payload.error_code === "plan_drift")).toHaveLength(1);
   });
 
   it("refuses the execute (fail closed) when the company identity for the booking lock cannot be read", async () => {
@@ -1351,9 +1452,11 @@ describe("execute_year_end_close partial-mutation visibility (F-YEAR-END-PARTIAL
     const api = createApi(makeM20BaseJournals(), { journalsCreate });
     api.readonly.getVatInfo = vi.fn().mockRejectedValue(Object.assign(new Error("HTTP 503"), { status: 503 }));
     const server = { registerTool: vi.fn() } as any;
-    registerAnnualReportTools(server, api);
+    registerAnnualReportTools(server, api, createTestRuntimeSafetyContext());
     const handler = server.registerTool.mock.calls.find(([name]: [string]) => name === "execute_year_end_close")[2];
-    const result = await handler({ year: 2025, confirm: true });
+    const prepare = server.registerTool.mock.calls.find(([name]: [string]) => name === "prepare_year_end_close")[2];
+    const preview = parseToolPayload<YearEndClosePreview>((await prepare({ year: 2025 })).content[0]!.text);
+    const result = await handler({ year: 2025, confirm: true, plan_handle: preview.plan_handle });
     expect(result.isError).toBe(true);
     expect(result.content[0]!.text).toContain("Could not determine company identity for the booking lock; retry");
     expect(journalsCreate).not.toHaveBeenCalled();
@@ -1381,14 +1484,14 @@ describe("execute_year_end_close partial-mutation visibility (F-YEAR-END-PARTIAL
     };
     const listAllWithPostings = vi.spyOn(api.journals, "listAllWithPostings");
     const server = { registerTool: vi.fn() } as any;
-    registerAnnualReportTools(server, api as never);
+    registerAnnualReportTools(server, api as never, createTestRuntimeSafetyContext());
     const tool = (name: string) => server.registerTool.mock.calls.find(([toolName]: [string]) => toolName === name)![2] as
       (args: Record<string, unknown>) => Promise<unknown>;
 
-    await tool("prepare_year_end_close")({ year: 2025 });
+    const preview = parseToolPayload<YearEndClosePreview>(((await tool("prepare_year_end_close")({ year: 2025 })) as { content: Array<{ text: string }> }).content[0]!.text);
     expect(api.journals.invalidateListCache).not.toHaveBeenCalled();
 
-    await tool("execute_year_end_close")({ year: 2025, confirm: true });
+    await tool("execute_year_end_close")({ year: 2025, confirm: true, plan_handle: preview.plan_handle });
     const invalidateOrder = api.journals.invalidateListCache.mock.invocationCallOrder;
     expect(invalidateOrder).toHaveLength(1);
     expect(invalidateOrder[0]!).toBeLessThan(listAllWithPostings.mock.invocationCallOrder.at(-1)!);
@@ -1430,6 +1533,74 @@ describe("RIK year-end close (Äriühingu majandusaasta lõpetamiskanded e-arvel
     const handler = setupTool("prepare_year_end_close", { journals });
     return parseMcpResponse((await handler({ year: 2025, ...args })).content[0]!.text) as Record<string, any>;
   }
+
+  it.each(["posting", "journal"])("holds preparation and execution when %s currency is foreign without EUR base amounts (T3)", async (currencySource) => {
+    const journals = [capital, makeJournal("2025-06-01", [
+      makePosting(1020, "D", 100, undefined, currencySource === "posting" ? { cl_currencies_id: "USD" } : {}),
+      makePosting(3100, "C", 100, undefined, currencySource === "posting" ? { cl_currencies_id: "USD" } : {}),
+    ], { id: 3801, ...(currencySource === "journal" ? { cl_currencies_id: "USD" } : {}) })];
+    const journalsCreate = vi.fn().mockResolvedValue({ created_object_id: 9991 });
+    const preview = setupTool("prepare_year_end_close", { journals });
+    const execute = setupTool("execute_year_end_close", { journals, journalsCreate });
+    await expect(preview({ year: 2025 })).rejects.toThrow("posting_eur_amount_unverified");
+    await expect(execute({ year: 2025, confirm: true })).rejects.toThrow("Nothing was written.");
+    expect(journalsCreate).not.toHaveBeenCalled();
+  });
+
+  it("holds an unvalued foreign draft close used in existing-close comparisons (T3)", async () => {
+    const draft = handTransfer({ registered: false, cl_currencies_id: "USD" });
+    const journalsCreate = vi.fn().mockResolvedValue({ created_object_id: 9991 });
+    await expect(setupTool("prepare_year_end_close", { journals: [...profitYear(), draft] })({ year: 2025 }))
+      .rejects.toThrow("posting_eur_amount_unverified");
+    await expect(setupTool("execute_year_end_close", { journals: [...profitYear(), draft], journalsCreate })({ year: 2025, confirm: true }))
+      .rejects.toThrow("posting_eur_amount_unverified");
+    expect(journalsCreate).not.toHaveBeenCalled();
+  });
+
+  it.each([undefined, "EUR"])("keeps EUR postings without base_amount working: currency=%s (T3)", async (currency) => {
+    const journals = profitYear().map((journal) => ({ ...journal, cl_currencies_id: currency }));
+    const payload = await prepare(journals);
+    expect(payload.current_year_result.net_profit).toBe(50);
+    expect(payload.execution_status.can_execute).toBe(true);
+  });
+
+  it("uses verified EUR bases for foreign ledger and existing-close amounts (T3)", async () => {
+    const journals = [...profitYear(), handResult(), handTransfer()].map((journal) => ({
+      ...journal,
+      cl_currencies_id: "USD",
+      postings: journal.postings?.map((posting) => ({ ...posting, amount: posting.amount * 1.1, base_amount: posting.amount })),
+    }));
+    const payload = await prepare(journals);
+    expect(payload.current_year_result.net_profit).toBe(50);
+    expect(payload.close_status.status).toBe("closed");
+  });
+
+  it.each([5990, 2960, 2970, 9000, 2920])("refuses reserve account %s without an independent reserve role (T4)", async (reserveAccount) => {
+    const journalsCreate = vi.fn().mockResolvedValue({ created_object_id: 9991 });
+    for (const toolName of ["prepare_year_end_close", "execute_year_end_close"]) {
+      const handler = setupTool(toolName, { journals: profitYear(), journalsCreate });
+      const result = await handler({ year: 2025, confirm: true, reserve_capital_amount: 5, reserve_capital_account: reserveAccount });
+      expect(result.content[0]!.text).toContain("Reserve capital account");
+      expect(result.content[0]!.text).toContain("Omakapital reserve");
+    }
+    expect(journalsCreate).not.toHaveBeenCalled();
+  });
+
+  it("accepts an independently name-resolved custom Omakapital reserve override (T4)", async () => {
+    const handler = setupTool("prepare_year_end_close", { journals: profitYear(), extraAccounts: [
+      makeAccount({ id: 2955, balance_type: "C", account_type_est: "Omakapital", account_type_eng: "Equity", name_est: "Kohustuslik reservkapital", name_eng: "Reserve capital" }),
+    ] });
+    const result = await handler({ year: 2025, reserve_capital_amount: 5, reserve_capital_account: 2955 });
+    expect(result.content[0]!.text).toContain("reserve_capital: 2955");
+  });
+
+  it("validates the automatically resolved reserve role too (T4)", async () => {
+    const handler = setupTool("prepare_year_end_close", { journals: profitYear(), extraAccounts: [
+      makeAccount({ id: 2940, balance_type: "D", account_type_est: "Kulud", account_type_eng: "Expenses", name_est: "Kohustuslik reservkapital", name_eng: "Incorrectly classified reserve" }),
+    ] });
+    const result = await handler({ year: 2025, reserve_capital_amount: 5 });
+    expect(result.content[0]!.text).toContain("Omakapital reserve");
+  });
 
   it("does not mistake an INITIAL result-shaped entry for the year-end close", async () => {
     const payload = await prepare([...profitYear(), handResult({ operation_type: "INITIAL" })]);

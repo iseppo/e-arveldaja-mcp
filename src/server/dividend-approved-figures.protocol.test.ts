@@ -68,7 +68,7 @@ describe("prepare_dividend_package over MCP", () => {
     try {
       const response = await client.callTool({
         name: "prepare_dividend_package",
-        arguments: { net_dividend: 1000, shareholder_client_id: 1, effective_date: "2026-06-01", dry_run: false },
+        arguments: { net_dividend: 1000, shareholder_client_id: 1, effective_date: "2026-06-01", dry_run: true },
       });
       expect(response.isError).toBe(true);
       const data = parseToolPayload<DividendPackagePayload>((response.content as Array<{ text: string }>)[0]!.text);
@@ -104,6 +104,17 @@ describe("prepare_dividend_package over MCP", () => {
       expect(preview.isError ?? false).toBe(false);
       const data = parseToolPayload<DividendPackagePayload>((preview.content as Array<{ text: string }>)[0]!.text);
       expect(data.lg1_components).toMatchObject({ distributable_profit: 25000, ledger_position_at_report_end: 25000 });
+      expect(data.plan_handle).toEqual(expect.any(String));
+      const changed = await client.callTool({
+        name: "prepare_dividend_package",
+        arguments: {
+          net_dividend: 1100, shareholder_client_id: 1, effective_date: "2026-06-01",
+          approved_report_year: 2025, approved_retained_earnings: 5000, approved_profit_for_year: 20000,
+          dry_run: false, plan_handle: data.plan_handle,
+        },
+      });
+      expect(changed.isError).toBe(true);
+      expect(parseToolPayload<DividendPackagePayload>((changed.content as Array<{ text: string }>)[0]!.text).error_code).toBe("plan_drift");
     } finally {
       await close();
     }

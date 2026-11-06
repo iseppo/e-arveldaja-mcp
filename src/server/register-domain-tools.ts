@@ -75,9 +75,9 @@ export function registerDomainTools(ctx: RegisterDomainToolsContext): void {
   registerFinancialStatementTools(publicServer, api, toolExposure);
   registerAgingTools(publicServer, api, toolExposure);
   if (toolExposure.enableSales) registerRecurringInvoiceTools(publicServer, api);
-  if (toolExposure.enableTaxTools) registerEstonianTaxTools(publicServer, api);
+  if (toolExposure.enableTaxTools) registerEstonianTaxTools(publicServer, api, runtimeSafetyContext);
   if (toolExposure.enableTaxTools) registerLimitedVatTool(publicServer, api, runtimeSafetyContext);
-  if (toolExposure.enableAnnualReport) registerAnnualReportTools(publicServer, api);
+  if (toolExposure.enableAnnualReport) registerAnnualReportTools(publicServer, api, runtimeSafetyContext);
   registerDocumentAuditTools(publicServer, api);
   registerReceiptInboxTools(publicServer, api, runtimeSafetyContext, toolExposure);
   if (toolExposure.enableLightyear) registerLightyearTools(publicServer, api, runtimeSafetyContext);

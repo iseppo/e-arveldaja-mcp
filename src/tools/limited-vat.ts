@@ -405,18 +405,15 @@ interface MonthArgs {
 }
 
 function resolveLiabilityAccount(accounts: Account[], override: number | undefined): number | { error: CallToolResult } {
-  if (override !== undefined) {
-    const account = accounts.find(entry => entry.id === override);
-    if (!account || account.is_valid === false) {
-      return { error: refuse("limited_vat_liability_account_invalid", `Account ${override} is not an active account in the chart.`) };
-    }
-    return override;
-  }
-  const found = findAccountByName(accounts, VAT_LIABILITY_NAME_RE);
+  const found = override ?? findAccountByName(accounts, VAT_LIABILITY_NAME_RE);
   if (found === undefined) {
     return {
       error: refuse("limited_vat_liability_account_unresolved", "No VAT liability account (\"Käibemaksukohustis\" / \"Arvestatud käibemaks\" / \"Käibemaksuvõlg\") was found in the chart. Pass liability_account explicitly (the account number); it is never guessed."),
     };
+  }
+  const account = accounts.find(entry => entry.id === found);
+  if (!account || account.is_valid === false || account.account_type_est !== "Kohustused") {
+    return { error: refuse("limited_vat_liability_account_invalid", `Account ${found} must be an active liability account (Kohustused) in the chart.`) };
   }
   return found;
 }
@@ -515,6 +512,9 @@ async function buildMonth(
   for (const entry of proposed) classifications.set(entry.clients_id, entry.classification);
   const fx = options.fx === "resolve" ? await resolveFrozenFxOutcomes(fxKeysFor(loaded.inputs, month), options.ecb) : options.fx;
   const computation = computeLimitedVatMonth(month, loaded.inputs, classifications, fx);
+  if (computation.included.some(invoice => invoice.lines.some(line => line.accounts_id === liability))) {
+    return { error: refuse("limited_vat_liability_account_invalid", `VAT liability account ${liability} is also an invoice cost target; choose separate liability and expense accounts.`) };
+  }
   const byClient = new Map(loaded.clients.map(client => [client.id, client]));
   for (const invoice of loaded.unread) {
     const client = byClient.get(invoice.clients_id);

@@ -1360,7 +1360,7 @@ export function registerCreatePurchaseInvoiceFromPdfTool(server: McpServer, api:
       // remediation could carry a marker; strip once and use for BOTH the invoice
       // and the audit log (no-op when already clean).
       const supplierName = desandboxText(supplier.name);
-      const isVatReg = await isCompanyVatRegistered(api);
+      const isVatReg = await isCompanyVatRegistered(api, { purchaseDate: params.invoice_date });
       const purchaseArticles = await getPurchaseArticlesWithVat(api);
       // Parse items from the RAW payload, THEN deep-clean the parsed objects (a
       // JSON-string items field would otherwise keep wrapper framing in a title).

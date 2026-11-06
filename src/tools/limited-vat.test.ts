@@ -247,6 +247,46 @@ describe("limited_vat mode month", () => {
     expect(refused.text).toContain("liability_account");
   });
 
+  it.each(["override", "automatic"])("T2: refuses an expense account as the %s VAT liability target", async (selection) => {
+    const state = baseState({ accounts: [makeAccount(5000, "D", "Kulud", "Käibemaksukohustis")] });
+    const { call } = setup(state);
+    await setLimited(call);
+    const args = { mode: "month", month: "2026-03", ...(selection === "override" ? { liability_account: 5000 } : {}) };
+    const refused = await call(args);
+    expect(refused.result.isError).toBe(true);
+    expect(refused.text).toContain("limited_vat_liability_account_invalid");
+    expect(refused.text).toContain("Kohustused");
+    expect(refused.text).toContain("Nothing was written.");
+    expect(state.writes).toEqual([]);
+  });
+
+  it("T2: refuses a liability account that is also an invoice cost target", async () => {
+    const inv = invoice(1, 10, "2026-03-05", 100);
+    inv.items![0]!.purchase_accounts_id = 2410;
+    const state = baseState({ invoices: [inv] });
+    const { call } = setup(state);
+    await setLimited(call);
+    const refused = await call({ mode: "month", month: "2026-03", supplier_classifications: [{ clients_id: 10, classification: "counts" }] });
+    expect(refused.result.isError).toBe(true);
+    expect(refused.text).toContain("limited_vat_liability_account_invalid");
+    expect(refused.text).toContain("Nothing was written.");
+    expect(state.writes).toEqual([]);
+  });
+
+  it("T2: rechecks the liability role before execution", async () => {
+    const state = baseState();
+    const { call } = setup(state);
+    await setLimited(call);
+    const args = { mode: "month", month: "2026-03", liability_account: 2410, supplier_classifications: [{ clients_id: 10, classification: "counts" }] };
+    const dry = parseToolPayload<LimitedVatMonthPayload>((await call(args)).text);
+    state.accounts.find(account => account.id === 2410)!.account_type_est = "Kulud";
+    const refused = await call({ ...args, execute: true, plan_handle: dry.plan_handle });
+    expect(refused.result.isError).toBe(true);
+    expect(refused.text).toContain("limited_vat_liability_account_invalid");
+    expect(refused.text).toContain("Nothing was written.");
+    expect(state.writes).toEqual([]);
+  });
+
   it("dry run → approval → execute creates and confirms PKM-YYYY-MM once; a re-run is already_booked", async () => {
     const fetchImpl = vi.fn(async () => ({ ok: true, status: 200, headers: { get: () => null }, text: async () => csv("2026-03-10", "1.0800") })) as unknown as EcbFetch;
     const state = baseState({ invoices: [invoice(1, 10, "2026-03-05", 50), invoice(2, 11, "2026-03-10", 100, { cl_currencies_id: "USD" })] });
@@ -445,6 +485,26 @@ describe("limited_vat review fixes (fail closed)", () => {
     }
   });
 
+  it("T1: holds fully paid cross-month instalments in every affected month, including execute", async () => {
+    const state = baseState({
+      invoices: [invoice(1, 10, "2026-04-03", 100, { transactions: [70, 71] })],
+      transactions: [prepayment(70, "2026-02-10", 20), prepayment(71, "2026-03-10", 80)],
+    });
+    const { call } = setup(state);
+    await setLimited(call);
+    for (const month of ["2026-02", "2026-03", "2026-04"]) {
+      const args = { mode: "month", month, supplier_classifications: [{ clients_id: 10, classification: "counts" }] };
+      const dry = parseToolPayload<LimitedVatMonthPayload>((await call(args)).text);
+      expect(dry.included_invoices).toEqual([]);
+      expect(dry.review_items.map(review => [review.code, review.invoice_id])).toEqual([["limited_vat_partial_prepayment", 1]]);
+      expect(dry.kmd).toMatchObject({ row_1_taxable_value: 0, row_4_vat: 0 });
+      const executed = parseToolPayload<LimitedVatMonthPayload>((await call({ ...args, execute: true, plan_handle: dry.plan_handle })).text);
+      expect(executed.status).toBe("nothing_to_book");
+      expect(executed.included_invoices).toEqual([]);
+    }
+    expect(state.writes).toEqual([]);
+  });
+
   describe("partial prepayment on the execute path", () => {
     const counts10 = [{ clients_id: 10, classification: "counts" }];
     const monthArgs = (month = "2026-03") => ({ mode: "month", month, supplier_classifications: counts10 });
@@ -507,7 +567,7 @@ describe("limited_vat review fixes (fail closed)", () => {
     it("the fingerprint does not depend on the order of linked payments", async () => {
       const state = baseState({
         invoices: [invoice(2, 10, "2026-04-03", 50, { transactions: [70, 71] })],
-        transactions: [prepayment(70, "2026-03-10", 30, 2), prepayment(71, "2026-03-15", 20, 2)],
+        transactions: [prepayment(70, "2026-03-10", 30, 2), prepayment(71, "2026-03-10", 20, 2)],
       });
       const { call } = setup(state);
       await setLimited(call);

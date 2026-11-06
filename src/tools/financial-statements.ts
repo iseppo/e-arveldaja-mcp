@@ -3,7 +3,7 @@ import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
 import { toMcpJson, wrapUntrustedOcr } from "../mcp-json.js";
 import type { ApiContext } from "./crud-tools.js";
-import type { Account, Journal, SaleInvoice, PurchaseInvoice, Transaction } from "../types/api.js";
+import type { Account, Journal, Posting, SaleInvoice, PurchaseInvoice, Transaction } from "../types/api.js";
 import { roundMoney, effectiveGross, eurGross } from "../money.js";
 import { readOnly } from "../annotations.js";
 import { isProjectTransaction } from "../transaction-status.js";
@@ -48,6 +48,19 @@ export interface AccountBalance {
  */
 export type AccountBalancesResult = AccountBalance[] & { totalDebit: number; totalCredit: number };
 
+/** Reuse the currency-aware EUR resolver; journal currency applies when a posting omits it. */
+export function verifiedPostingEurAmount(posting: Posting, journal: Journal): number {
+  const amount = eurGross({
+    base_gross_price: posting.base_amount,
+    gross_price: posting.amount,
+    cl_currencies_id: posting.cl_currencies_id ?? journal.cl_currencies_id,
+  });
+  if (amount === undefined || !Number.isFinite(amount)) {
+    throw new Error(`posting_eur_amount_unverified: Journal ${journal.id ?? "unknown"}, account ${posting.accounts_id} has no verified EUR amount. Review its currency valuation before preparing reports or closing entries. Nothing was written.`);
+  }
+  return amount;
+}
+
 export async function computeAllBalances(
   api: ApiContext,
   dateFrom?: string,
@@ -79,7 +92,7 @@ export async function computeAllBalances(
       if (posting.is_deleted) continue;
       if (posting.type !== "D" && posting.type !== "C") continue;
 
-      const amount = posting.base_amount ?? posting.amount;
+      const amount = verifiedPostingEurAmount(posting, journal);
       const entry = balances.get(posting.accounts_id) ?? { debit: 0, credit: 0 };
 
       // Accumulate unrounded; the output mapping below rounds once. Rounding

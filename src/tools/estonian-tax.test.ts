@@ -11,6 +11,7 @@ import { makeAccount, makePosting, makeJournal } from "../__fixtures__/accountin
 import { ESTONIAN_VAT_METADATA, vatSourceById } from "../estonian-tax-rules.js";
 import { resetAccountingRulesCache } from "../accounting-rules.js";
 import { toolMetadataText } from "../__fixtures__/tool-metadata.js";
+import { createTestRuntimeSafetyContext } from "../__fixtures__/runtime-safety.js";
 
 const { mockedLogAudit } = vi.hoisted(() => ({ mockedLogAudit: vi.fn() }));
 // API-only fixture: the values below become normalized rows returned by the mock server.
@@ -65,7 +66,7 @@ type ToolCallback = (args: Record<string, unknown>) => Promise<unknown>;
 const serverApi = new WeakMap<object, ApiContext>();
 function registerEstonianTaxTools(server: import("@modelcontextprotocol/sdk/server/mcp.js").McpServer, api: ApiContext): void {
   serverApi.set(server, api);
-  registerEstonianTaxToolsImpl(server, api);
+  registerEstonianTaxToolsImpl(server, api, createTestRuntimeSafetyContext());
 }
 
 /**
@@ -116,7 +117,15 @@ function makeMockServer() {
           const approved = !("approved_report_year" in args) && api && typeof args.effective_date === "string"
             ? await booksAsApproved(api, args.effective_date)
             : {};
-          return (callback as (a: Record<string, unknown>, e: unknown) => unknown)({ dry_run: false, ...approved, ...args }, extra);
+          const input = { dry_run: false, ...approved, ...args };
+          const invoke = callback as (a: Record<string, unknown>, e: unknown) => Promise<unknown>;
+          if (input.dry_run === false && !("plan_handle" in args)) {
+            const preview = await invoke({ ...input, dry_run: true }, extra) as { content: Array<{ text: string }> };
+            const data = parseToolPayload<DividendPackagePayload>(preview.content[0]!.text);
+            if (!data.plan_handle) return preview;
+            return invoke({ ...input, plan_handle: data.plan_handle }, extra);
+          }
+          return invoke(input, extra);
         }) as unknown as ToolCallback
         : callback);
     }),
@@ -133,6 +142,72 @@ function parseResult(result: unknown): Record<string, unknown> {
 function isError(result: unknown): boolean {
   return (result as { isError?: boolean }).isError === true;
 }
+
+describe("dividend approved plan binding (T6/F5)", () => {
+  function setup() {
+    const api = makeApi([
+      makeJournal("2025-01-01", [makePosting(1000, "D", 20000), makePosting(2960, "C", 20000)]),
+    ], makeStandardAccounts());
+    const mock = makeMockServer();
+    const ctx = createTestRuntimeSafetyContext();
+    registerEstonianTaxToolsImpl(mock.server, api, ctx);
+    const call = mock.rawTools.get("prepare_dividend_package")!;
+    const args = {
+      net_dividend: 1000, shareholder_client_id: 1, effective_date: "2026-06-01",
+      approved_report_year: 2025, approved_retained_earnings: 20000, approved_profit_for_year: 0,
+    };
+    const payload = async (input: Record<string, unknown>) => {
+      const result = await call(input) as { content: Array<{ text: string }> };
+      return parseToolPayload<DividendPackagePayload>(result.content[0]!.text);
+    };
+    return { api, ctx, args, payload };
+  }
+
+  it("refuses execution without a preview handle", async () => {
+    const { api, args, payload } = setup();
+    expect((await payload({ ...args, dry_run: false })).error_code).toBe("plan_handle_required");
+    expect(api.journals.create).not.toHaveBeenCalled();
+  });
+
+  it("refuses a changed dividend amount with an approved handle", async () => {
+    const { api, args, payload } = setup();
+    const preview = await payload(args);
+    expect(preview.plan_handle).toEqual(expect.any(String));
+    const result = await payload({ ...args, net_dividend: 1100, dry_run: false, plan_handle: preview.plan_handle });
+    expect(result.error_code).toBe("plan_drift");
+    expect(api.journals.create).not.toHaveBeenCalled();
+  });
+
+  it("binds the proposed journal as well as the input arguments", async () => {
+    const { api, args, payload } = setup();
+    const preview = await payload(args);
+    const shareholder = await api.clients.get(1);
+    vi.mocked(api.clients.get).mockResolvedValue({ ...shareholder, name: "Changed shareholder" });
+    const result = await payload({ ...args, dry_run: false, plan_handle: preview.plan_handle });
+    expect(result.error_code).toBe("plan_drift");
+    expect(api.journals.create).not.toHaveBeenCalled();
+  });
+
+  it("executes the reviewed journal once and refuses handle reuse", async () => {
+    const { api, args, payload } = setup();
+    const preview = await payload(args);
+    const execute = { ...args, dry_run: false, plan_handle: preview.plan_handle };
+    expect((await payload(execute)).error_code).toBeUndefined();
+    expect(api.journals.create).toHaveBeenCalledTimes(1);
+    expect((await payload(execute)).error_code).toBe("plan_handle_consumed");
+    expect(api.journals.create).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["scope", "expiry"])("refuses a preview after %s changes", async change => {
+    const { api, ctx, args, payload } = setup();
+    const preview = await payload(args);
+    if (change === "scope") ctx.setScope({ connectionGeneration: 1 });
+    else ctx.advanceTime(600001);
+    expect((await payload({ ...args, dry_run: false, plan_handle: preview.plan_handle })).error_code)
+      .toBe(change === "scope" ? "plan_scope_mismatch" : "plan_handle_expired");
+    expect(api.journals.create).not.toHaveBeenCalled();
+  });
+});
 
 // ---------------------------------------------------------------------------
 // ApiContext factory
@@ -1946,8 +2021,8 @@ describe("prepare_dividend_package remediation", () => {
       expect(je.postings.find(p => p.account === 2960)?.amount).toBe(1000);
     }
     expect(vi.mocked(api.journals.create)).not.toHaveBeenCalled();
-    expect(mockedLogAudit).toHaveBeenCalledTimes(1);
-    expect(mockedLogAudit.mock.calls[0]![0]).toMatchObject({ action: "UPDATED", entity_id: 501, details: { booking_status: "duplicate" } });
+    // The preview already reports the existing journal; no execution plan or write is needed.
+    expect(mockedLogAudit).not.toHaveBeenCalled();
   });
 
   // ---- MINOR 8: shareholder name sandboxing ---------------------------------
@@ -2438,9 +2513,10 @@ describe("prepare_dividend_package approved-report anchor", () => {
 
   it("execute re-reads the ledger: a dividend draft added after the preview is counted", async () => {
     const { api, call } = setup(books());
-    expect((await call({ net_dividend: 15000 })).isError).toBe(false);
+    const preview = await call({ net_dividend: 15000 });
+    expect(preview.isError).toBe(false);
     vi.mocked(api.journals.listAllWithPostings).mockResolvedValue([...books(), dividend(110, "2026-05-01", 10000, 2820.51, { registered: false })]);
-    const executed = await call({ net_dividend: 15000, dry_run: false });
+    const executed = await call({ net_dividend: 15000, dry_run: false, plan_handle: preview.data.plan_handle });
     expect(executed.isError).toBe(true);
     expect(executed.data.error).toBe("ÄS § 157 net assets breach");
     expect(api.journals.invalidateListCache).toHaveBeenCalled();

@@ -6,7 +6,7 @@ import { toMcpJson, wrapUntrustedOcr } from "../mcp-json.js";
 import type { ApiContext } from "./crud-tools.js";
 import { logAudit } from "../audit-log.js";
 import type { Account, Client, Journal, Posting, PurchaseInvoice, SaleInvoice, Transaction } from "../types/api.js";
-import { computeAllBalances, type AccountBalance } from "./financial-statements.js";
+import { computeAllBalances, verifiedPostingEurAmount, type AccountBalance } from "./financial-statements.js";
 import { roundMoney, effectiveGross } from "../money.js";
 import { readOnly, batch } from "../annotations.js";
 import { isProjectTransaction } from "../transaction-status.js";
@@ -23,6 +23,9 @@ import {
   resolveRetainedEarningsAccount,
 } from "../account-resolution.js";
 import { withOpeningBalanceJournalStatus } from "../opening-balance-limitations.js";
+import type { RuntimeSafetyContext } from "../runtime-safety-context.js";
+import type { PlanRecord, StoredExecutionPlan } from "../plan-store.js";
+import { canonicalPlanJson } from "./camt-plan.js";
 import { isOpeningBalanceJournal, loadJournalsWithOpeningBalance } from "../opening-balance-journal.js";
 import { calculateAnnualCashFlow, isCashFlowCashAccount } from "../reporting/annual-cash-flow.js";
 import { loadCashFlowEvidence } from "../reporting/cash-flow-evidence.js";
@@ -102,7 +105,7 @@ interface BlockedCloseEntry {
   resolution: "allow_additional_transfer" | "correct_result_entry" | "manual_review";
 }
 
-interface YearEndCloseAnalysis {
+export interface YearEndCloseAnalysis {
   year: number;
   period: {
     from: string;
@@ -169,6 +172,11 @@ interface YearEndCloseAnalysis {
   warnings: string[];
 }
 
+export interface YearEndClosePreview extends YearEndCloseAnalysis {
+  plan_handle: string;
+  next_step_summary: string;
+}
+
 const yearShape = {
   year: z.number().int().min(2000).max(2200).describe("Fiscal year (YYYY)"),
 };
@@ -177,7 +185,9 @@ const closeOptionsShape = {
   reserve_capital_amount: z.number().positive().optional()
     .describe("Part of a profit to credit to reserve capital (default account: name-resolved Kohustuslik reservkapital, 2940) instead of retained earnings in the 1 January entry"),
   reserve_capital_account: z.number().int().optional()
-    .describe("Reserve capital account override for reserve_capital_amount"),
+    .describe("Reserve capital account override for reserve_capital_amount; must independently be an Omakapital reserve, distinct from the other closing accounts"),
+  allow_additional_transfer: z.boolean().optional()
+    .describe("Acknowledge that a smaller same-direction 2970 → 2960 transfer for the year already exists on 1 January and include its proposed remainder in the reviewed plan (transfers on other dates or ambiguous ones always need manual review)"),
 };
 
 function getYearBounds(year: number): { from: string; to: string; priorTo: string } {
@@ -492,7 +502,7 @@ function netCredit(journals: Journal[], accountId: number): number {
   for (const journal of journals) {
     for (const posting of journal.postings ?? []) {
       if (posting.is_deleted || posting.accounts_id !== accountId) continue;
-      const amount = posting.base_amount ?? posting.amount;
+      const amount = verifiedPostingEurAmount(posting, journal);
       if (posting.type === "C") total += amount;
       else if (posting.type === "D") total -= amount;
     }
@@ -719,6 +729,14 @@ async function analyzeYearEndClose(
     { id: ids.retainedEarnings, label: "Retained earnings account" },
     ...(reserveAmount > 0 ? [{ id: ids.reserve, label: "Reserve capital account" }] : []),
   ]);
+  if (reserveAmount > 0) {
+    const reserve = accounts.find((account) => account.id === ids.reserve);
+    // The caller's override selects a target; it never establishes its role.
+    if (reserve?.account_type_est !== "Omakapital" || !resolveRestrictedReserveAccounts(accounts).includes(ids.reserve) ||
+      [ids.calculatedResult, ids.currentYearProfit, ids.retainedEarnings].includes(ids.reserve)) {
+      accountErrors.push(`Reserve capital account ${ids.reserve} must be an independently identified Omakapital reserve, distinct from the other closing accounts. Nothing was written.`);
+    }
+  }
   if (accountErrors.length > 0) {
     return {
       error: "Account validation failed",
@@ -1679,24 +1697,84 @@ export async function buildAnnualReportData(api: ApiContext, year: number): Prom
   };
 }
 
-export function registerAnnualReportTools(server: McpServer, api: ApiContext): void {
+const YEAR_END_CLOSE_PLAN_DOMAIN = "year_end_close";
+
+function closeNormalizedArgs(year: number, options: YearEndCloseOptions): PlanRecord {
+  return {
+    year,
+    reserve_capital_amount: options.reserveCapitalAmount ?? null,
+    reserve_capital_account: options.reserveCapitalAccount ?? null,
+    allow_additional_transfer: options.allowAdditionalTransfer === true,
+  };
+}
+
+function closeFingerprint(analysis: YearEndCloseAnalysis): string {
+  return canonicalPlanJson({
+    proposals: analysis.proposed_journal_entries,
+    blocked_entries: analysis.blocked_entries,
+    close_status: analysis.close_status,
+    balance_sheet_check: analysis.balance_sheet_check,
+    // OCR wrappers contain random delimiters; bind the material source fields,
+    // never the rendered titles, invoice numbers or client labels.
+    unresolved_items: {
+      journals: analysis.unresolved_items.unconfirmed_journals.items.map(({ id, date }) => ({ id, date })),
+      transactions: analysis.unresolved_items.unconfirmed_transactions.items.map(({ id, date, amount }) => ({ id, date, amount })),
+      sales: analysis.unresolved_items.unconfirmed_sale_invoices.items.map(({ id, gross }) => ({ id, gross })),
+      purchases: analysis.unresolved_items.unconfirmed_purchase_invoices.items.map(({ id, gross }) => ({ id, gross })),
+    },
+    existing_journals: analysis.existing_year_end_close_journals.map(({ id, kind, date, registered }) => ({ id, kind, date, registered })),
+  });
+}
+
+async function validateCloseProposalDimensions(api: ApiContext, analysis: YearEndCloseAnalysis): Promise<string[]> {
+  const [accounts, dimensions] = await Promise.all([api.readonly.getAccounts(), api.readonly.getAccountDimensions()]);
+  return analysis.proposed_journal_entries.filter((proposal) => proposal.auto_executable).flatMap((proposal) =>
+    validatePostingDimensions(proposal.postings, accounts, dimensions).map((message) => `${proposal.document_number}: ${message}`));
+}
+
+function refuseClosePlan(errorCode: string, message: string) {
+  return toolError({ error: message, error_code: errorCode, note: "Nothing was written." });
+}
+
+export function registerAnnualReportTools(server: McpServer, api: ApiContext, runtimeSafetyContext: RuntimeSafetyContext): void {
   registerTool(server, "prepare_year_end_close",
     "Dry-run calendar-year close per RIK's e-arveldaja method: unresolved items, balance check, existing-close detection, and " +
-    "the two drafts — Dec 31 result entry (profit D 9000 / K 2970) and Jan 1 transfer (D 2970 / K 2960). Revenue/expense accounts are not zeroed.",
+    "the two drafts — Dec 31 result entry (profit D 9000 / K 2970) and Jan 1 transfer (D 2970 / K 2960). Revenue/expense accounts are not zeroed. Returns a single-use plan_handle for execution after owner approval; changed options or proposals require a new preview.",
     { ...yearShape, ...closeOptionsShape },
     { ...readOnly, title: "Prepare Year-End Close" },
-    async ({ year, reserve_capital_amount, reserve_capital_account }) => {
-      const analysis = await analyzeYearEndClose(api, year, {
+    async ({ year, reserve_capital_amount, reserve_capital_account, allow_additional_transfer }) => {
+      const options: YearEndCloseOptions = {
         reserveCapitalAmount: reserve_capital_amount,
         reserveCapitalAccount: reserve_capital_account,
-      });
+        allowAdditionalTransfer: allow_additional_transfer === true,
+      };
+      const analysis = await analyzeYearEndClose(api, year, options);
       if ("error" in analysis) {
         return toolError(analysis);
       }
+      const dimensionErrors = await validateCloseProposalDimensions(api, analysis);
+      if (dimensionErrors.length > 0) return toolError({ error: "Account validation failed", details: dimensionErrors, note: "Nothing was written." });
+      const planHandle = runtimeSafetyContext.planStore.issue(YEAR_END_CLOSE_PLAN_DOMAIN, {
+        normalizedArgs: closeNormalizedArgs(year, options),
+        sourceIdentities: [],
+        liveSnapshot: { year },
+        commands: analysis.proposed_journal_entries.filter((proposal) => proposal.auto_executable).map((proposal) => ({
+          id: proposal.document_number, category: "create_year_end_draft", reviewProjection: { document_number: proposal.document_number },
+        })),
+        counts: { proposed: analysis.proposed_journal_entries.length },
+        totals: { net_profit: analysis.current_year_result.net_profit },
+        exclusions: [], reviews: [],
+        privatePayload: { fingerprint: closeFingerprint(analysis) },
+      });
+      const preview: YearEndClosePreview = {
+        ...analysis,
+        plan_handle: planHandle,
+        next_step_summary: "Show the proposed closing entries and review items to the owner. After approval call execute_year_end_close with confirm=true, this single-use plan_handle and the same year and options. Changes require a fresh preview; journals remain drafts for separate registration.",
+      };
       return {
         content: [{
           type: "text",
-          text: toMcpJson(analysis),
+          text: toMcpJson(preview),
         }],
       };
     },
@@ -1719,21 +1797,35 @@ export function registerAnnualReportTools(server: McpServer, api: ApiContext): v
 
   registerTool(server, "execute_year_end_close",
     "Create the missing RIK year-end closing entries from prepare_year_end_close as draft journals (never books an existing entry twice). " +
-    "Requires confirm=true; review/register separately.",
+    "Requires confirm=true and the single-use plan_handle from the owner's approved preview, with identical year/options and fresh proposals; drift refuses before writing. Review/register separately.",
     {
       ...yearShape,
       ...closeOptionsShape,
       confirm: z.boolean().describe("Must be true to create the closing journal entries"),
-      allow_additional_transfer: z.boolean().optional()
-        .describe("Acknowledge that a smaller same-direction 2970 → 2960 transfer for the year already exists on 1 January and book the proposed remainder anyway (transfers on other dates or ambiguous ones always need manual review)"),
+      plan_handle: z.string().optional().describe("Required single-use handle from the approved prepare_year_end_close preview; use the same year and options"),
     },
     { ...batch, title: "Execute Year-End Close" },
-    async ({ year, confirm, reserve_capital_amount, reserve_capital_account, allow_additional_transfer }) => {
+    async ({ year, confirm, plan_handle, reserve_capital_amount, reserve_capital_account, allow_additional_transfer }) => {
       if (confirm !== true) {
         return toolError({
           error: "Explicit confirmation required",
           hint: "Re-run execute_year_end_close with confirm=true to create the closing journal entries.",
         });
+      }
+      if (!plan_handle) return refuseClosePlan("plan_handle_required", "Execution needs the plan_handle from the approved prepare_year_end_close preview.");
+      let boundPlan: StoredExecutionPlan;
+      try {
+        boundPlan = runtimeSafetyContext.planStore.consume(plan_handle, YEAR_END_CLOSE_PLAN_DOMAIN);
+      } catch (error) {
+        return refuseClosePlan((error as { code?: string }).code ?? "plan_handle_invalid", "The reviewed year-end plan could not be consumed. Run prepare_year_end_close again.");
+      }
+      const options: YearEndCloseOptions = {
+        reserveCapitalAmount: reserve_capital_amount,
+        reserveCapitalAccount: reserve_capital_account,
+        allowAdditionalTransfer: allow_additional_transfer === true,
+      };
+      if (canonicalPlanJson(boundPlan.normalizedArgs) !== canonicalPlanJson(closeNormalizedArgs(year, options))) {
+        return refuseClosePlan("plan_drift", "The year or closing options differ from the approved preview. Review a new preview.");
       }
 
       // One execute per company+year at a time: concurrent runs would both
@@ -1749,13 +1841,15 @@ export function registerAnnualReportTools(server: McpServer, api: ApiContext): v
         // the journals — a close booked elsewhere within the 120 s cache window
         // must be seen, or it would be booked twice.
         api.journals.invalidateListCache();
-        const analysis = await analyzeYearEndClose(api, year, {
-          reserveCapitalAmount: reserve_capital_amount,
-          reserveCapitalAccount: reserve_capital_account,
-          allowAdditionalTransfer: allow_additional_transfer === true,
-        });
+        const analysis = await analyzeYearEndClose(api, year, options);
         if ("error" in analysis) {
           return toolError(analysis);
+        }
+        const dimensionErrors = await validateCloseProposalDimensions(api, analysis);
+        if (dimensionErrors.length > 0) return toolError({ error: "Account validation failed", details: dimensionErrors, note: "Nothing was written." });
+        const approved = boundPlan.privatePayload as { fingerprint?: unknown } | null;
+        if (approved?.fingerprint !== closeFingerprint(analysis)) {
+          return refuseClosePlan("plan_drift", "The closing entries or review items changed after the approved preview. Run prepare_year_end_close again and obtain approval.");
         }
 
         const executableProposals = analysis.proposed_journal_entries
@@ -1795,31 +1889,13 @@ export function registerAnnualReportTools(server: McpServer, api: ApiContext): v
           };
         }
 
-        // Validate every posting's dimension before the first create: 9000/2970/
-        // 2960/2940 may carry dimensions in some charts, and a dimensioned account
-        // needs accounts_dimensions_id (auto-filled when it has exactly one) or the
-        // API rejects the journal part-way through the close.
-        const [validationAccounts, accountDimensions] = await Promise.all([
-          api.readonly.getAccounts(),
-          api.readonly.getAccountDimensions(),
-        ]);
+        // Serialize the posting targets already validated and compared to the preview.
         const postingsByProposal = executableProposals.map((proposal) => proposal.postings.map((posting): Posting => ({
           accounts_id: posting.accounts_id,
           ...(posting.accounts_dimensions_id !== undefined ? { accounts_dimensions_id: posting.accounts_dimensions_id } : {}),
           type: posting.type,
           amount: posting.amount,
         })));
-        const dimensionErrors = postingsByProposal.flatMap((postings, index) =>
-          validatePostingDimensions(postings, validationAccounts, accountDimensions)
-            .map((message) => `${executableProposals[index]!.document_number}: ${message}`),
-        );
-        if (dimensionErrors.length > 0) {
-          return toolError({
-            error: "Account validation failed",
-            details: dimensionErrors,
-            hint: "No journals were created. Fix the account dimensions (sub-accounts) and re-run execute_year_end_close.",
-          });
-        }
 
         // Partial mutation must be VISIBLE (invariant 9): a failure after the
         // first created journal returns a structured `partial` result naming the
