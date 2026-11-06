@@ -42,6 +42,7 @@ import { serializeToolMutationError } from "../mutation-audit.js";
 import { initAccountingRulesConnection } from "../accounting-rules.js";
 import { createPublicToolRegistrar } from "../public-tool-registrar.js";
 import { exposureForProfile, isToolVisibleForProfile, type ToolProfile } from "../tool-profile.js";
+import { TOOL_CATALOG } from "../tool-catalog.js";
 import { buildServerInstructions } from "./server-instructions.js";
 import {
   type ConnectionSnapshot,
@@ -401,6 +402,15 @@ export async function createMcpServer(
   const publicServer = createPublicToolRegistrar(server, toolProfile);
 
   function wrapToolHandler<T extends (...args: any[]) => any>(toolName: string, isReadOnly: boolean, guardConnection: boolean, handler: T): T {
+    // The audit-label lookup sends a hidden GET /invoice_info. Tools that never
+    // call the API — get_server_status and the catalog's setup/connection
+    // groups (list_connections, switch_connection, clear_cache, credential
+    // tools) — must not send one.
+    const feature = TOOL_CATALOG.find((entry) => entry.name === toolName)?.feature;
+    const resolvesAuditLabel = !setupMode
+      && toolName !== "get_server_status"
+      && feature !== "setup"
+      && feature !== "connection";
     return (async (...args: unknown[]) => {
       const snapshot = captureSnapshot(connectionState, { toolName, isReadOnly });
       const extra = args.length >= 2 ? args[1] as any : undefined;
@@ -428,9 +438,7 @@ export async function createMcpServer(
       }
       try {
         return await invocationStorage.run(snapshot, async () => {
-          // get_server_status is in-memory only (and reports the 401 brake),
-          // so it must never send a request itself.
-          if (!setupMode && toolName !== "get_server_status") {
+          if (resolvesAuditLabel) {
             await auditResolver.ensureAuditLogLabelResolved(snapshot.index);
           }
           const runInExtra = extra

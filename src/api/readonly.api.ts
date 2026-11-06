@@ -76,7 +76,11 @@ async function readonlyMutate<R>(
   }
 }
 
-async function readonlyCachedGet<T>(client: HttpClient, path: string): Promise<T> {
+async function readonlyCachedGet<T>(
+  client: HttpClient,
+  path: string,
+  requestOptions: { excludeFromAuthBrake?: boolean } = {},
+): Promise<T> {
   const cacheKey = readonlyCacheKey(client, path);
   const readonlyCached = readonlyCache.get<T>(cacheKey);
   if (readonlyCached !== undefined) return readonlyCached;
@@ -85,7 +89,7 @@ async function readonlyCachedGet<T>(client: HttpClient, path: string): Promise<T
   // setIfSameGeneration will discard the now-stale result instead of polluting
   // the cache for ~10 minutes.
   const gen = readonlyCache.generation;
-  const result = await client.get<T>(path);
+  const result = await client.get<T>(path, undefined, requestOptions);
   readonlyCache.setIfSameGeneration(cacheKey, result, gen, REFERENCE_TTL_SECONDS);
   return result;
 }
@@ -171,9 +175,12 @@ export class ReferenceDataApi {
 
   // Invoice info. `fresh` drops only this key first (the own-company identity
   // re-check before a booking needs it as it is now).
-  async getInvoiceInfo(options: { fresh?: boolean } = {}): Promise<CompanyInvoiceInfo> {
+  /** `excludeFromAuthBrake`: see `RequestOptions` (hidden audit-label lookup only). */
+  async getInvoiceInfo(options: { fresh?: boolean; excludeFromAuthBrake?: boolean } = {}): Promise<CompanyInvoiceInfo> {
     if (options.fresh === true) readonlyCache.invalidateExact(readonlyCacheKey(this.client, "/invoice_info"));
-    return readonlyCachedGet<CompanyInvoiceInfo>(this.client, "/invoice_info");
+    return readonlyCachedGet<CompanyInvoiceInfo>(this.client, "/invoice_info", {
+      excludeFromAuthBrake: options.excludeFromAuthBrake,
+    });
   }
 
   async updateInvoiceInfo(data: Partial<CompanyInvoiceInfo>): Promise<ApiResponse> {

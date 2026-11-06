@@ -100,6 +100,12 @@ export interface RequestOptions {
   method?: HttpMethod;
   body?: unknown;
   params?: Record<string, string | number | boolean | undefined>;
+  /**
+   * A 401 on this request does not feed the per-server 401 brake. Only for
+   * hidden background lookups the user never asked for (the audit-label
+   * `GET /invoice_info`); the brake still refuses the request while cooling down.
+   */
+  excludeFromAuthBrake?: boolean;
 }
 
 const MAX_RETRIES = 3;
@@ -379,7 +385,9 @@ export class HttpClient {
       if (!(error instanceof HttpError)) throw error;
       // A local refusal is not an upstream 401: don't count it, keep its metadata.
       if (error.code === "auth_cooldown") throw error;
-      if (error.status === 401) this.authBrake.recordUnauthorized(this.cacheNamespace);
+      if (error.status === 401 && options.excludeFromAuthBrake !== true) {
+        this.authBrake.recordUnauthorized(this.cacheNamespace);
+      }
       throw HttpClient.enrichFailure(error);
     }
     this.authBrake.recordSuccess(this.cacheNamespace);
@@ -622,8 +630,12 @@ export class HttpClient {
       path,
     );
   }
-  async get<T = unknown>(path: string, params?: Record<string, string | number | boolean | undefined>): Promise<T> {
-    return this.request<T>(path, { params });
+  async get<T = unknown>(
+    path: string,
+    params?: Record<string, string | number | boolean | undefined>,
+    options: Pick<RequestOptions, "excludeFromAuthBrake"> = {},
+  ): Promise<T> {
+    return this.request<T>(path, { params, ...options });
   }
 
   async post<T = unknown>(path: string, body: unknown): Promise<T> {
