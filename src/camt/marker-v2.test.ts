@@ -5,7 +5,7 @@ import {
   buildCamtDescriptionWithMetadata, extractCamtDescriptionMetadata, isTrustedCamtDescriptionMetadata,
   isCamtCounterpartyIbanOmitted, renderCamtDescriptionDetailed, stripCamtDescriptionMetadata,
   buildDuplicateLookup, findDuplicateTransactionIds, findLossyIdentityConflicts, findPoisonedMarkerHolds,
-  findRepeatedBankReferences, buildBatchDuplicateKey,
+  buildBatchDuplicateKey,
 } from "./duplicate-identity.js";
 import { camtIbanOmissionEvidence, isCamtIbanOmissionEligible } from "./iban-omission.js";
 import { computeCamtImportProjection } from "./projection.js";

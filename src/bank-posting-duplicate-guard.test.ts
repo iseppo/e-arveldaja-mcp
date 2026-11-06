@@ -2,7 +2,6 @@ import { describe, it, expect, vi } from "vitest";
 import type { AccountDimension, BankAccount, Journal, Transaction } from "./types/api.js";
 import {
   DUPLICATE_SCAN_WINDOW_DAYS,
-  DUPLICATE_AMOUNT_TOLERANCE,
   resolveBankDimensions,
   findDuplicatePostingsInJournals,
   findDuplicateBankPostings,

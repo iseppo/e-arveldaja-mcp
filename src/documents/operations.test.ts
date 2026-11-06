@@ -8,7 +8,7 @@ import { parseDocument } from "../document-parser.js";
 import { createAccountingWorkflowApi, fixtureAccount, fixtureClient } from "../__fixtures__/accounting-workflow.js";
 import { createTestRuntimeSafetyContext } from "../__fixtures__/runtime-safety.js";
 import { wrapUntrustedOcr } from "../mcp-json.js";
-import { createAccountingDocumentOperations, ACCOUNTING_DOCUMENT_PLAN_DOMAIN, ACCOUNTING_DOCUMENT_CONFIRM_DOMAIN } from "./operations.js";
+import { createAccountingDocumentOperations, ACCOUNTING_DOCUMENT_CONFIRM_DOMAIN } from "./operations.js";
 import { textHazardSignals } from "../tools/document-text-hazards.js";
 import { installLegacyDraftReadback } from "../__fixtures__/document-reading/legacy-draft.js";
 import { draftFingerprint } from "./purchase-draft-verification.js";

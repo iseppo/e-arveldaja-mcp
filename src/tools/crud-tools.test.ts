@@ -1,7 +1,5 @@
-import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
-import { readFileSync, readdirSync, mkdtempSync, rmSync } from "fs";
-import { tmpdir } from "os";
-import { join } from "path";
+import { beforeEach, describe, it, expect, vi } from "vitest";
+import { readFileSync, readdirSync } from "fs";
 import { z } from "zod";
 import {
   safeJsonParse,

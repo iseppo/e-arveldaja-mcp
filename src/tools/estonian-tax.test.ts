@@ -2,7 +2,7 @@ import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import type { Account, Journal, Posting, SaleInvoice } from "../types/api.js";
+import type { Account, Journal, SaleInvoice } from "../types/api.js";
 import type { ApiContext } from "./crud-tools.js";
 import { registerEstonianTaxTools as registerEstonianTaxToolsImpl, bookOwnerExpenseReimbursement, type DividendPackagePayload } from "./estonian-tax.js";
 import { roundMoney } from "../money.js";

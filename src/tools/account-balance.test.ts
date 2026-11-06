@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { parseMcpResponse, UNTRUSTED_OCR_START_PREFIX, UNTRUSTED_OCR_END_PREFIX } from "../mcp-json.js";
+import { parseMcpResponse } from "../mcp-json.js";
 import type { Journal, Account } from "../types/api.js";
 import { clearRuntimeCaches } from "../cache-control.js";
 import { makeAccount } from "../__fixtures__/accounting.js";

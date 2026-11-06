@@ -207,7 +207,7 @@ function makeApi(spies: Partial<ApiSpies> = {}): { api: never; spies: ApiSpies }
     stored = { ...fixturePurchaseReadback(body, vat, gross, body.items.some((row: any) => row.vat_accounts_id != null), 555), base_document_files_id: null };
     return structuredClone(stored);
   });
-  const uploadDocument = spies.uploadDocument ?? vi.fn(async (id: number, name: string, contents: string) => {
+  const uploadDocument = spies.uploadDocument ?? vi.fn(async (_id: number, name: string, contents: string) => {
     if (stored) stored.base_document_files_id = 9701;
     document = { name, contents };
   });

@@ -6,7 +6,6 @@ import { resolveFileInput } from "../file-validation.js";
 import { readFileCapped } from "../bounded-read.js";
 import { lightyearStatementCsv } from "../__fixtures__/lightyear-rows.js";
 import {
-  POOL_STATEMENT_PATH,
   poolDistribution,
   poolJournal,
   poolOpening,
@@ -21,7 +20,7 @@ import type { PlanData } from "../plan-store.js";
 import type { Journal } from "../types/api.js";
 import type { EcbFetch } from "../fx/ecb-rates.js";
 import { ecbResponse } from "../__fixtures__/lightyear-pool-harness.js";
-import { createUsdPoolStore, type PoolKey, type UsdPoolEvent, type UsdPoolRecord } from "../lightyear/usd-pool.js";
+import { createUsdPoolStore, type UsdPoolEvent, type UsdPoolRecord } from "../lightyear/usd-pool.js";
 import type { LightyearTradesPayload } from "./lightyear-investments.js";
 
 vi.mock("../bounded-read.js", async () => {

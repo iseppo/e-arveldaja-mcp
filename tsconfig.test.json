@@ -4,9 +4,7 @@
     "noEmit": true,
     "rootDir": ".",
     "allowImportingTsExtensions": true,
-    "allowJs": true,
-    "noUnusedLocals": false,
-    "noUnusedParameters": false
+    "allowJs": true
   },
   "include": [
     "src/**/*",

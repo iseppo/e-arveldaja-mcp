@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { Account, Journal, Posting, SaleInvoice, PurchaseInvoice } from "../types/api.js";
+import type { Account, Journal, SaleInvoice, PurchaseInvoice } from "../types/api.js";
 import type { ApiContext } from "./crud-tools.js";
 import { computeAllBalances, loadMonthEndScan, monthEndSummary, registerFinancialStatementTools } from "./financial-statements.js";
 import { parseMcpResponse } from "../__fixtures__/mcp-response.js";

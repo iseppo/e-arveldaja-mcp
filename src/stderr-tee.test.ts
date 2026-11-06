@@ -128,7 +128,7 @@ describe("installStderrTee", () => {
       { EARVELDAJA_LOG_FILE: path },
       stderrFsOps({
         fchmodSync: () => {},
-        fstatSync: ((fd: number) => {
+        fstatSync: ((_fd: number) => {
           const real = statSync(path);
           return { ...real, isFile: () => true, mode: (real.mode & ~0o777) | 0o644 } as Stats;
         }) as typeof import("node:fs").fstatSync,

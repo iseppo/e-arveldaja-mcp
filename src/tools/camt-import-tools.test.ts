@@ -12,7 +12,6 @@ import { registerCamtImportTools } from "./camt-import.js";
 import { createCamtOperations } from "../camt/operations.js";
 import {
   renderCamtImportCompact,
-  type CamtImportCompactPayload,
   type CamtImportFullPayload,
   type CamtParsePayload,
   type CamtImportSlimPayload,

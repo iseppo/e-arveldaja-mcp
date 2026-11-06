@@ -4,7 +4,6 @@ import { normalizeCompanyName } from "../company-name.js";
 import {
   matchSupplier,
   resolveSupplierDefault,
-  type SupplierMatchOutcome,
 } from "./supplier-default-resolution.js";
 
 function makeClient(overrides: Partial<Client>): Client {

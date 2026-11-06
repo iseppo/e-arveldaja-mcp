@@ -197,19 +197,6 @@ const H14_CLASSIFICATION = {
   transactions: [H14_TX],
 };
 
-const H14_INVOICE = {
-  id: 701,
-  status: "PROJECT",
-  number: "AUTO-TX-99",
-  clients_id: 7,
-  client_name: "OpenAI Ireland Limited",
-  create_date: "2026-03-22",
-  journal_date: "2026-03-22",
-  term_days: 0,
-  cl_currencies_id: "EUR",
-  items: [],
-};
-
 function setupH14Tool(
   toolName: "apply_transaction_classifications" | "classify_bank_transactions",
   { allowWrites = false }: { allowWrites?: boolean } = {},

@@ -8,7 +8,7 @@ interface FakeServerOptions {
 }
 
 function fakeServer(opts: FakeServerOptions) {
-  const elicitInput = vi.fn(async (params: unknown) => {
+  const elicitInput = vi.fn(async (_params: unknown) => {
     if (opts.elicitThrows) throw opts.elicitThrows;
     return opts.elicitResult ?? { action: "cancel" };
   });
