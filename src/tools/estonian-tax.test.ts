@@ -1877,6 +1877,7 @@ describe("prepare_dividend_package remediation", () => {
       const data = parseResult(result);
       expect(data.error_code).toBe("dividend_key_conflict");
       expect(data.existing_journal_id).toBe(501);
+      expect(data.compliance_notes).toEqual([expect.stringContaining("ÄS § 157 lg 1"), expect.stringContaining("TSD lisal 7")]);
       const existing = data.existing_postings as Array<{ account: number; type: string; amount: number }>;
       const requested = data.requested_postings as Array<{ account: number; type: string; amount: number }>;
       expect(existing.find(p => p.account === 2960)?.amount).toBe(1000);
@@ -1894,6 +1895,7 @@ describe("prepare_dividend_package remediation", () => {
     expect(isError(second)).toBe(true);
     const data = parseResult(second);
     expect(data.error_code).toBe("dividend_key_conflict");
+    expect(data.compliance_notes).toEqual([expect.stringContaining("ÄS § 157 lg 1"), expect.stringContaining("TSD lisal 7")]);
     expect((data.existing_postings as Array<{ account: number; amount: number }>).find(p => p.account === 2650)?.amount).toBe(1000);
     expect(vi.mocked(api.journals.create)).toHaveBeenCalledTimes(1);
     expect(mockedLogAudit).toHaveBeenCalledTimes(1); // only the original CREATED
@@ -2219,6 +2221,41 @@ describe("prepare_dividend_package approved-report anchor", () => {
     }
     expect(api.journals.create).not.toHaveBeenCalled();
     expect(mockedLogAudit).not.toHaveBeenCalled();
+  });
+
+  it("holds a pre-report draft that reduces net assets without touching equity (pending year-end expense)", async () => {
+    const journals = [
+      makeJournal("2023-01-01", [makePosting(1000, "D", 27500), makePosting(2900, "C", 2500), makePosting(2960, "C", 25000)], { id: 1 }),
+      pair(54, "2025-12-31", 5000, 2310, 10000, { registered: false }),
+    ];
+    const accounts = chart([makeAccount(2310, "C", "Kohustused", "Viitvõlad", "Accrued liabilities")]);
+    const { api, call } = setup(journals, accounts);
+    for (const dry_run of [true, false]) {
+      for (const force of [false, true]) {
+        const { isError: failed, data } = await call({
+          approved_retained_earnings: 25000, approved_profit_for_year: -10000, ledger_difference_acknowledged: -10000,
+          net_dividend: 15000, dry_run, force,
+        });
+        expect(failed).toBe(true);
+        expect(data.error_code).toBe("pre_report_draft_reduces_net_assets");
+        expect(data.holds).toEqual([{ code: "pre_report_draft_reduces_net_assets", journals: [{ journal_id: 54, document_number: null, effective_date: "2025-12-31" }] }]);
+        expect(data.hint).toContain("Register or delete");
+        expect(data.maximum_distributable).toBeUndefined();
+      }
+    }
+    expect(api.journals.create).not.toHaveBeenCalled();
+    expect(mockedLogAudit).not.toHaveBeenCalled();
+    // Registered, the books match the approved report and lg 2 reads the expense.
+    const registered = await setup([journals[0]!, pair(54, "2025-12-31", 5000, 2310, 10000)], accounts).call({
+      approved_retained_earnings: 25000, approved_profit_for_year: -10000, net_dividend: 15000,
+    });
+    expect(registered.data.holds).toBeUndefined();
+    expect(registered.data.error).toBe("ÄS § 157 net assets breach");
+    // A pre-report draft that raises net assets and has no equity posting stays ignored; an unvalued one holds.
+    const income = await setup([...books(), pair(55, "2025-12-31", 1000, 4000, 500, { registered: false })]).call();
+    expect(income.data.holds).toBeUndefined();
+    const foreign = await setup([...books(), pair(56, "2025-12-31", 1000, 4000, 500, { registered: false, cl_currencies_id: "USD" })]).call();
+    expect(foreign.data.error_code).toBe("dividend_amount_unverified");
   });
 
   it("includes the compliance notes on every refusal and hold", async () => {

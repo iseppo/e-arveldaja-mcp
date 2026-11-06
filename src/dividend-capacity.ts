@@ -235,6 +235,10 @@ export type DividendCapacityHold =
       journals: Array<{ journal_id: number | null; document_number: string | null; effective_date: string }>;
     }
   | {
+      code: "pre_report_draft_reduces_net_assets";
+      journals: Array<{ journal_id: number | null; document_number: string | null; effective_date: string }>;
+    }
+  | {
       code: "distribution_history_incomplete";
       boundary_opening_date: string;
       journals: Array<{ journal_id: number | null; effective_date: string }>;
@@ -247,6 +251,7 @@ export const DIVIDEND_HOLD_PRIORITY: readonly DividendCapacityHoldCode[] = [
   "distribution_history_incomplete",
   "dividend_amount_unverified",
   "pre_report_equity_draft",
+  "pre_report_draft_reduces_net_assets",
   "approved_report_ledger_mismatch",
 ];
 
@@ -312,7 +317,8 @@ export function computeDividendCapacity(input: DividendCapacityInput): DividendC
   // Verified EUR: every posting feeding a calculation must be EUR or carry base_amount.
   const unverified: Array<{ journal_id: number | null; effective_date: string; account: number; currency: string }> = [];
   for (const j of live) {
-    if (preReportDraft(j) && !livePostings(j).some(p => inAllEq(p.accounts_id) || protectedAccounts.has(p.accounts_id))) continue;
+    // A pre-report draft is read only when it touches net assets or the floor.
+    if (preReportDraft(j) && !livePostings(j).some(p => inChecked(p.accounts_id))) continue;
     for (const p of livePostings(j)) {
       if (inChecked(p.accounts_id) && isUnverified(j, p)) {
         unverified.push({ journal_id: j.id ?? null, effective_date: j.effective_date, account: p.accounts_id, currency: p.cl_currencies_id ?? j.cl_currencies_id ?? "" });
@@ -332,6 +338,14 @@ export function computeDividendCapacity(input: DividendCapacityInput): DividendC
   });
   if (heldDrafts.length > 0) {
     holds.push({ code: "pre_report_equity_draft", journals: heldDrafts.map(identity) });
+  }
+  // A pre-report draft without an equity posting that reduces net assets
+  // (e.g. a pending year-end expense): lg 2 would read net assets without it,
+  // while the approved figures may already include it.
+  const reducingDrafts = live.filter(j =>
+    preReportDraft(j) && !heldDrafts.includes(j) && delta(j, inNa) < 0);
+  if (reducingDrafts.length > 0) {
+    holds.push({ code: "pre_report_draft_reduces_net_assets", journals: reducingDrafts.map(identity) });
   }
 
   // Cross-check of the approved figure.

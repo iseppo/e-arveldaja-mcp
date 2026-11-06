@@ -952,6 +952,7 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
         existing_postings: existingPostings ? echoPostings(existingPostings) : null,
         requested_postings: echoPostings(postings),
         calculation,
+        compliance_notes: complianceNotes,
         hint:
           `One dividend journal per shareholder per date. If the existing journal ${journalId} is wrong, ` +
           "delete (or invalidate and delete) it first and re-run; for an additional distribution to the same " +
@@ -1092,6 +1093,9 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
               case "pre_report_equity_draft":
                 return `pre_report_equity_draft: unconfirmed journal(s) dated on or before ${approved.reportYear}-12-31 change equity ` +
                   `(${h.journals.map(j => `journal ${j.journal_id}`).join(", ")}); registering them would change the approved position`;
+              case "pre_report_draft_reduces_net_assets":
+                return `pre_report_draft_reduces_net_assets: unconfirmed journal(s) dated on or before ${approved.reportYear}-12-31 reduce net assets ` +
+                  `(${h.journals.map(j => `journal ${j.journal_id}`).join(", ")}); the net-assets check cannot tell whether the approved figures include them`;
               case "approved_report_ledger_mismatch":
                 return `approved_report_ledger_mismatch: the approved ${approved.reportYear} figures (${h.approved_total} EUR) differ from the ledger ` +
                   `at ${approved.reportYear}-12-31 (${h.ledger_position_at_report_end} EUR) by ${h.difference} EUR`;
@@ -1105,6 +1109,9 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
               "Add the EUR value (base_amount) to the listed foreign-currency journals in e-arveldaja, then re-run. force=true does not override this hold.",
             pre_report_equity_draft:
               `Confirm or delete the listed unconfirmed journal(s) dated on or before ${approved.reportYear}-12-31, then check the approved figures again. force=true does not override this hold.`,
+            pre_report_draft_reduces_net_assets:
+              `Register or delete the listed unconfirmed journal(s) dated on or before ${approved.reportYear}-12-31 so the books match the approved report, then retry; ` +
+              "the approved figures may already include them. force=true does not override this hold.",
             approved_report_ledger_mismatch:
               "Check approved_retained_earnings and approved_profit_for_year against the owner's approved annual report (balance-sheet lines " +
               "'Eelmiste perioodide jaotamata kasum (kahjum)' and 'Aruandeaasta kasum (kahjum)') and approved_report_year. If the report is right and the books " +
