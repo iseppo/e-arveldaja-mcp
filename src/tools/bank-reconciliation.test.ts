@@ -25,9 +25,10 @@ function camtSigned<T extends Record<string, any>>(tx: T): T {
   const direction = description.match(/\b(?:dir|d)=(CRDT|DBIT)\b/)?.[1] as "CRDT" | "DBIT";
   const clean = description.replace(/\n?\[e-arveldaja-mcp:camt [^\]]*\]$/, "") || undefined;
   const signed = {
+    cl_currencies_id: "EUR",
     ...tx,
     description: buildCamtDescriptionWithMetadata(clean, {
-      date: tx.date, amount: tx.amount, currency: tx.cl_currencies_id ?? "", direction,
+      date: tx.date, amount: tx.amount, currency: tx.cl_currencies_id ?? "EUR", direction,
       counterparty_name: tx.bank_account_name ?? undefined, counterparty_iban: tx.bank_account_no ?? undefined,
       bank_reference: tx.bank_ref_number ?? `FIXTURE-${tx.id}`, reference_number: tx.ref_number ?? undefined, description: clean,
     }),
@@ -114,7 +115,7 @@ function setupInterAccountTool(options: {
   toolName?: string;
 } = {}) {
   const server = { registerTool: vi.fn() } as any;
-  const rows = (options.transactions ?? []).map((tx: any) => ({accounts_id:1020, ...tx}));
+  const rows = (withLiveCurrency(options.transactions) ?? []).map((tx: any) => ({accounts_id:1020, ...tx}));
   const updated = new Map<number, Record<string, unknown>>();
   const confirmed = new Map<number, any[]>();
   const actualJournals: any[] = [];
@@ -453,10 +454,10 @@ describe("reconcile_transactions", () => {
       });
     });
 
-    it("blocks inter-account approval when dry run reports ambiguous matches", async () => {
+    it("blocks inter-account approval when dry run reports missing currency", async () => {
       const { handler } = setupInterAccountTool({
         transactions: [
-          { id: 25, status: "PROJECT", is_deleted: false, type: "C", amount: 500, date: "2026-03-20", accounts_dimensions_id: 100, bank_account_no: "EE88888888888888", bank_account_name: "Transfer" },
+          { id: 25, status: "PROJECT", is_deleted: false, type: "C", amount: 500, cl_currencies_id: undefined, date: "2026-03-20", accounts_dimensions_id: 100, bank_account_no: "EE88888888888888", bank_account_name: "Transfer" },
           { id: 26, status: "PROJECT", is_deleted: false, type: "D", amount: 500, date: "2026-03-20", accounts_dimensions_id: 200, bank_account_name: "Transfer" },
           { id: 27, status: "PROJECT", is_deleted: false, type: "D", amount: 500, date: "2026-03-20", accounts_dimensions_id: 300, bank_account_name: "Transfer" },
         ],
@@ -1997,6 +1998,61 @@ describe("reconcile_inter_account_transfers", () => {
       expect(api.transactions.confirm).not.toHaveBeenCalled();
       expect(api.transactions.delete).not.toHaveBeenCalled();
     });
+  });
+
+  describe("B1 foreign pairs require authoritative EUR evidence on both legs", () => {
+    for (const sameType of [false, true]) {
+      it(`confirms ${sameType ? "same-type" : "opposite-type"} foreign pairs at their verified EUR base`, async () => {
+        const { handler, api } = setupInterAccountTool({
+          transactions: [
+            { id: 141, status: "PROJECT", is_deleted: false, type: "C", amount: 100, base_amount: 90.91,
+              cl_currencies_id: "USD", currency_rate: 1.1, date: "2026-03-20", accounts_dimensions_id: 100,
+              bank_account_no: "EE987654321098765432", description: "WISE:TRANSFER-141 [source_direction=OUT]" },
+            { id: 142, status: "PROJECT", is_deleted: false, type: sameType ? "C" : "D", amount: 100, base_amount: 90.91,
+              cl_currencies_id: "USD", currency_rate: 1.1, date: "2026-03-20", accounts_dimensions_id: 200,
+              bank_account_no: "EE123456789012345678", description: "WISE:TRANSFER-142 [source_direction=IN]" },
+          ],
+          bankAccounts,
+        });
+        const done = parseToolPayload<ReconInterAccountPayload>((await executeInterAccount(handler)).content[0]!.text);
+        expect(done.matched_pairs).toBe(1);
+        expect(api.transactions.confirm).toHaveBeenCalledWith(141, [
+          { related_table: "accounts", related_id: 1020, related_sub_id: 200, amount: 90.91 },
+        ], expect.any(Object));
+      });
+
+      for (const evidence of ["missing_both_bases", "missing_incoming_base", "conflicting_rate"] as const) {
+        it(`holds ${sameType ? "same-type" : "opposite-type"} pairs with ${evidence} through preparation and execution`, async () => {
+          const outgoing = {
+            id: 141, status: "PROJECT", is_deleted: false, type: "C", amount: 100,
+            cl_currencies_id: "USD", currency_rate: 1.1,
+            ...(evidence === "missing_both_bases" ? {} : { base_amount: evidence === "conflicting_rate" ? 100 : 90.91 }),
+            date: "2026-03-20", accounts_dimensions_id: 100,
+            bank_account_no: "EE987654321098765432", description: "WISE:TRANSFER-141 [source_direction=OUT]",
+          };
+          const incoming = {
+            id: 142, status: "PROJECT", is_deleted: false, type: sameType ? "C" : "D", amount: 100,
+            cl_currencies_id: "USD", currency_rate: 1.1,
+            ...(evidence === "conflicting_rate" ? { base_amount: 100 } : {}),
+            date: "2026-03-20", accounts_dimensions_id: 200,
+            bank_account_no: "EE123456789012345678", description: "WISE:TRANSFER-142 [source_direction=IN]",
+          };
+          const { handler, api } = setupInterAccountTool({ transactions: [outgoing, incoming], bankAccounts });
+          const dry = parseToolPayload<ReconInterAccountPayload>((await handler({ execute: false })).content[0]!.text);
+          expect(dry.matched_pairs).toBe(0);
+          expect(dry.matched_one_sided).toBe(0);
+          expect(dry.ambiguous_pairs).toEqual([expect.objectContaining({
+            code: "conflicting_transfer_amounts", candidate_incoming_transaction_ids: [142],
+          })]);
+          const done = parseToolPayload<ReconInterAccountPayload>((await handler({ execute: true, plan_handle: dry.plan_handle })).content[0]!.text);
+          expect(done.matched_pairs).toBe(0);
+          expect(done.matched_one_sided).toBe(0);
+          expect(api.transactions.confirm).not.toHaveBeenCalled();
+          expect(api.transactions.update).not.toHaveBeenCalled();
+          expect(api.transactions.delete).not.toHaveBeenCalled();
+        });
+      }
+    }
   });
 
   it("MEDIUM-2 distributes a same-currency foreign pair in base EUR, like one-sided confirms", async () => {
@@ -3714,7 +3770,7 @@ describe("reconcile_inter_account_transfers", () => {
 
     it("H10 rejects missing currency and missing foreign EUR evidence without mutation", async () => {
       const cases: Array<{ id: number; fields: Record<string, unknown>; code: string; reason: string }> = [
-        { id: 8801, fields: { amount: 100 }, code: "one_sided_currency_invalid", reason: "The one-sided transfer currency must be an explicit three-letter ASCII code." },
+        { id: 8801, fields: { amount: 100, cl_currencies_id: undefined }, code: "one_sided_currency_invalid", reason: "The one-sided transfer currency must be an explicit three-letter ASCII code." },
         { id: 8802, fields: { amount: 100, cl_currencies_id: null }, code: "one_sided_currency_invalid", reason: "The one-sided transfer currency must be an explicit three-letter ASCII code." },
         { id: 8803, fields: { amount: 100, cl_currencies_id: "  " }, code: "one_sided_currency_invalid", reason: "The one-sided transfer currency must be an explicit three-letter ASCII code." },
         { id: 8804, fields: { amount: 100, cl_currencies_id: 123 }, code: "one_sided_currency_invalid", reason: "The one-sided transfer currency must be an explicit three-letter ASCII code." },

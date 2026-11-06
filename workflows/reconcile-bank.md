@@ -142,6 +142,8 @@ For transfers between your own bank accounts (counterparty matches company name 
 
 Call `reconcile_bank_transactions` with `mode: "inter_account_dry_run"` (add `target_accounts_dimensions_id` when there are 3+ bank accounts and the IBAN is missing). By default a matched pair keeps the outgoing leg; when the owner prefers the incoming account's row (for example its statement carries the better description), add `keep_side: "incoming"`.
 
+For a foreign-currency pair, both legs need an explicit EUR `base_amount` agreeing with any supplied `currency_rate`. Missing or conflicting EUR evidence is a `conflicting_transfer_amounts` review; do not substitute nominal currency or calculate a replacement from the rate alone.
+
 The dry run returns a `plan_handle` (<!-- E_ARVELDAJA_FEATURE_START:standard -->`result.plan_handle`<!-- E_ARVELDAJA_FEATURE_END:standard --><!-- E_ARVELDAJA_FEATURE_START:guided -->`summary.plan_handle`<!-- E_ARVELDAJA_FEATURE_END:guided -->) bound to exactly the reviewed transfer pairs, one-sided confirms, mirror-row deletes, and any explicit company-client update commands. It is not approval — any drift is refused with `plan_drift` and zero mutations. Apply the complete-command review and profile-specific paging instructions from Auto mode above to this plan before approval or execution.
 
 Review the results:

@@ -368,7 +368,7 @@ OpenAPI spec: `GET /openapi.yaml` on the API server. HTML docs: `/api.html`.
 - The Wise import tool (`import_wise_transactions`) has built-in duplicate detection for inter-account transfers (BookingGuard Lane B, ±1 day, labelled journals identity-only); it auto-confirms only same-currency EUR own transfers — cross-currency ones go to review for `reconcile_inter_account_transfers` (H10), and it never modifies confirmed purchase invoices (invoice FX corrections are advisory)
 - When manually confirming transactions against another bank account, first check for existing journals at that date/amount — `confirm_transaction` warns (BookingGuard Lane B ±1 day + bank-posting scan) and refuses with `block_on_duplicate: true`
 - Same-type reciprocal legs (both stored `C`, or both `D`) are auto-confirmed only when exactly one leg carries a signed outgoing marker agreeing with its stored `C`; otherwise they go to `ambiguous_pairs` with `code: "direction_unresolved"` (the stored type cannot say which account the money left)
-- Inter-account distribution amounts are base EUR (`base_amount ?? amount`) in every phase (pairs, same-type pairs, one-sided — H10)
+- Inter-account pair distributions use authoritative EUR amounts on both legs, validated with the one-sided amount resolver. A foreign pair leg must carry an explicit `base_amount` agreeing with any supplied `currency_rate`; missing or conflicting evidence holds both legs for review, never substituting nominal currency or deriving a pair's value from the rate alone. One-sided transfers retain their existing amount-resolution rules (H10).
 
 ### Cross-mechanism bank-posting duplicate guard
 
@@ -651,6 +651,8 @@ chain from the opening against fresh journals; records ordered before the latest
 or checkpoint are refused (`usd_pool_backdated_event`). Order: opening once → distributions →
 trades → confirm drafts → period-end revaluation. FX amounts come only from the pool log and the
 ECB rate, never from the 1020 balance.
+Same-date revaluation retries retain duplicate protection and rerun the current chain, statement
+coverage and supplied-holding checks before returning `already_booked`; changed prerequisites remain reviews.
 
 Statement roles (`src/lightyear/pool-statement.ts`): every USD row gets exactly one role —
 `pass_through` (1:1 trade↔conversion, converted distribution), `sweep` (ICSUSSDP Buy/Sell, never

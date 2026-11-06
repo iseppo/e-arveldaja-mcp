@@ -190,6 +190,52 @@ describe("book_lightyear_fx_revaluation (C5)", () => {
     expect(retry.payload.plan_handle).toBeUndefined();
   });
 
+  it.each(["1.1172", "1.1240"])("a same-date retry checks the corrected holding at rate %s", async rate => {
+    const env = setup({ rate });
+    await env.book();
+    const createdBefore = env.created.length;
+    const recordsBefore = structuredClone(env.store.records);
+    const retry = await env.run({ dry_run: true, expected_usd_holding: 120 });
+    expect(retry.payload).toMatchObject({ status: "review", review_reason: { code: "usd_pool_quantity_mismatch" } });
+    expect(retry.payload.plan_handle).toBeUndefined();
+    expect(env.created).toHaveLength(createdBefore);
+    expect(env.store.records).toEqual(recordsBefore);
+  });
+
+  it("a same-date retry validates earlier pool journals", async () => {
+    const env = setup();
+    await env.book();
+    env.ledger.set(501, journal(501, "LY:IN-TESTFUND01", 600));
+    const retry = await env.run({ dry_run: true });
+    expect(retry.payload).toMatchObject({ status: "review", review_reason: { code: "usd_pool_event_mismatch" } });
+    expect(retry.payload.plan_handle).toBeUndefined();
+    expect(env.created).toHaveLength(1);
+  });
+
+  it.each<[string, string[][], string]>([
+    ["omits a committed distribution", ROWS.filter(row => row[1] !== "IN-TESTFUND01"), "usd_pool_source_changed"],
+    ["adds an unbooked retained distribution", [...ROWS, ["20/10/2026 10:00:00", "DD-TESTLATE01", "NVDA", "US67066G1040", "Dividend", "0", "USD", "0", "20.00", "0", "0", "20.00", "0"]], "usd_pool_prerequisite_unbooked"],
+  ])("a same-date retry checks statement completeness when it %s", async (_label, rows, code) => {
+    const env = setup();
+    await env.book();
+    mockedReadFileCapped.mockResolvedValue(Buffer.from(statement(rows), "utf8"));
+    const retry = await env.run({ dry_run: true });
+    expect(retry.payload).toMatchObject({ status: "review", review_reason: { code } });
+    expect(retry.payload.plan_handle).toBeUndefined();
+    expect(env.created).toHaveLength(1);
+  });
+
+  it("a same-date retry still requires statement coverage since the preceding checkpoint", async () => {
+    const env = setup();
+    await env.book();
+    const late = "/tmp/AccountStatement-LY-TESTACCT1-2026-10-05_2026-10-30_en.csv";
+    mockedResolveFileInput.mockResolvedValue({ path: late });
+    const retry = await env.run({ dry_run: true, file_path: late });
+    expect(retry.payload).toMatchObject({ status: "review", review_reason: { code: "usd_pool_statement_gap" } });
+    expect(retry.payload.plan_handle).toBeUndefined();
+    expect(env.created).toHaveLength(1);
+  });
+
   it("a replayed quantity off by 0.01 USD is a review", async () => {
     const dry = await setup().run({ dry_run: true, expected_usd_holding: 100.01 });
     expect(dry.payload).toMatchObject({ status: "review", review_reason: { code: "usd_pool_quantity_mismatch" } });

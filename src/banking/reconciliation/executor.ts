@@ -1042,7 +1042,7 @@ export async function runInterAccountMatching(
       code,
       reason: code === "counterpart_lacks_own_origin"
         ? `Transactions ${out.id} (${out.amount}) and ${inc.id} (${inc.amount}) point at each other's account, but ${inc.id} has no evidence it came from ${out.id}'s account (its counterparty IBAN is not that account's), so it cannot be treated as a transfer mirror. Check the bank statements and confirm each row as what it is.`
-        : `Transactions ${out.id} and ${inc.id} point at each other's account with the same nominal amount but different base (EUR) amounts, so they cannot be booked as one transfer automatically. Check the bank statements and book the transfer once at the correct EUR amount.`,
+        : `Transactions ${out.id} and ${inc.id} point at each other's account, but their EUR amount evidence is missing or conflicting, so they cannot be booked as one transfer automatically. Each foreign leg needs an explicit base amount agreeing with its currency rate when provided. Check the bank statements and book the transfer once at the correct EUR amount.`,
     });
   }
 
@@ -1232,7 +1232,7 @@ export async function runInterAccountMatching(
         deleteAuditDetails: { amount: txOut.amount, date: txOut.date, paired_incoming_id: txIn.id },
       });
       recordInterAccountJournal(
-        txOut.accounts_dimensions_id, txIn.accounts_dimensions_id, comparableTransactionAmount(txOut), txOut.date,
+        txOut.accounts_dimensions_id, txIn.accounts_dimensions_id, bestCandidate.comparableAmount, txOut.date,
         undefined, transferReferenceOf(txOut, guard.journals),
       );
       if (txIn.clients_id == null) await resolveCompanyClientsId();
@@ -1263,7 +1263,7 @@ export async function runInterAccountMatching(
       deleteAuditDetails: { amount: txIn.amount, date: txIn.date, paired_outgoing_id: txOut.id },
     });
     recordInterAccountJournal(
-      txOut.accounts_dimensions_id, txIn.accounts_dimensions_id, comparableTransactionAmount(txOut), txOut.date,
+      txOut.accounts_dimensions_id, txIn.accounts_dimensions_id, bestCandidate.comparableAmount, txOut.date,
       undefined, transferReferenceOf(txOut, guard.journals),
     );
     if (txOut.clients_id == null) await resolveCompanyClientsId();
@@ -1383,7 +1383,7 @@ export async function runInterAccountMatching(
     const sourceId = source.id!;
     const counterpartId = counterpart.id!;
     // Base EUR, the same unit the BookingGuard key and one-sided confirms use.
-    const distributionAmount = comparableTransactionAmount(source);
+    const distributionAmount = bestCandidate.comparableAmount;
 
     const fromTitleEarly = dimensionToTitle.get(source.accounts_dimensions_id) ?? `dim:${source.accounts_dimensions_id}`;
     const toTitleEarly = dimensionToTitle.get(counterpart.accounts_dimensions_id) ?? `dim:${counterpart.accounts_dimensions_id}`;

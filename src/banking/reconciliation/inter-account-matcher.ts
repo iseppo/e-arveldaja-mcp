@@ -6,7 +6,7 @@ import { toUtcDay } from "../../date-utils.js";
 import { normalizeIban } from "../../resolution/bank-account-resolution.js";
 import { REF_NUMBER_MAX_LENGTH } from "../../ref-number.js";
 import { comparableTransactionAmount, sameAmountToTheCent } from "./match-score.js";
-import { hasMeaningfulComparableAmount } from "./amount-resolution.js";
+import { resolveOneSidedTransferAmount } from "./amount-resolution.js";
 import {
   extractCamtDescriptionMetadata,
   isCamtCounterpartyIbanOmitted,
@@ -416,18 +416,26 @@ export function getTransferPairCompatibility(
 } | undefined {
   const reasons: string[] = [];
   let confidence = 0;
-  const txAComparableAmount = comparableTransactionAmount(txA);
-  const txBComparableAmount = comparableTransactionAmount(txB);
+  const txAResolution = resolveOneSidedTransferAmount(txA);
+  const txBResolution = resolveOneSidedTransferAmount(txB);
+  // Pairing needs the API's explicit EUR base on each foreign leg. A rate
+  // alone can value a one-sided transfer, but cannot prove these two legs
+  // carry the same EUR booking. Keep uncertain reciprocal rows for review.
+  const unprovenEurAmounts = !txAResolution.ok || !txBResolution.ok ||
+    (txAResolution.currency !== "EUR" && txA.base_amount == null) ||
+    (txBResolution.currency !== "EUR" && txB.base_amount == null);
+  const txAComparableAmount = txAResolution.ok ? txAResolution.amountEur : comparableTransactionAmount(txA);
+  const txBComparableAmount = txBResolution.ok ? txBResolution.amountEur : comparableTransactionAmount(txB);
   // Exact integer cents, not float subtraction — see sameAmountToTheCent.
   const nominalAmountsMatch = sameAmountToTheCent(txA.amount, txB.amount);
   const comparableAmountsMatch = sameAmountToTheCent(txAComparableAmount, txBComparableAmount);
   const hasMeaningfulComparableAmounts =
-    hasMeaningfulComparableAmount(txA) ||
-    hasMeaningfulComparableAmount(txB);
+    !sameAmountToTheCent(txAComparableAmount, txA.amount) ||
+    !sameAmountToTheCent(txBComparableAmount, txB.amount);
   const conflictingComparableAmounts =
-    nominalAmountsMatch &&
+    unprovenEurAmounts || (nominalAmountsMatch &&
     hasMeaningfulComparableAmounts &&
-    !comparableAmountsMatch;
+    !comparableAmountsMatch);
 
   if (nominalAmountsMatch) {
     if (!conflictingComparableAmounts) {
@@ -465,7 +473,7 @@ export function getTransferPairCompatibility(
 /** Outcome of {@link evaluateTransferPair}. */
 export type TransferPairEvaluation =
   | { kind: "rejected" }
-  /** Same nominal amount, different base (EUR) amounts: never one transfer. */
+  /** Missing or conflicting EUR evidence: never automatically one transfer. */
   | { kind: "conflicting_amounts"; confidence: number }
   | { kind: "admitted"; confidence: number; reasons: string[]; comparableAmount: number };
 
