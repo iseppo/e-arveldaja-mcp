@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { plainFailureOutcome as fail, plainSuccessOutcome as ok, type OperationOutcome } from "../operation-outcome.js";
 import type { ExecutionPlanInput, PlanRecord } from "../plan-store.js";
 import type { ApiContext } from "../tools/crud/shared.js";
@@ -33,6 +34,11 @@ import {
 } from "./invoice-types.js";
 
 const MUTATION_ACTIONS = new Set<SaleInvoiceMutationAction>(["create", "update", "delete", "confirm", "invalidate", "send", "recurring"]);
+
+/** Bind all invoice contents without storing line items in the bounded plan. */
+function confirmationSnapshotDigest(invoice: SaleInvoice): string {
+  return createHash("sha256").update(canonicalPlanJson(invoice)).digest("hex");
+}
 
 /**
  * Extract the recurring-clone params from a façade payload. Returns undefined
@@ -370,13 +376,12 @@ class SaleInvoiceOperationsImpl implements SaleInvoiceOperations {
     const normalizedArgs: PlanRecord = bindsPayload
       ? saleMutationFingerprint(input.action, input.id, input.payload)
       : { action: input.action, ...(input.id !== undefined ? { invoice_id: input.id } : {}),
-        ...(invoiceSnapshot !== undefined ? { invoice_snapshot: stripUndefinedDeep(invoiceSnapshot) } : {}) };
+        ...(invoiceSnapshot !== undefined ? { invoice_snapshot_sha256: confirmationSnapshotDigest(invoiceSnapshot) } : {}) };
     const projection: SaleInvoicePrepareProjection = {
       action: input.action,
       ...(input.id !== undefined ? { invoice_id: input.id } : {}),
       destructive: input.action === "delete" || input.action === "confirm" || input.action === "invalidate" || input.action === "send",
       ...(bindsPayload ? boundPayloadProjection(normalizedArgs) : {}),
-      ...(invoiceSnapshot !== undefined ? { invoice: renderExternalEntity("sale_invoice", invoiceSnapshot) } : {}),
     };
     const planProjection = projection as unknown as ExecutionPlanInput["liveSnapshot"];
     const planInput: ExecutionPlanInput = {
@@ -404,7 +409,13 @@ class SaleInvoiceOperationsImpl implements SaleInvoiceOperations {
       return fail(clientPreview.code, clientPreview.message);
     }
     const planHandle = this.runtimeSafetyContext.planStore.issue(SALE_INVOICE_PLAN_DOMAIN, planInput);
-    return ok({ mode: "prepare", action: input.action, ...(input.id !== undefined ? { id: input.id } : {}), planHandle, projection: { ...projection, ...clientPreview.projection } });
+    // Return every line for review, but do not duplicate the full invoice in
+    // liveSnapshot and reviewProjection: ordinary larger invoices exceed the
+    // plan store's node limit. normalizedArgs binds the canonical digest above.
+    return ok({ mode: "prepare", action: input.action, ...(input.id !== undefined ? { id: input.id } : {}), planHandle, projection: {
+      ...projection, ...clientPreview.projection,
+      ...(invoiceSnapshot !== undefined ? { invoice: renderExternalEntity("sale_invoice", invoiceSnapshot) } : {}),
+    } });
   }
 
   /** Read-only projection add-on describing how the inline `client` on a create
@@ -536,7 +547,7 @@ class SaleInvoiceOperationsImpl implements SaleInvoiceOperations {
       let invoiceSnapshot: SaleInvoice;
       try { invoiceSnapshot = await this.freshConfirmationSnapshot(input.id); }
       catch { return fail("plan_drift", "The sale invoice could not be reread before confirmation. Prepare and review it again. Nothing was written.", "never", { reason: "source_read_failed" }); }
-      boundArgs = { action: input.action, invoice_id: input.id, invoice_snapshot: stripUndefinedDeep(invoiceSnapshot) };
+      boundArgs = { action: input.action, invoice_id: input.id, invoice_snapshot_sha256: confirmationSnapshotDigest(invoiceSnapshot) };
     } else {
       boundArgs = { action: input.action, ...(input.id !== undefined ? { invoice_id: input.id } : {}) };
     }

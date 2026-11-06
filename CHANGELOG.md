@@ -10,6 +10,8 @@
 
 ### Fixed
 
+- **You can prepare and confirm larger sales invoices without losing the approval step.** Before, an ordinary invoice with 250 product lines could exceed the approval plan's size limit and return no approval handle. Details: confirmation plans bind a SHA-256 digest of the complete canonical invoice snapshot and store compact review projections; the preview still shows every invoice line. Execution rereads the invoice uncached and refuses changed contents with `plan_drift` before registration.
+
 - **Confirming a sale invoice now requires the invoice you actually reviewed.** Details: `manage_sale_invoice` confirmation previews show a fresh invoice snapshot; execution reads it again without the cache and refuses changed contents or an unavailable read with `plan_drift`, before registration.
 - **A recurring-invoice batch can no longer grow after you approve it.** Details: `create_recurring_sale_invoices` execution now requires the dry run's scoped, single-use `plan_handle`, binding the source IDs, complete clone payloads, dates and confirmation mode. Changed inputs or sources require a new preview; nothing is written on a refused plan.
 - **Switching companies no longer mixes one company's report with another company's local rules.** Details: local accounting-rule and bundle-store resolution uses the invocation's connection snapshot and rejects a stale connection generation, including a switch away and back.

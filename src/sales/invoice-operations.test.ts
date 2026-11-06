@@ -64,6 +64,62 @@ describe("SaleInvoiceOperations plan-handle two-call gate", () => {
     items: [{ products_id: 9, custom_title: "Service", amount: 1, unit_net_price: 100, total_net_price: 100, vat_rate: 24 }],
   });
 
+  const largeReviewedInvoice = () => ({
+    ...reviewedInvoice(), net_price: 25_000, gross_price: 31_000,
+    items: Array.from({ length: 250 }, (_, index) => ({
+      id: index + 1, products_id: 9, cl_sale_articles_id: 1, sale_accounts_id: 3000,
+      amount: 1, unit: "tk", unit_net_price: 100, total_net_price: 100,
+      base_total_net_price: 100, vat_accounts_id: 2210, vat_rate: 24,
+      discount_percent: 0, custom_title: `Product ${index + 1}`, vat_amount: 24,
+    })),
+  });
+
+  it("R1: a 250-line confirmation returns the full review and executes unchanged", async () => {
+    const invoice = largeReviewedInvoice();
+    const get = vi.fn().mockResolvedValue(invoice);
+    const invalidateListCache = vi.fn();
+    const confirm = vi.fn().mockResolvedValue({});
+    const ops = createSaleInvoiceOperations(makeApi({ get, invalidateListCache, confirm }), createTestRuntimeSafetyContext());
+
+    const prepared = await ops.run({ mode: "prepare", action: "confirm", id: 5 });
+    if (!prepared.ok || prepared.value.mode !== "prepare") throw new Error("prepare failed");
+    const reviewed = prepared.value.projection.invoice;
+    expect(reviewed?.items).toHaveLength(250);
+    expect(reviewed?.items?.[249]).toMatchObject({ id: 250, total_net_price: 100, vat_amount: 24 });
+    expect(reviewed?.items?.[249]?.custom_title).toContain("Product 250");
+    expect(reviewed?.items?.[249]?.custom_title).toContain("UNTRUSTED_OCR_START");
+    expect(confirm).not.toHaveBeenCalled();
+
+    const outcome = await ops.run({ mode: "execute", action: "confirm", id: 5, planHandle: prepared.value.planHandle });
+
+    expect(outcome.ok).toBe(true);
+    expect(confirm).toHaveBeenCalledExactlyOnceWith(5);
+    expect(get).toHaveBeenCalledTimes(2);
+    expect(invalidateListCache).toHaveBeenCalledTimes(2);
+    expect(invalidateListCache.mock.invocationCallOrder[1]!).toBeLessThan(get.mock.invocationCallOrder[1]!);
+    expect(get.mock.invocationCallOrder[1]!).toBeLessThan(confirm.mock.invocationCallOrder[0]!);
+  });
+
+  it("R1: changing the last line of a 250-line reviewed invoice refuses confirmation", async () => {
+    const invoice = largeReviewedInvoice();
+    const changed = { ...invoice, items: invoice.items.map((item, index) =>
+      index === 249 ? { ...item, custom_title: "Changed product" } : item) };
+    const get = vi.fn().mockResolvedValueOnce(invoice).mockResolvedValueOnce(changed);
+    const confirm = vi.fn().mockResolvedValue({});
+    const ops = createSaleInvoiceOperations(makeApi({ get, confirm }), createTestRuntimeSafetyContext());
+
+    const prepared = await ops.run({ mode: "prepare", action: "confirm", id: 5 });
+    if (!prepared.ok || prepared.value.mode !== "prepare") throw new Error("prepare failed");
+    const outcome = await ops.run({ mode: "execute", action: "confirm", id: 5, planHandle: prepared.value.planHandle });
+
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) throw new Error("changed invoice was registered");
+    expect(outcome.error.code).toBe("plan_drift");
+    expect(outcome.error.message).toContain("Nothing was written.");
+    expect(confirm).not.toHaveBeenCalled();
+    expect(get).toHaveBeenCalledTimes(2);
+  });
+
   it("F1: confirmation preparation displays a fresh invoice snapshot with the reviewed amount and lines", async () => {
     const invoice = reviewedInvoice();
     const get = vi.fn().mockResolvedValue(invoice);
