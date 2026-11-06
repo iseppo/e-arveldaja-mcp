@@ -340,16 +340,22 @@ export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext,
   registerTool(server, "delete_purchase_invoice", "Delete a purchase invoice", idParam.shape, { ...destructive, title: "Delete Purchase Invoice" }, lifecycleHandler("delete_purchase_invoice", "Deleted", "purchase_invoice", (id) => api.purchaseInvoices.delete(id)));
 
   registerTool(server, "preview_purchase_invoice_totals_correction",
-    "Preview an explicit EUR draft totals correction without changing or confirming the purchase invoice.",
-    { id: coerceId }, { ...readOnly, title: "Preview Purchase Invoice Totals Correction" }, async ({ id }) => {
-      const isVatReg = await isCompanyVatRegistered(api);
+    "Preview an explicit EUR draft totals correction without changing or confirming the purchase invoice. Purchases before full VAT registration require explicit owner review of historical deduction; use the same reviewed decision when confirming.",
+    { id: coerceId, pre_registration_vat_deduction_approved: historicalVatReviewParam }, { ...readOnly, title: "Preview Purchase Invoice Totals Correction" }, async ({ id, pre_registration_vat_deduction_approved }) => {
       let preview: PurchaseInvoiceTotalsCorrectionPreview;
       try {
+        api.purchaseInvoices.invalidateListCache();
+        const draft = await api.purchaseInvoices.get(id);
+        const isVatReg = await isCompanyVatRegistered(api, {
+          purchaseDate: draft.create_date,
+          preRegistrationVatDeductionApproved: pre_registration_vat_deduction_approved,
+        });
         // Non-VAT: the fresh chart for the non-deductible proof (GitHub #63).
         preview = isVatReg
           ? await api.purchaseInvoices.previewTotalsCorrection(id, isVatReg)
           : await api.purchaseInvoices.previewTotalsCorrection(id, isVatReg, await api.readonly.getAccounts({ fresh: true }));
       } catch (error) {
+        if (error instanceof PurchaseVatHistoricalReviewError) return toolError(error);
         if (error instanceof PurchaseInvoiceTotalsCorrectionError) {
           return totalsCorrectionToolError(error);
         }
@@ -362,7 +368,7 @@ export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext,
         message: `Previewed purchase invoice ${id} totals correction.`,
         raw: preview,
         next_actions: [
-          "Obtain approval for this correction preview, then resubmit it unchanged to confirm_purchase_invoice with recalculate_totals=true.",
+          "Obtain approval for this correction preview, then resubmit it unchanged to confirm_purchase_invoice with recalculate_totals=true and the same pre_registration_vat_deduction_approved decision, if supplied.",
         ],
       });
     });

@@ -2,9 +2,9 @@
   "profile": "setup",
   "measurement": {
     "toolCount": 131,
-    "toolsListBytes": 156072,
-    "descriptionsBytes": 23761,
-    "inputSchemasBytes": 100752,
+    "toolsListBytes": 156508,
+    "descriptionsBytes": 23903,
+    "inputSchemasBytes": 101046,
     "largestTool": {
       "name": "import_wise_transactions",
       "bytes": 5627
@@ -2559,7 +2559,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Preview an explicit EUR draft totals correction without changing or confirming the purchase invoice.",
+      "description": "Preview an explicit EUR draft totals correction without changing or confirming the purchase invoice. Purchases before full VAT registration require explicit owner review of historical deduction; use the same reviewed decision when confirming.",
       "execution": {
         "taskSupport": "forbidden"
       },
@@ -2571,6 +2571,10 @@
             "exclusiveMinimum": 0,
             "maximum": 9007199254740991,
             "type": "integer"
+          },
+          "pre_registration_vat_deduction_approved": {
+            "description": "Only after owner review of a purchase dated before full VAT registration: false = no input-VAT deduction (non-deductible rows required); true = owner approved a statutory deduction exception. Omit to hold for review.",
+            "type": "boolean"
           }
         },
         "required": [

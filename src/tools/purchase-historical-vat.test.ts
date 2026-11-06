@@ -14,6 +14,8 @@ import { withSignedCamtMarker } from "../__fixtures__/camt-marker.js";
 import { createClassificationOperations } from "../receipts/classification-operations.js";
 import * as receiptInbox from "./receipt-inbox.js";
 import { prepareReceiptInvoiceItems } from "./receipt-inbox-booking.js";
+import { parseToolPayload } from "../__fixtures__/mcp-response.js";
+import type { ToolResponseEnvelopeOptions } from "../tool-response.js";
 
 vi.mock("../audit-log.js", () => ({ logAudit: vi.fn() }));
 
@@ -176,6 +178,57 @@ describe("T5 historical purchase VAT review", () => {
     const result = await handler({ id, pre_registration_vat_deduction_approved: false });
     expect(result.isError).toBe(true);
     expect(JSON.stringify(result)).toContain("correction_nonvat_form_unproven");
+    expect(fake.writes()).toHaveLength(0);
+  });
+
+  it("confirms the unchanged approved totals correction for a historical non-deductible draft", async () => {
+    const fake = fakeEarveldaja({ vatNumber: "EE123456789" });
+    const id = fake.seed({ create_date: "2026-10-31", journal_date: "2026-10-31", vat_price: 0, gross_price: 123 }, [{
+      custom_title: "October cleaning", purchase_accounts_id: 6000, amount: 1,
+      total_net_price: 124, project_no_vat_gross_price: 124, vat_rate_dropdown: "-", cl_vat_articles_id: 11,
+    }]);
+    const server = { registerTool: vi.fn() };
+    registerPurchaseInvoiceTools(server as never, fake as never);
+    const handler = (name: string) => server.registerTool.mock.calls.find(([tool]) => tool === name)![2] as (args: Record<string, unknown>) => Promise<CallToolResult>;
+    const preview = await handler("preview_purchase_invoice_totals_correction")({
+      id, pre_registration_vat_deduction_approved: false,
+    });
+    expect(preview.isError).not.toBe(true);
+    const content = preview.content[0];
+    if (content?.type !== "text") throw new Error("Missing correction preview");
+    const body = parseToolPayload<ToolResponseEnvelopeOptions>(content.text);
+    expect(fake.writes()).toHaveLength(0);
+
+    const confirmed = await handler("confirm_purchase_invoice")({
+      id, recalculate_totals: true, approved_correction: body.raw,
+      pre_registration_vat_deduction_approved: false,
+    });
+    expect(confirmed.isError, JSON.stringify(confirmed)).not.toBe(true);
+    expect(body.raw).toMatchObject({
+      is_vat_registered: false, current_gross_price: 123, proposed_gross_price: 124,
+      proposed_vat_price: 0, correction_required: true,
+    });
+    expect(fake.totalsPatches()).toHaveLength(1);
+    expect(fake.registers()).toHaveLength(1);
+    expect(fake.state.invoices.get(id)).toMatchObject({ status: "CONFIRMED", vat_price: 0, gross_price: 124 });
+  });
+
+  it("checks the fresh invoice date before previewing a correction without historical review", async () => {
+    const fake = fakeEarveldaja({ vatNumber: "EE123456789" });
+    const id = fake.seed({ create_date: "2026-11-01", journal_date: "2026-11-01", vat_price: 0, gross_price: 123 }, [{
+      custom_title: "Cleaning", purchase_accounts_id: 6000, amount: 1,
+      total_net_price: 124, project_no_vat_gross_price: 124, vat_rate_dropdown: "-", cl_vat_articles_id: 11,
+    }]);
+    await fake.purchaseInvoices.get(id); // Warm the cache with a post-registration date.
+    fake.state.invoices.get(id)!.create_date = "2026-10-31";
+    const server = { registerTool: vi.fn() };
+    registerPurchaseInvoiceTools(server as never, fake as never);
+    const handler = server.registerTool.mock.calls.find(([name]) => name === "preview_purchase_invoice_totals_correction")![2] as (args: Record<string, unknown>) => Promise<CallToolResult>;
+
+    const result = await handler({ id });
+
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result)).toContain("purchase_vat_historical_review_required");
     expect(fake.writes()).toHaveLength(0);
   });
 });

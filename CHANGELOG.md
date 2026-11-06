@@ -10,6 +10,7 @@
 
 ### Fixed
 
+- **Approved totals corrections now work for purchases made before VAT registration.** Before, a reviewed non-deductible correction preview could never be confirmed. Details: totals-correction previews check the fresh invoice date and accept the same `pre_registration_vat_deduction_approved` decision as confirmation, so both bind the same VAT treatment into the approval digest.
 - **Instalment VAT is no longer assigned wholly to the first payment month.** Details: limited-taxpayer invoices not fully prepaid on the earliest payment date require allocation review in every affected payment month and the invoice month; same-date payments can still establish full prepayment.
 - **VAT bookings reject an expense account selected as the liability account.** Details: limited-taxpayer VAT targets, including automatically resolved accounts, must be active liabilities (`Kohustused`) and distinct from every expense target; execution checks them again before writing.
 - **Missing currency valuations stop reports and year-end closing instead of becoming euros.** Details: foreign postings without a verified `base_amount` hold financial calculations and existing-close comparisons. EUR postings and postings without a currency still accept `amount` when `base_amount` is absent.
