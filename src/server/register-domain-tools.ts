@@ -70,7 +70,7 @@ export function registerDomainTools(ctx: RegisterDomainToolsContext): void {
   registerAccountBalanceTools(publicServer, api);
   registerPdfWorkflowTools(publicServer, api, runtimeSafetyContext);
   registerDocumentAttachmentTools(publicServer, api);
-  registerCurrencyRoundingTools(publicServer, api);
+  registerCurrencyRoundingTools(publicServer, api, runtimeSafetyContext);
   registerBankReconciliationTools(publicServer, api, runtimeSafetyContext, toolExposure);
   registerFinancialStatementTools(publicServer, api, toolExposure);
   registerAgingTools(publicServer, api, toolExposure);

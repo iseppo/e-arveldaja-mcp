@@ -2,9 +2,9 @@
   "profile": "custom",
   "measurement": {
     "toolCount": 85,
-    "toolsListBytes": 95571,
-    "descriptionsBytes": 13064,
-    "inputSchemasBytes": 62107,
+    "toolsListBytes": 95832,
+    "descriptionsBytes": 13210,
+    "inputSchemasBytes": 62222,
     "largestTool": {
       "name": "import_wise_transactions",
       "bytes": 5627
@@ -2677,7 +2677,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Reconcile small PARTIALLY_PAID purchase-invoice currency residuals. DRY RUN by default; execute=true applies in-place fixes for <0.10 EUR or FX journals for 0.10-1.00 EUR.",
+      "description": "Reconcile small PARTIALLY_PAID purchase-invoice currency residuals. DRY RUN by default and returns a plan_handle; execute=true + that plan_handle applies in-place fixes for <0.10 EUR or FX journals for 0.10-1.00 EUR only when a fresh scan still matches the reviewed candidates (otherwise plan_drift, nothing written).",
       "execution": {
         "taskSupport": "forbidden"
       },
@@ -2712,6 +2712,10 @@
             "exclusiveMinimum": 0,
             "maximum": 9007199254740991,
             "type": "integer"
+          },
+          "plan_handle": {
+            "description": "execute=true: the plan_handle from the reviewed dry run (required)",
+            "type": "string"
           }
         },
         "type": "object"
