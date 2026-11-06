@@ -275,13 +275,20 @@ export async function createMcpServer(
     );
   }
 
-  initAccountingRulesConnection(() => ({
-    name: allConfigs[connectionState.activeIndex]?.name ?? "setup",
-    stableIdentity: allConfigs[connectionState.activeIndex]
-      ? buildConnectionFingerprint(allConfigs[connectionState.activeIndex]!.config)
-      : "setup",
-    connectionCount: allConfigs.length,
-  }));
+  const invocationStorage = createInvocationStorage();
+  initAccountingRulesConnection(() => {
+    // Local rules and bundle stores must use the same company as API reads.
+    // A read-only invocation can resume after switch_connection, so reject its
+    // stale generation before resolving any other company's local knowledge.
+    const snapshot = invocationStorage.getStore();
+    if (snapshot) assertSnapshotCurrent(connectionState, snapshot);
+    const config = allConfigs[snapshot?.index ?? connectionState.activeIndex];
+    return {
+      name: config?.name ?? "setup",
+      stableIdentity: config ? buildConnectionFingerprint(config.config) : "setup",
+      connectionCount: allConfigs.length,
+    };
+  });
   const connectionFingerprints = Object.fromEntries(
     allConfigs.map((config) => [config.name, buildConnectionFingerprint(config.config)]),
   );
@@ -289,7 +296,6 @@ export async function createMcpServer(
     () => allConfigs[connectionState.activeIndex]?.name ?? "setup",
     connectionFingerprints,
   );
-  const invocationStorage = createInvocationStorage();
   /**
    * Active non-readonly tool snapshots. switch_connection consults this to
    * refuse mid-flight mutations. Tracked by object identity so the set

@@ -2,8 +2,8 @@
   "profile": "guided-sales",
   "measurement": {
     "toolCount": 20,
-    "toolsListBytes": 38471,
-    "descriptionsBytes": 5443,
+    "toolsListBytes": 38632,
+    "descriptionsBytes": 5604,
     "inputSchemasBytes": 28158,
     "largestTool": {
       "name": "process_accounting_document",
@@ -955,7 +955,7 @@
         "openWorldHint": false,
         "readOnlyHint": false
       },
-      "description": "Unified sale-invoice entry point. mode='read' (action list/get/document/xml/delivery_options) reads invoices. Mutations use the two-call gate: mode='prepare' (action create/update/delete/confirm/invalidate/send/recurring) returns a plan_handle; after explicit approval mode='execute' with that plan_handle runs it. send dispatches a REAL e-invoice and is never one-shot. recurring clones previous-month confirmed invoices into DRAFT recurring invoices (params in payload).",
+      "description": "Unified sale-invoice entry point. mode='read' (action list/get/document/xml/delivery_options) reads invoices. Mutations use the two-call gate: mode='prepare' (action create/update/delete/confirm/invalidate/send/recurring) returns a plan_handle; after explicit approval mode='execute' with that plan_handle runs it. confirm shows a fresh invoice snapshot for review and refuses changed contents or an unavailable fresh read before registration; prepare again after plan_drift. send dispatches a REAL e-invoice and is never one-shot. recurring clones previous-month confirmed invoices into DRAFT recurring invoices (params in payload).",
       "execution": {
         "taskSupport": "forbidden"
       },

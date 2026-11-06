@@ -57,6 +57,93 @@ describe("SaleInvoiceOperations read mode", () => {
 });
 
 describe("SaleInvoiceOperations plan-handle two-call gate", () => {
+  const reviewedInvoice = () => ({
+    id: 5, status: "PROJECT", number: "ARV-5", clients_id: 42, client_name: "Buyer OÜ",
+    create_date: "2026-11-01", journal_date: "2026-11-01", cl_currencies_id: "EUR",
+    net_price: 100, gross_price: 124,
+    items: [{ products_id: 9, custom_title: "Service", amount: 1, unit_net_price: 100, total_net_price: 100, vat_rate: 24 }],
+  });
+
+  it("F1: confirmation preparation displays a fresh invoice snapshot with the reviewed amount and lines", async () => {
+    const invoice = reviewedInvoice();
+    const get = vi.fn().mockResolvedValue(invoice);
+    const invalidateListCache = vi.fn();
+    const confirm = vi.fn();
+    const ops = createSaleInvoiceOperations(makeApi({ get, invalidateListCache, confirm }), createTestRuntimeSafetyContext());
+
+    const prepared = await ops.run({ mode: "prepare", action: "confirm", id: 5 });
+
+    if (!prepared.ok || prepared.value.mode !== "prepare") throw new Error("prepare failed");
+    expect(prepared.value.projection.invoice).toMatchObject({
+      id: 5, clients_id: 42, net_price: 100, gross_price: 124,
+      items: [{ products_id: 9, amount: 1, unit_net_price: 100, total_net_price: 100, vat_rate: 24 }],
+    });
+    expect(JSON.stringify(prepared.value.projection.invoice)).toContain("UNTRUSTED_OCR_START");
+    expect(invalidateListCache).toHaveBeenCalledBefore(get);
+    expect(get).toHaveBeenCalledWith(5);
+    expect(confirm).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["gross amount", { gross_price: 1240, net_price: 1000 }],
+    ["customer", { clients_id: 77 }],
+    ["journal date", { journal_date: "2026-11-02" }],
+    ["line account", { items: [{ ...reviewedInvoice().items[0]!, sale_accounts_id: 3200 }] }],
+  ])("F1: confirmation refuses a changed %s with plan_drift before registration", async (_label, changed) => {
+    const invoice = reviewedInvoice();
+    const get = vi.fn().mockResolvedValueOnce(invoice).mockResolvedValueOnce({ ...invoice, ...changed });
+    const confirm = vi.fn().mockResolvedValue({});
+    const ops = createSaleInvoiceOperations(makeApi({ get, confirm }), createTestRuntimeSafetyContext());
+    const prepared = await ops.run({ mode: "prepare", action: "confirm", id: 5 });
+    if (!prepared.ok || prepared.value.mode !== "prepare") throw new Error("prepare failed");
+
+    const outcome = await ops.run({ mode: "execute", action: "confirm", id: 5, planHandle: prepared.value.planHandle });
+
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) throw new Error("changed invoice was registered");
+    expect(outcome.error.code).toBe("plan_drift");
+    expect(outcome.error.message).toContain("Nothing was written.");
+    expect(confirm).not.toHaveBeenCalled();
+    expect(get).toHaveBeenCalledTimes(2);
+  });
+
+  it("F1: an unchanged confirmation snapshot is reread uncached and registered only once", async () => {
+    const get = vi.fn().mockResolvedValue(reviewedInvoice());
+    const invalidateListCache = vi.fn();
+    const confirm = vi.fn().mockResolvedValue({});
+    const ops = createSaleInvoiceOperations(makeApi({ get, invalidateListCache, confirm }), createTestRuntimeSafetyContext());
+    const prepared = await ops.run({ mode: "prepare", action: "confirm", id: 5 });
+    if (!prepared.ok || prepared.value.mode !== "prepare") throw new Error("prepare failed");
+
+    const executed = await ops.run({ mode: "execute", action: "confirm", id: 5, planHandle: prepared.value.planHandle });
+    const replayed = await ops.run({ mode: "execute", action: "confirm", id: 5, planHandle: prepared.value.planHandle });
+
+    expect(executed.ok).toBe(true);
+    expect(replayed.ok).toBe(false);
+    expect(confirm).toHaveBeenCalledExactlyOnceWith(5);
+    expect(get).toHaveBeenCalledTimes(2);
+    expect(invalidateListCache).toHaveBeenCalledTimes(2);
+    expect(invalidateListCache.mock.invocationCallOrder[0]!).toBeLessThan(get.mock.invocationCallOrder[0]!);
+    expect(invalidateListCache.mock.invocationCallOrder[1]!).toBeLessThan(get.mock.invocationCallOrder[1]!);
+    expect(get).toHaveBeenCalledBefore(confirm);
+  });
+
+  it("F1: an unavailable execute-time invoice snapshot refuses confirmation without a write", async () => {
+    const get = vi.fn().mockResolvedValueOnce(reviewedInvoice()).mockRejectedValueOnce(new Error("temporary read failure"));
+    const confirm = vi.fn().mockResolvedValue({});
+    const ops = createSaleInvoiceOperations(makeApi({ get, confirm }), createTestRuntimeSafetyContext());
+    const prepared = await ops.run({ mode: "prepare", action: "confirm", id: 5 });
+    if (!prepared.ok || prepared.value.mode !== "prepare") throw new Error("prepare failed");
+
+    const outcome = await ops.run({ mode: "execute", action: "confirm", id: 5, planHandle: prepared.value.planHandle });
+
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) throw new Error("unread invoice was registered");
+    expect(outcome.error.code).toBe("plan_drift");
+    expect(outcome.error.message).toContain("Nothing was written.");
+    expect(confirm).not.toHaveBeenCalled();
+  });
+
   it("execute without a plan_handle is refused before any API call (send)", async () => {
     const send = vi.fn();
     const api = makeApi({ sendEinvoice: send });

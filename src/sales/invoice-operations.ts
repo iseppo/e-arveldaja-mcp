@@ -1,9 +1,9 @@
 import { plainFailureOutcome as fail, plainSuccessOutcome as ok, type OperationOutcome } from "../operation-outcome.js";
 import type { ExecutionPlanInput, PlanRecord } from "../plan-store.js";
 import type { ApiContext } from "../tools/crud/shared.js";
-import { computeRecurringClone, recurringPreviewSourceBinding, validateRecurringParams, type RecurringCloneParams } from "../tools/recurring-invoices.js";
+import { computeRecurringClone, recurringPlanArgs, recurringPreviewSourceBinding, validateRecurringParams, type RecurringCloneParams } from "../tools/recurring-invoices.js";
 import type { RuntimeSafetyContext } from "../runtime-safety-context.js";
-import { desandboxAllStrings } from "../external-text-renderer.js";
+import { desandboxAllStrings, renderExternalEntity } from "../external-text-renderer.js";
 import { wrapUntrustedOcr } from "../mcp-json.js";
 import { isRecord } from "../record-utils.js";
 import { resolveSupplierInternal } from "../tools/supplier-resolution.js";
@@ -19,7 +19,7 @@ import {
   captureSaleCreateScope, saleCreateRecoveryFor, saleCreateIntent,
   type SaleCreateIntent, type SaleCreateRecoverySession,
 } from "./create-recovery.js";
-import type { SaleInvoiceDeliveryRequest } from "../types/api.js";
+import type { SaleInvoice, SaleInvoiceDeliveryRequest } from "../types/api.js";
 import {
   SALE_INVOICE_PLAN_DOMAIN,
   type SaleInvoiceExecuteInput,
@@ -28,6 +28,7 @@ import {
   type SaleInvoiceOperationResult,
   type SaleInvoiceOperations,
   type SaleInvoicePrepareInput,
+  type SaleInvoicePrepareProjection,
   type SaleInvoiceReadInput,
 } from "./invoice-types.js";
 
@@ -53,36 +54,6 @@ function parseRecurringParams(payload: Record<string, unknown> | undefined): Rec
     target_journal_date,
     ...(invoice_ids !== undefined ? { invoice_ids } : {}),
     ...(auto_confirm !== undefined ? { auto_confirm } : {}),
-  };
-}
-
-/**
- * The drift-binding fingerprint for a recurring plan. Binds the reviewed clone
- * params (source_month/target_date/target_journal_date/invoice_ids) AND
- * auto_confirm — the dry-run preview can never reflect confirmation, so
- * auto_confirm is bound here to stop an approved "create DRAFT clones" preview
- * from being executed as "create AND register" via the same handle. It is
- * normalized to a canonical boolean (absent === false) so an unchanged run
- * still matches, while flipping it to true drifts. NOT an invoice id (recurring
- * has none).
- *
- * It ALSO binds `sources`: the exact would-create set of the reviewed dry-run
- * preview (source id + gross + sale_invoice_type + the SHA-256 of the complete
- * clone create payload, see recurringPreviewSourceBinding). The params alone are not the reviewed effect —
- * computeRecurringClone re-lists invoices at execute, so a source invoice
- * confirmed/edited after the preview (or a clone deleted since) would otherwise
- * be created/registered without ever having been shown. Execute recomputes the
- * preview and refuses with plan_drift when the set or any amount differs.
- */
-function recurringNormalizedArgs(params: RecurringCloneParams, sources: Array<Record<string, string | number | null>>): PlanRecord {
-  return {
-    action: "recurring",
-    source_month: params.source_month,
-    target_date: params.target_date,
-    target_journal_date: params.target_journal_date,
-    auto_confirm: params.auto_confirm === true,
-    ...(params.invoice_ids !== undefined ? { invoice_ids: params.invoice_ids } : {}),
-    sources,
   };
 }
 
@@ -186,8 +157,9 @@ function applyCreateDefaults(rest: Record<string, unknown>): void {
  * object and the non-semantic `view` field are dropped. Everything else
  * (clients_id, items, invoice-level amounts, dates, send flags/recipients) is
  * bound verbatim — conservatively, a spurious drift is safer than an unbound
- * field. delete/confirm/invalidate carry no meaningful payload and are NOT routed
- * here (they stay id-only). stripUndefinedDeep makes the result safe for the plan
+ * field. delete/confirm/invalidate carry no meaningful input payload and are NOT
+ * routed here (confirm binds a fresh invoice snapshot separately).
+ * stripUndefinedDeep makes the result safe for the plan
  * store (which rejects `undefined`) and order-insensitive for the comparison.
  */
 function saleMutationFingerprint(
@@ -387,17 +359,24 @@ class SaleInvoiceOperationsImpl implements SaleInvoiceOperations {
     }
     // Bind the DESANDBOXED payload fingerprint for create/update/send so the
     // execute-time drift check rejects a changed payload (amounts, line items,
-    // send channel/recipients, inline customer). delete/confirm/invalidate carry
-    // no meaningful payload → id-only, as before.
+    // send channel/recipients, inline customer). Confirmation instead binds the
+    // actual invoice contents; delete/invalidate remain id-only.
     const bindsPayload = input.action === "create" || input.action === "update" || input.action === "send";
+    let invoiceSnapshot: SaleInvoice | undefined;
+    if (input.action === "confirm") {
+      try { invoiceSnapshot = await this.freshConfirmationSnapshot(input.id!); }
+      catch { return fail("invoice_snapshot_unavailable", "The sale invoice could not be read for review. Nothing was written."); }
+    }
     const normalizedArgs: PlanRecord = bindsPayload
       ? saleMutationFingerprint(input.action, input.id, input.payload)
-      : { action: input.action, ...(input.id !== undefined ? { invoice_id: input.id } : {}) };
-    const projection: Record<string, string | number | boolean> = {
+      : { action: input.action, ...(input.id !== undefined ? { invoice_id: input.id } : {}),
+        ...(invoiceSnapshot !== undefined ? { invoice_snapshot: stripUndefinedDeep(invoiceSnapshot) } : {}) };
+    const projection: SaleInvoicePrepareProjection = {
       action: input.action,
       ...(input.id !== undefined ? { invoice_id: input.id } : {}),
       destructive: input.action === "delete" || input.action === "confirm" || input.action === "invalidate" || input.action === "send",
       ...(bindsPayload ? boundPayloadProjection(normalizedArgs) : {}),
+      ...(invoiceSnapshot !== undefined ? { invoice: renderExternalEntity("sale_invoice", invoiceSnapshot) } : {}),
     };
     const planProjection = projection as unknown as ExecutionPlanInput["liveSnapshot"];
     const planInput: ExecutionPlanInput = {
@@ -475,7 +454,7 @@ class SaleInvoiceOperationsImpl implements SaleInvoiceOperations {
     // the operator reviews before approving.
     const preview = await computeRecurringClone(this.api, params, { dryRun: true });
     const sources = recurringPreviewSourceBinding(preview);
-    const normalizedArgs = recurringNormalizedArgs(params, sources);
+    const normalizedArgs = recurringPlanArgs(params, sources);
     const planSnapshot: PlanRecord = { ...normalizedArgs, destructive: false };
     const planInput: ExecutionPlanInput = {
       normalizedArgs,
@@ -534,8 +513,8 @@ class SaleInvoiceOperationsImpl implements SaleInvoiceOperations {
     // this, one approved prepare of any sale mutation would authorize ANY single
     // sale mutation (e.g. approve confirm id=5, then send/delete an arbitrary
     // id on the same handle). Mirrors the plan_drift binding in the banking
-    // reconciliation executor. Rejected with ZERO side effect — before any
-    // api.saleInvoices.* call.
+    // reconciliation executor. Rejected with ZERO writes. Confirmation also
+    // rereads the actual invoice so an edited draft cannot reuse old approval.
     // For recurring, the plan binds the reviewed clone PARAMS (not an invoice id).
     let boundArgs: PlanRecord;
     let recurringSourceIds: ReadonlySet<number> | undefined;
@@ -545,7 +524,7 @@ class SaleInvoiceOperationsImpl implements SaleInvoiceOperations {
       // would-create set is compared against what execute would do NOW.
       const livePreview = await computeRecurringClone(this.api, recurringParams!, { dryRun: true, fresh: true });
       const liveSources = recurringPreviewSourceBinding(livePreview);
-      boundArgs = recurringNormalizedArgs(recurringParams!, liveSources);
+      boundArgs = recurringPlanArgs(recurringParams!, liveSources);
       recurringSourceIds = new Set(liveSources.flatMap(row => (typeof row.source_id === "number" ? [row.source_id] : [])));
       recurringPayloadDigests = new Map(liveSources.flatMap(row =>
         typeof row.source_id === "number" && typeof row.clone_payload_sha256 === "string" ? [[row.source_id, row.clone_payload_sha256] as const] : []));
@@ -553,11 +532,16 @@ class SaleInvoiceOperationsImpl implements SaleInvoiceOperations {
       // Recompute the SAME payload fingerprint bound at prepare so a changed
       // create/update/send payload drift-rejects here, before any api call.
       boundArgs = saleMutationFingerprint(input.action, input.id, input.payload);
+    } else if (input.action === "confirm" && input.id !== undefined) {
+      let invoiceSnapshot: SaleInvoice;
+      try { invoiceSnapshot = await this.freshConfirmationSnapshot(input.id); }
+      catch { return fail("plan_drift", "The sale invoice could not be reread before confirmation. Prepare and review it again. Nothing was written.", "never", { reason: "source_read_failed" }); }
+      boundArgs = { action: input.action, invoice_id: input.id, invoice_snapshot: stripUndefinedDeep(invoiceSnapshot) };
     } else {
       boundArgs = { action: input.action, ...(input.id !== undefined ? { invoice_id: input.id } : {}) };
     }
     if (canonicalPlanJson(storedPlan.normalizedArgs) !== canonicalPlanJson(boundArgs)) {
-      return fail("plan_drift", "The reviewed sale-invoice plan no longer matches the requested action/id.");
+      return fail("plan_drift", "The reviewed sale-invoice plan no longer matches the requested action, id or contents. Prepare and review it again. Nothing was written.");
     }
 
     if (input.action !== "create" && input.action !== "recurring" && input.id === undefined) {
@@ -855,6 +839,12 @@ class SaleInvoiceOperationsImpl implements SaleInvoiceOperations {
       summary: `Updated sale invoice ${input.id!}`, details: { fields_changed: Object.keys(parsed) },
     });
     return ok({ mode: "execute", action: "update", id: input.id!, result });
+  }
+
+  /** Both the approval card and the final check must bypass cached drafts. */
+  private async freshConfirmationSnapshot(id: number): Promise<SaleInvoice> {
+    this.api.saleInvoices.invalidateListCache();
+    return this.api.saleInvoices.get(id);
   }
 
   private async executeSimple(

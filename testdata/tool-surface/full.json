@@ -2,9 +2,9 @@
   "profile": "full",
   "measurement": {
     "toolCount": 148,
-    "toolsListBytes": 185964,
-    "descriptionsBytes": 28304,
-    "inputSchemasBytes": 121930,
+    "toolsListBytes": 186510,
+    "descriptionsBytes": 28723,
+    "inputSchemasBytes": 122057,
     "largestTool": {
       "name": "import_wise_transactions",
       "bytes": 5627
@@ -4386,7 +4386,7 @@
         "openWorldHint": false,
         "readOnlyHint": false
       },
-      "description": "Clone previous-month sale invoices into DRAFT recurring invoices. dry_run=true previews; invoice numbers are auto-assigned.",
+      "description": "Clone previous-month confirmed sale invoices. dry_run=true (default) previews the exact batch and returns a single-use plan_handle. After owner approval, execute with dry_run=false, that handle and unchanged arguments. Changed source invoices or batch require a fresh preview. Default creates DRAFTs; auto_confirm=true immediately registers them. Invoice numbers are auto-assigned.",
       "execution": {
         "taskSupport": "forbidden"
       },
@@ -4405,6 +4405,10 @@
           "invoice_ids": {
             "description": "Comma-separated source invoice IDs to copy (default: all confirmed from source month)",
             "pattern": "^\\d+(?:\\s*,\\s*\\d+)*$",
+            "type": "string"
+          },
+          "plan_handle": {
+            "description": "Single-use handle from the owner-approved preview; required with dry_run=false",
             "type": "string"
           },
           "source_month": {
@@ -6722,7 +6726,7 @@
         "openWorldHint": false,
         "readOnlyHint": false
       },
-      "description": "Unified sale-invoice entry point. mode='read' (action list/get/document/xml/delivery_options) reads invoices. Mutations use the two-call gate: mode='prepare' (action create/update/delete/confirm/invalidate/send/recurring) returns a plan_handle; after explicit approval mode='execute' with that plan_handle runs it. send dispatches a REAL e-invoice and is never one-shot. recurring clones previous-month confirmed invoices into DRAFT recurring invoices (params in payload).",
+      "description": "Unified sale-invoice entry point. mode='read' (action list/get/document/xml/delivery_options) reads invoices. Mutations use the two-call gate: mode='prepare' (action create/update/delete/confirm/invalidate/send/recurring) returns a plan_handle; after explicit approval mode='execute' with that plan_handle runs it. confirm shows a fresh invoice snapshot for review and refuses changed contents or an unavailable fresh read before registration; prepare again after plan_drift. send dispatches a REAL e-invoice and is never one-shot. recurring clones previous-month confirmed invoices into DRAFT recurring invoices (params in payload).",
       "execution": {
         "taskSupport": "forbidden"
       },

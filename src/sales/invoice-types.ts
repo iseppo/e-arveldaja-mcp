@@ -1,4 +1,5 @@
 import type { OperationOutcome } from "../operation-outcome.js";
+import type { SaleInvoice } from "../types/api.js";
 
 // Typed sale-invoice operations (Task 14, PR 8C). One typed op absorbs all 11
 // granular sale-invoice tools behind read/prepare/execute modes over
@@ -59,8 +60,10 @@ export interface SaleInvoicePrepareResult {
   readonly action: SaleInvoiceMutationAction;
   readonly id?: number;
   readonly planHandle: string;
-  readonly projection: Record<string, unknown>;
+  readonly projection: SaleInvoicePrepareProjection;
 }
+/** Confirmation shows the fresh invoice that is bound to the reviewed plan. */
+export type SaleInvoicePrepareProjection = Record<string, unknown> & { readonly invoice?: SaleInvoice };
 export interface SaleInvoiceExecuteResult {
   readonly mode: "execute";
   readonly action: SaleInvoiceMutationAction;

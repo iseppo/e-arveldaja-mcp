@@ -11,6 +11,32 @@ import { logAudit } from "../audit-log.js";
 import { isStrictDate, parseStrictDate, parseStrictMonth } from "../strict-date.js";
 import { getMonthLastDay } from "../date-utils.js";
 import { canonicalPlanJson } from "./camt-plan.js";
+import type { RuntimeSafetyContext } from "../runtime-safety-context.js";
+import type { PlanRecord } from "../plan-store.js";
+import { toolError } from "../tool-error.js";
+
+const RECURRING_PLAN_DOMAIN = "recurring_sale_invoices";
+
+/** Shared recurring preview/execution result; standalone previews add a scoped approval handle. */
+export interface RecurringInvoicePayload extends Record<string, unknown> {
+  mode: "DRY_RUN" | "EXECUTED";
+  execution_effect: "create_drafts" | "create_and_confirm";
+  auto_confirm: boolean;
+  source_month: string;
+  target_date: string;
+  source_count: number;
+  would_create?: number;
+  would_confirm?: number;
+  would_skip_existing?: number;
+  created?: number;
+  confirmed?: number;
+  skipped_existing?: number;
+  errors?: number;
+  create_errors?: number;
+  confirm_errors?: number;
+  results: Array<Record<string, unknown> & { status: string }>;
+  plan_handle?: string;
+}
 
 const RECURRING_CLONE_MARKER_PREFIX = "RECURRING_SOURCE_INVOICE";
 const RECURRING_CLONE_MARKER_RE = /RECURRING_SOURCE_INVOICE:\d+:TARGET_DATE:\d{4}-\d{2}-\d{2}/g;
@@ -179,6 +205,26 @@ export interface RecurringCloneParams {
 }
 
 /**
+ * Shared drift binding for standalone and guided recurring plans. The reviewed
+ * dates, source selection and auto_confirm mode are bound alongside the exact
+ * would-create source set and every clone payload digest. Omitted auto_confirm
+ * equals false; changing it to true requires renewed approval. Re-listing at
+ * execute must not silently add a source confirmed since review or replace
+ * reviewed client/accounts/items with changed contents.
+ */
+export function recurringPlanArgs(params: RecurringCloneParams, sources: ReturnType<typeof recurringPreviewSourceBinding>): PlanRecord {
+  return {
+    action: "recurring",
+    source_month: params.source_month,
+    target_date: params.target_date,
+    target_journal_date: params.target_journal_date,
+    auto_confirm: params.auto_confirm === true,
+    ...(params.invoice_ids !== undefined ? { invoice_ids: params.invoice_ids } : {}),
+    sources,
+  };
+}
+
+/**
  * Single source of truth for the recurring format validation. The standalone
  * `create_recurring_sale_invoices` tool enforces these on its Zod schema
  * (`.regex(...)` above), but the `manage_sale_invoice` action='recurring' façade
@@ -221,7 +267,7 @@ export async function computeRecurringClone(
     /** Read the sale-invoice list uncached (execute and its drift check): the list pages are cached for 120 s. */
     fresh?: boolean;
   },
-): Promise<Record<string, unknown>> {
+): Promise<RecurringInvoicePayload> {
       // Belt-and-suspenders: never clone from an unvalidated shape. The
       // standalone tool passes Zod-validated input so this never trips there
       // (output stays identical); the façade validates and rejects earlier, so
@@ -472,16 +518,16 @@ export async function computeRecurringClone(
         results,
         ...(isDryRun && {
           note: autoConfirmEffective
-            ? "Preview only. auto_confirm=true: on execute each clone is CREATED and immediately REGISTERED (confirmed) — it enters the ledger as a booked receivable, NOT an editable draft. Omit dry_run or set dry_run=false to proceed."
-            : "Preview only. Each clone is created as an editable DRAFT (not registered). Omit dry_run or set dry_run=false to create the invoices.",
+            ? "Preview only. auto_confirm=true: on execute each clone is CREATED and immediately REGISTERED (confirmed) — it enters the ledger as a booked receivable, NOT an editable draft. Only execute after owner approval, using the reviewed plan_handle."
+            : "Preview only. Each clone is created as an editable DRAFT (not registered). Only execute after owner approval, using the reviewed plan_handle.",
         }),
       };
 }
 
-export function registerRecurringInvoiceTools(server: McpServer, api: ApiContext): void {
+export function registerRecurringInvoiceTools(server: McpServer, api: ApiContext, runtimeSafetyContext: RuntimeSafetyContext): void {
 
   registerTool(server, "create_recurring_sale_invoices",
-    "Clone previous-month sale invoices into DRAFT recurring invoices. dry_run=true previews; invoice numbers are auto-assigned.",
+    "Clone previous-month confirmed sale invoices. dry_run=true (default) previews the exact batch and returns a single-use plan_handle. After owner approval, execute with dry_run=false, that handle and unchanged arguments. Changed source invoices or batch require a fresh preview. Default creates DRAFTs; auto_confirm=true immediately registers them. Invoice numbers are auto-assigned.",
     {
       source_month: z.string().regex(MONTH_REGEX, "Expected YYYY-MM").describe("Source month to copy from (YYYY-MM)"),
       target_date: z.string().regex(ISO_DATE_REGEX, "Expected YYYY-MM-DD").refine(isStrictDate, "Expected a real calendar date (canonical YYYY-MM-DD)").describe("New invoice date (YYYY-MM-DD)"),
@@ -489,14 +535,46 @@ export function registerRecurringInvoiceTools(server: McpServer, api: ApiContext
       invoice_ids: z.string().regex(COMMA_SEPARATED_IDS_REGEX, "Expected comma-separated numeric invoice IDs").optional().describe("Comma-separated source invoice IDs to copy (default: all confirmed from source month)"),
       auto_confirm: z.boolean().optional().describe("Confirm created invoices (default false)"),
       dry_run: z.boolean().optional().describe("Preview without creating invoices (default true)"),
+      plan_handle: z.string().optional().describe("Single-use handle from the owner-approved preview; required with dry_run=false"),
     },
     { ...batch, title: "Create Recurring Sale Invoices" },
-    async ({ source_month, target_date, target_journal_date, invoice_ids, auto_confirm, dry_run }) => {
-      const payload = await computeRecurringClone(
-        api,
-        { source_month, target_date, target_journal_date, invoice_ids, auto_confirm },
-        { dryRun: dry_run !== false },
-      );
+    async ({ source_month, target_date, target_journal_date, invoice_ids, auto_confirm, dry_run, plan_handle }) => {
+      const params = { source_month, target_date, target_journal_date, invoice_ids, auto_confirm };
+      const refuse = (code: string, message: string) => toolError({ error_code: code, error: message, note: "Nothing was written." });
+      if (dry_run !== false) {
+        const preview = await computeRecurringClone(api, params, { dryRun: true });
+        const sources = recurringPreviewSourceBinding(preview);
+        const normalizedArgs = recurringPlanArgs(params, sources);
+        const planHandle = runtimeSafetyContext.planStore.issue(RECURRING_PLAN_DOMAIN, {
+          normalizedArgs,
+          sourceIdentities: sources,
+          liveSnapshot: normalizedArgs,
+          commands: [{ id: "recurring-sale-invoices", category: "sale_invoice_recurring", reviewProjection: normalizedArgs }],
+          counts: {}, totals: {}, exclusions: [], reviews: [], privatePayload: normalizedArgs,
+        });
+        const payload: RecurringInvoicePayload = { ...preview, plan_handle: planHandle };
+        return { content: [{ type: "text", text: toMcpJson(payload) }] };
+      }
+      if (!plan_handle) return refuse("plan_handle_required", "dry_run=false requires the plan_handle from an owner-approved preview.");
+      let plan;
+      try {
+        plan = runtimeSafetyContext.planStore.consume(plan_handle, RECURRING_PLAN_DOMAIN);
+      } catch (error) {
+        return refuse((error as { code?: string }).code ?? "plan_handle_invalid", "The reviewed recurring-invoice plan could not be consumed.");
+      }
+      // Match the guided-sales gate: re-read the complete would-create set,
+      // then restrict the write pass to the reviewed IDs and payload digests.
+      const freshPreview = await computeRecurringClone(api, params, { dryRun: true, fresh: true });
+      const sources = recurringPreviewSourceBinding(freshPreview);
+      if (canonicalPlanJson(plan.normalizedArgs) !== canonicalPlanJson(recurringPlanArgs(params, sources))) {
+        return refuse("plan_drift", "The source invoices, clone payloads or arguments changed. Review a fresh recurring-invoice preview.");
+      }
+      const payload: RecurringInvoicePayload = await computeRecurringClone(api, params, {
+        dryRun: false,
+        onlySourceIds: new Set(sources.flatMap(row => typeof row.source_id === "number" ? [row.source_id] : [])),
+        expectedPayloadDigests: new Map(sources.flatMap(row =>
+          typeof row.source_id === "number" && typeof row.clone_payload_sha256 === "string" ? [[row.source_id, row.clone_payload_sha256] as const] : [])),
+      });
       return { content: [{ type: "text", text: toMcpJson(payload) }] };
     }
   );

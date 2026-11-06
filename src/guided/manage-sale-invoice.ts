@@ -71,7 +71,7 @@ export function registerManageSaleInvoiceTool(
 
   registerTool(server,
     "manage_sale_invoice",
-    "Unified sale-invoice entry point. mode='read' (action list/get/document/xml/delivery_options) reads invoices. Mutations use the two-call gate: mode='prepare' (action create/update/delete/confirm/invalidate/send/recurring) returns a plan_handle; after explicit approval mode='execute' with that plan_handle runs it. send dispatches a REAL e-invoice and is never one-shot. recurring clones previous-month confirmed invoices into DRAFT recurring invoices (params in payload).",
+    "Unified sale-invoice entry point. mode='read' (action list/get/document/xml/delivery_options) reads invoices. Mutations use the two-call gate: mode='prepare' (action create/update/delete/confirm/invalidate/send/recurring) returns a plan_handle; after explicit approval mode='execute' with that plan_handle runs it. confirm shows a fresh invoice snapshot for review and refuses changed contents or an unavailable fresh read before registration; prepare again after plan_drift. send dispatches a REAL e-invoice and is never one-shot. recurring clones previous-month confirmed invoices into DRAFT recurring invoices (params in payload).",
     {
       mode: z.enum(["read", "prepare", "execute"]).optional().describe("read (default), prepare (mint plan handle), or execute (consume it)."),
       action: z.string().optional().describe("read: list|get|document|xml|delivery_options. prepare/execute: create|update|delete|confirm|invalidate|send|recurring."),
