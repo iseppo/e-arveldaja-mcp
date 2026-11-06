@@ -12,6 +12,9 @@ import {
 import { summarizeInvoiceExtraction } from "../invoice-extraction-fallback.js";
 import { resolveSupplierInternal } from "../tools/supplier-resolution.js";
 import { HttpError } from "../http-client.js";
+import type { HttpClient } from "../http-client.js";
+import { ReferenceDataApi, readonlyCache } from "../api/readonly.api.js";
+import type { ApiContext } from "../tools/crud-tools.js";
 import { InvoiceCreationError } from "../api/purchase-invoices.api.js";
 import { receiptAttachmentTransport } from "../__fixtures__/receipt-attachment-transport.js";
 import { fixturePurchaseReadback } from "../__fixtures__/purchase-readback.js";
@@ -271,6 +274,28 @@ const baseRun = {
   legacyExecuteCreate: false,
   directoryAccessOptions: {},
 } as const;
+
+it("R3: receipt execute refreshes VAT registration through the real reference-data cache", async () => {
+  readonlyCache.invalidate();
+  let vatNumber: string | null = "EE123456789";
+  const get = vi.fn(async () => ({ vat_number: vatNumber }));
+  const reference = new ReferenceDataApi({ cacheNamespace: "receipt-vat-freshness", get } as unknown as HttpClient);
+  const { api, spies } = makeApi();
+  (api as ApiContext).readonly.getVatInfo = options => reference.getVatInfo(options);
+  const ops = makeOperations(api);
+  const plan = await dryRunPlan(ops);
+  expect(get).toHaveBeenCalledTimes(1);
+  vatNumber = null;
+  expect(await reference.getVatInfo()).toEqual({ vat_number: "EE123456789" });
+
+  const result = await ops.runBatch({ ...baseRun, executionMode: "create", dryRun: false, approvedManifest: plan.manifest, planHandle: plan.planHandles.create });
+
+  expect(result).toMatchObject({ ok: false, error: { code: "plan_drift" } });
+  expect(get).toHaveBeenCalledTimes(2);
+  expect(spies.createAndSetTotals).not.toHaveBeenCalled();
+  expect(spies.uploadDocument).not.toHaveBeenCalled();
+  expect(spies.confirmWithTotals).not.toHaveBeenCalled();
+});
 
 describe("actual attachment transport through approved receipt batch plans", () => {
   it.each([
@@ -1282,6 +1307,26 @@ describe("receipt batch — unresolved supplier duplicate check (live smoke 0.29
     expect(outcome.value.results[0]!.duplicate_match).toBeUndefined();
   });
 
+  it("creates a EUR receipt despite a blank-number USD draft with the same supplier, gross and date", async () => {
+    const { api, spies } = apiWithInvoices([{
+      ...booked, id: 903, number: "", clients_id: 7, client_name: "Supplier OU",
+      status: "PROJECT", create_date: "2026-03-20", gross_price: 124, cl_currencies_id: "USD",
+    }]);
+    const ops = makeOperations(api);
+    const preview = await ops.runBatch({ ...baseRun, executionMode: "dry_run", dryRun: true });
+    if (!preview.ok) throw new Error("runBatch failed");
+    expect(preview.value.results[0]!.status).toBe("dry_run_preview");
+    expect(preview.value.results[0]!.duplicate_match).toBeUndefined();
+
+    const executed = await ops.runBatch({
+      ...baseRun, executionMode: "create", dryRun: false,
+      approvedManifest: preview.value.manifest, planHandle: preview.value.planHandles?.create,
+    });
+    if (!executed.ok) throw new Error("runBatch failed");
+    expect(executed.value.results[0]!.status).toBe("created");
+    expect(spies.createAndSetTotals).toHaveBeenCalledOnce();
+  });
+
   // Codex review: an ambiguous number may match the wrong existing invoice, so
   // a real invoice must not be skipped as its duplicate.
   it.each(["dry_run", "create"] as const)("an ambiguous invoice number matching an existing invoice is reviewed, not skipped (%s)", async (mode) => {
@@ -1474,11 +1519,14 @@ describe("receipt batch — supplier from a footer identity block (Telia live mi
     const createClient = vi.fn();
     (api as unknown as { clients: Record<string, unknown> }).clients.create = createClient;
     const ops = makeOperations(api);
-    const dryRun = await ops.runBatch({ ...baseRun, executionMode: "dry_run", dryRun: true });
+    // Keep the own-company identity available so this regression reaches the
+    // deactivated-client guard rather than the earlier identity-outage hold.
+    const run = { ...baseRun, ownCompanyName: "Proovi OÜ" };
+    const dryRun = await ops.runBatch({ ...run, executionMode: "dry_run", dryRun: true });
     if (!dryRun.ok) throw new Error("dry run failed");
     expect(dryRun.value.results[0]!.status).toBe("needs_review");
     const outcome = await ops.runBatch({
-      ...baseRun, executionMode: "create", dryRun: false, approvedManifest: dryRun.value.manifest, planHandle: dryRun.value.planHandles?.create,
+      ...run, executionMode: "create", dryRun: false, approvedManifest: dryRun.value.manifest, planHandle: dryRun.value.planHandles?.create,
     });
     if (!outcome.ok) throw new Error("runBatch failed");
     const result = outcome.value.results[0]!;

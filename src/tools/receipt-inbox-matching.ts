@@ -57,7 +57,7 @@ export function findDuplicateInvoice(
   invoiceNumber: string,
   createDate: string,
   grossPrice: number,
-  /** The receipt's currency (default EUR): the amount/date-under-another-number rule compares same-currency invoices only. */
+  /** The receipt's currency (default EUR): amount/date rules compare same-currency invoices only. */
   currency?: string,
 ): InvoiceDuplicateMatch | undefined {
   const normalizedNumber = normalizeInvoiceNumberForComparison(invoiceNumber);
@@ -77,7 +77,9 @@ export function findDuplicateInvoice(
     };
   }
 
-  const sameAmountDate = invoices.find(invoice =>
+  const receiptCurrency = (currency ?? "EUR").trim().toUpperCase();
+  const sameCurrency = invoices.filter(invoice => (invoice.cl_currencies_id ?? "EUR").trim().toUpperCase() === receiptCurrency);
+  const sameAmountDate = sameCurrency.find(invoice =>
     invoice.clients_id === clientsId &&
     !isInvalidatedPurchaseInvoice(invoice) &&
     invoice.create_date === createDate &&
@@ -99,8 +101,6 @@ export function findDuplicateInvoice(
   // rule (detectDuplicatePurchaseInvoice), so every intake surface agrees. A
   // review hint only — callers never skip on it.
   // Same currency only, as the create-time scanner (scanPurchaseIntakeDuplicates).
-  const receiptCurrency = (currency ?? "EUR").toUpperCase();
-  const sameCurrency = invoices.filter(invoice => (invoice.cl_currencies_id ?? "EUR").toUpperCase() === receiptCurrency);
   const otherNumber = otherNumberAmountDateMatches(sameCurrency, clientsId, invoiceNumber, grossPrice, createDate)[0];
   if (otherNumber?.id) {
     return {

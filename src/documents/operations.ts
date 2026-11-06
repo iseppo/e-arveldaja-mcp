@@ -29,7 +29,8 @@ import { appendOrderReferenceNote, orderReferenceNoteLine } from "../order-refer
 import { isRecord } from "../record-utils.js";
 import { CREATION_GATING_EXTRACTION_SIGNALS, CREATION_GATING_SIGNAL_WARNINGS, summarizeInvoiceExtraction } from "../invoice-extraction-fallback.js";
 import { checkCurrencyEquivalent } from "../currency-equivalent-check.js";
-import { resolveOwnCompanyIdentifiers } from "../tools/own-company-identity.js";
+import { isOwnCompanyClient, resolveOwnCompanyIdentifiers } from "../tools/own-company-identity.js";
+import { normalizeCompanyName } from "../company-name.js";
 import { buildExtractionConfidenceSignals } from "../tools/receipt-inbox.js";
 import { textHazardSignals } from "../tools/document-text-hazards.js";
 import { resolveSupplierDefault } from "../resolution/supplier-default-resolution.js";
@@ -209,6 +210,14 @@ export async function computeEffectiveBooking(
   fileName: string,
 ): Promise<OperationOutcome<EffectiveBookingModel>> {
   const supplier = await api.clients.get(booking.supplierClientId);
+  const allClients = await api.clients.listAll().catch(() => [supplier]);
+  const own = await resolveOwnCompanyIdentifiers(api, allClients, { fresh: true });
+  if (normalizeCompanyName(own.ownCompanyName) === "" && !own.ownCompanyRegistryCode?.trim()) {
+    return fail("own_company_identity_unavailable", "Your own company's name and registry code could not be established, so the selected supplier cannot be checked against your own company. Retry when invoice settings are available. Nothing was written.", "never");
+  }
+  if (isOwnCompanyClient(supplier, own)) {
+    return fail("supplier_is_own", "The selected supplier is the active company itself. Select the invoice's vendor and review again. Nothing was written.", "never");
+  }
   const supplierName = desandboxText(supplier.name);
   const isVatReg = await isCompanyVatRegistered(api, { purchaseDate: booking.invoiceDate });
   const purchaseArticles = await getPurchaseArticlesWithVat(api);
@@ -475,6 +484,9 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
       let supplierResolution;
       if (overrideId !== undefined) {
         const overridden = allClients.find(client => client.id === overrideId);
+        if (overridden && isOwnCompanyClient(overridden, { ownCompanyVat, ownCompanyRegistryCode, ownCompanyName })) {
+          return fail("supplier_is_own", "The selected supplier override is the active company itself. Select the invoice's vendor and review again. Nothing was written.", "never");
+        }
         supplierResolution = overridden
           ? resolveSupplierDefault([overridden], { supplier_reg_code: overridden.code ?? undefined, supplier_name: overridden.name })
           : resolveSupplierDefault(allClients, {

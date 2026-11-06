@@ -228,6 +228,35 @@ type GatherOutcome =
   | { readonly kind: "non_project"; readonly status?: string }
   | { readonly kind: "error"; readonly error: unknown };
 
+/** Same material booking projection at plan time and immediately before writes. */
+function classificationBooking(
+  supplier: Client | undefined,
+  suggestion: ClassifiedTransactionSuggestion,
+  purchaseItem: PurchaseInvoiceItem,
+  transaction: Transaction,
+  netAmount: number,
+  grossAmount: number,
+  vatPrice: number,
+): PlanRecord {
+  return stripUndefinedDeep({
+    supplier_client_id: supplier?.id ?? null,
+    supplier_name: supplier?.name !== undefined ? canonicalBusinessText(supplier.name) : null,
+    invoice_number: `AUTO-TX-${transaction.id}`,
+    purchase_article_id: suggestion.purchase_article_id ?? null,
+    purchase_account_id: purchaseItem.purchase_accounts_id ?? null,
+    purchase_account_dimensions_id: purchaseItem.purchase_accounts_dimensions_id ?? null,
+    liability_account_id: suggestion.liability_account_id ?? DEFAULT_LIABILITY_ACCOUNT,
+    vat_rate_dropdown: purchaseItem.vat_rate_dropdown ?? null,
+    vat_accounts_id: purchaseItem.vat_accounts_id ?? null,
+    vat_accounts_dimensions_id: purchaseItem.vat_accounts_dimensions_id ?? null,
+    cl_vat_articles_id: purchaseItem.cl_vat_articles_id ?? null,
+    reversed_vat_id: purchaseItem.reversed_vat_id ?? null,
+    net_amount: netAmount,
+    gross_amount: grossAmount,
+    vat_price: vatPrice,
+  }) as PlanRecord;
+}
+
 // --- F6 ledger context --------------------------------------------------------
 
 interface LedgerContext {
@@ -630,6 +659,7 @@ class ClassificationOperationsImpl implements ClassificationOperations {
     groups: ClassifiedTransactionGroupResult[],
     context: { clients: Client[]; purchaseInvoices: unknown[]; openPurchases: PurchaseInvoice[]; purchaseArticlesWithVat: Awaited<ReturnType<typeof getPurchaseArticlesWithVat>>; accounts: unknown[]; isVatRegistered: boolean },
     cache: Map<number, GatherOutcome>,
+    bookings: Map<string, PlanRecord>,
   ): Promise<PlanRecord> {
     const api = this.api;
     const groupFingerprints: PlanData[] = [];
@@ -751,25 +781,10 @@ class ClassificationOperationsImpl implements ClassificationOperations {
           },
           context.isVatRegistered,
         );
-        txFingerprints.push({
-          ...(liveState as Record<string, PlanData>),
-          booking: stripUndefinedDeep({
-            supplier_client_id: supplier?.id ?? null,
-            supplier_name: supplier?.name !== undefined ? canonicalBusinessText(supplier.name) : null,
-            invoice_number: `AUTO-TX-${transaction.id}`,
-            purchase_article_id: resolved.suggestion.purchase_article_id ?? null,
-            purchase_account_id: purchaseItem.purchase_accounts_id ?? null,
-            purchase_account_dimensions_id: purchaseItem.purchase_accounts_dimensions_id ?? null,
-            liability_account_id: resolved.suggestion.liability_account_id ?? DEFAULT_LIABILITY_ACCOUNT,
-            vat_rate_dropdown: purchaseItem.vat_rate_dropdown ?? null,
-            vat_accounts_id: purchaseItem.vat_accounts_id ?? null,
-            cl_vat_articles_id: purchaseItem.cl_vat_articles_id ?? null,
-            reversed_vat_id: purchaseItem.reversed_vat_id ?? null,
-            net_amount: netAmount,
-            gross_amount: grossAmount,
-            vat_price: deriveAutoBookedVatPrice(grossAmount, vatConfig),
-          }),
-        });
+        const booking = classificationBooking(supplier, resolved.suggestion, purchaseItem, transaction,
+          netAmount, grossAmount, deriveAutoBookedVatPrice(grossAmount, vatConfig));
+        bookings.set(`${index}:${stub.id}`, booking);
+        txFingerprints.push({ ...(liveState as Record<string, PlanData>), booking });
       }
       groupFingerprints.push({
         category: group.category,
@@ -1118,7 +1133,7 @@ class ClassificationOperationsImpl implements ClassificationOperations {
       api.purchaseInvoices.listAll(),
       api.readonly.getAccounts(),
     ]);
-    const isVatRegistered = await isCompanyVatRegistered(api);
+    const isVatRegistered = await isCompanyVatRegistered(api, { freshVatInfo: !dryRun });
     const openPurchases = purchaseInvoices.filter(invoice =>
       invoice.status === "CONFIRMED" && invoice.payment_status !== "PAID",
     );
@@ -1129,7 +1144,8 @@ class ClassificationOperationsImpl implements ClassificationOperations {
     // re-fetch). Both dry_run_apply (mint the plan from this) and execute_apply
     // (drift-check against the reviewed plan) share this exact computation.
     const gatherCache = new Map<number, GatherOutcome>();
-    const liveFingerprint = await this.computeApplyFingerprint(groups, fingerprintContext, gatherCache);
+    const approvedBookings = new Map<string, PlanRecord>();
+    const liveFingerprint = await this.computeApplyFingerprint(groups, fingerprintContext, gatherCache, approvedBookings);
 
     // Re-run classification's ledger partition for every row this apply could
     // book: a journal, own transfer or duplicate that appeared after the preview
@@ -1369,9 +1385,8 @@ class ClassificationOperationsImpl implements ClassificationOperations {
           }
           // Resolve historical VAT before supplier resolution can create a client.
           await isCompanyVatRegistered(api, { purchaseDate: transaction.date });
-          const supplierResolution = await resolveSupplierFromTransaction(api, clients, transaction, !dryRun, group.category);
-          const supplier = supplierResolution.client;
-          const supplierId = supplier?.id;
+          const supplierResolution = await resolveSupplierFromTransaction(api, clients, transaction, false, group.category);
+          let supplier = supplierResolution.client;
           const grossAmount = roundMoney(Math.abs(transaction.amount));
           const transactionCurrency = (transaction.cl_currencies_id ?? "EUR").toUpperCase();
           const transactionCurrencyRate = transaction.currency_rate;
@@ -1407,11 +1422,6 @@ class ClassificationOperationsImpl implements ClassificationOperations {
             // server-authored text stays free of sandbox markers.
             notes.push(`Dry run: transaction ${transaction.id} would require creating a supplier for ${wrapUntrustedText(group.display_counterparty) ?? group.display_counterparty}.`);
           }
-          if (!supplier?.id && !dryRun) {
-            notes.push(`Transaction ${transaction.id} could not resolve a supplier client.`);
-            continue;
-          }
-
           if (resolved.applyMode !== "purchase_invoice") {
             notes.push(`Transaction ${transaction.id} requires manual review before booking. ${resolved.suggestion.reason}`);
             continue;
@@ -1459,6 +1469,18 @@ class ClassificationOperationsImpl implements ClassificationOperations {
             continue;
           }
 
+          const booking = classificationBooking(supplier, resolved.suggestion, purchaseItem, transaction,
+            netAmount, grossAmount, deriveAutoBookedVatPrice(grossAmount, vatConfig));
+          const approvedBooking = approvedBookings.get(`${index}:${transaction.id}`);
+          if (approvedBooking === undefined || canonicalPlanJson(booking) !== canonicalPlanJson(approvedBooking)) {
+            throw new Error(`plan_drift: transaction ${transaction.id} supplier, booking rows, VAT or totals differ from the reviewed plan. Nothing was written for this transaction. Re-run dry_run_apply.`);
+          }
+          // Supplier materialization is allowed only after the read-only booking
+          // still matches. A planned new supplier legitimately receives an ID here.
+          if (!supplier?.id) {
+            supplier = (await resolveSupplierFromTransaction(api, clients, transaction, true, group.category)).client;
+          }
+          const supplierId = supplier?.id;
           if (!supplier || !supplierId) {
             notes.push(`Transaction ${transaction.id} could not resolve a supplier client.`);
             continue;

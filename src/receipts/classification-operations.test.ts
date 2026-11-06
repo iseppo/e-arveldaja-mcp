@@ -17,6 +17,8 @@ import { createExecutionPlanPageHandler } from "../plan-tools.js";
 import { desandboxAllStrings } from "../external-text-renderer.js";
 import { parseMcpResponse, wrapUntrustedOcr } from "../mcp-json.js";
 import { HttpError } from "../http-client.js";
+import type { HttpClient } from "../http-client.js";
+import { ReferenceDataApi, readonlyCache } from "../api/readonly.api.js";
 import { renderApplyClassificationsCompact, renderClassificationAnalysisCompact } from "./classification-presenter.js";
 import {
   createAccountingWorkflowApi,
@@ -26,7 +28,7 @@ import { createTestRuntimeSafetyContext } from "../__fixtures__/runtime-safety.j
 import { fixturePurchaseReadback } from "../__fixtures__/purchase-readback.js";
 import { TransactionMaterialDriftError } from "../banking/transaction-material-snapshot.js";
 import { runWithToolProfile } from "../tool-profile.js";
-import type { PurchaseInvoice } from "../types/api.js";
+import type { CreatePurchaseInvoiceData, PurchaseInvoice } from "../types/api.js";
 
 vi.mock("../audit-log.js", () => ({ logAudit: vi.fn() }));
 
@@ -272,6 +274,66 @@ async function dryRunHandle(operations: ReturnType<typeof makeOperations>["opera
   if (handle === undefined) throw new Error("dry run did not mint a plan handle");
   return handle;
 }
+
+it("R1: holds a later payment when transient history failure changes its approved account", async () => {
+  const secondTransaction = withSignedCamtMarker({ ...SAAS_TX_UNSIGNED, id: 43, date: "2026-03-23" }, "DBIT");
+  const created = new Map<number, PurchaseInvoice>();
+  const create = vi.fn(async (model: CreatePurchaseInvoiceData, vat: number, gross: number, registered: boolean) => {
+    const invoice = fixturePurchaseReadback(model, vat, gross, registered, 9001 + created.size);
+    created.set(invoice.id!, invoice);
+    return { ...invoice };
+  });
+  const latest = { ...SAAS_HISTORY_DETAILS[88], clients_id: 7 };
+  const older = { ...latest, id: 87, items: [{ ...latest.items[0], purchase_accounts_id: 5240 }] };
+  const { operations, api } = makeSaasOperations(SAAS_TX, {
+    allowWrites: true,
+    transactionRows: [SAAS_TX, secondTransaction],
+    transactionDetails: { 42: SAAS_TX, 43: secondTransaction },
+    purchaseInvoiceRows: [...SAAS_HISTORY_ROWS, { ...SAAS_HISTORY_ROWS[0], id: 87, create_date: "2026-01-22" }],
+    accounts: [...SAAS_ACCOUNTS, { ...SAAS_ACCOUNTS[0], id: 5240 }],
+    purchaseInvoices: {
+      createAndSetTotals: create,
+      get: vi.fn(async (id: number) => {
+        if (created.has(id)) return { ...created.get(id)! };
+        if (id === 88 && created.size > 0) throw new HttpError("temporary failure", 503, "GET", "/purchase_invoices/88");
+        return id === 88 ? latest : older;
+      }),
+      confirmWithTotals: vi.fn(async (id: number) => {
+        created.get(id)!.status = "CONFIRMED";
+        return {};
+      }),
+    },
+  });
+  const group = saasGroup({ transactions: [SAAS_TX, secondTransaction], total_amount: 50 });
+  const planHandle = await dryRunHandle(operations, [group]);
+  const result = await operations.applyClassifications({ classificationsJson: { groups: [group] }, execute: true, planHandle });
+  if (!result.ok) throw new Error(result.error.code);
+
+  expect(create.mock.calls.map(([body]) => body.items[0]!.purchase_accounts_id)).toEqual([5230]);
+  expect(api.purchaseInvoices.confirmWithTotals).toHaveBeenCalledTimes(1);
+  expect(api.transactions.confirm).toHaveBeenCalledTimes(1);
+  expect(result.value.results[0]).toMatchObject({ status: "failed", created_invoice_ids: [9001], linked_transaction_ids: [42] });
+  expect(result.value.results[0]!.notes.join(" ")).toContain("plan_drift");
+});
+
+it("R3: classification execute refreshes VAT registration through the real reference-data cache", async () => {
+  readonlyCache.invalidate();
+  let vatNumber: string | null = "EE123456789";
+  const get = vi.fn(async () => ({ vat_number: vatNumber }));
+  const reference = new ReferenceDataApi({ cacheNamespace: "classification-vat-freshness", get } as unknown as HttpClient);
+  const { operations, api } = makeSaasOperations(SAAS_TX, { allowWrites: true });
+  api.readonly.getVatInfo.mockImplementation((options?: { fresh?: boolean }) => reference.getVatInfo(options));
+  const planHandle = await dryRunHandle(operations, [saasGroup()]);
+  expect(get).toHaveBeenCalledTimes(1);
+  vatNumber = null;
+  expect(await reference.getVatInfo()).toEqual({ vat_number: "EE123456789" });
+
+  const result = await operations.applyClassifications({ classificationsJson: { groups: [saasGroup()] }, execute: true, planHandle });
+
+  expect(result).toMatchObject({ ok: false, error: { code: "plan_drift" } });
+  expect(get).toHaveBeenCalledTimes(2);
+  expectNoWrites(api);
+});
 
 it("M4: checksum-proven incoming after creation leaves the draft unconfirmed", async () => {
   const { operations, api } = makeSaasOperations(SAAS_TX, { allowWrites: true });

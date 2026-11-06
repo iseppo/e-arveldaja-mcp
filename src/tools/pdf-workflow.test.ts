@@ -124,6 +124,7 @@ function setupPdfWorkflowTool(
     },
     clients: {
       invalidateListCache: vi.fn(),
+      listAll: vi.fn().mockResolvedValue([]),
       get: vi.fn().mockResolvedValue({
         id: 7,
         name: "Supplier OÜ",
@@ -1040,6 +1041,48 @@ describe("pdf workflow tools", () => {
       };
     }
 
+    it("R2 refuses direct PDF creation with the actual own-company client ID", async () => {
+      const filePath = createTempInvoiceFile("self.pdf", "%PDF-pdf-bytes");
+      mockedResolveFileInput.mockResolvedValue({ path: filePath });
+      const { handler, api } = setupPdfWorkflowTool("create_purchase_invoice_from_pdf", {
+        clients: { get: vi.fn().mockResolvedValue({ id: 7, name: "Testija Ostja OÜ", code: "16000001", invoice_vat_no: "EE123456789" }) },
+      });
+      const response = await handler(args(filePath));
+      expect(response.isError).toBe(true);
+      expect(parseToolPayload<CreatePurchaseInvoiceFromPdfFailurePayload>(response.content[0]!.text)).toMatchObject({ category: "supplier_is_own", mutation_occurred: false });
+      expect(api.purchaseInvoices.createAndSetTotals).not.toHaveBeenCalled();
+      expect(api.purchaseInvoices.uploadDocument).not.toHaveBeenCalled();
+      expect(api.purchaseInvoices.confirmWithTotals).not.toHaveBeenCalled();
+    });
+
+    it("R2 refuses direct PDF creation when non-VAT own-company identity lookup fails", async () => {
+      const filePath = createTempInvoiceFile("identity-unavailable.pdf", "%PDF-pdf-bytes");
+      mockedResolveFileInput.mockResolvedValue({ path: filePath });
+      const own = { id: 99, name: "Testija Ostja OÜ", code: "16000001", invoice_vat_no: "" };
+      const { handler, api } = setupPdfWorkflowTool("create_purchase_invoice_from_pdf", {
+        clients: { get: vi.fn().mockResolvedValue(own), listAll: vi.fn().mockResolvedValue([own]) },
+        readonly: {
+          getVatInfo: vi.fn().mockResolvedValue({ vat_number: "" }),
+          getInvoiceInfo: vi.fn().mockRejectedValue(new Error("503 invoice settings unavailable")),
+        },
+      });
+
+      const response = await handler(args(filePath, {
+        supplier_client_id: 99,
+        items: JSON.stringify([{ cl_purchase_articles_id: 45, custom_title: "Internet subscription", purchase_accounts_id: 5230, total_net_price: 124, vat_rate_dropdown: "-" }]),
+        vat_price: 0,
+      }));
+
+      expect(response.isError).toBe(true);
+      const payload = parseToolPayload<CreatePurchaseInvoiceFromPdfFailurePayload>(response.content[0]!.text);
+      expect(payload).toMatchObject({ category: "own_company_identity_unavailable", mutation_occurred: false });
+      expect(payload.error).toContain("Nothing was written.");
+      expect(api.readonly.getInvoiceInfo).toHaveBeenCalledWith({ fresh: true });
+      expect(api.purchaseInvoices.createAndSetTotals).not.toHaveBeenCalled();
+      expect(api.purchaseInvoices.uploadDocument).not.toHaveBeenCalled();
+      expect(api.purchaseInvoices.confirmWithTotals).not.toHaveBeenCalled();
+    });
+
     it("refuses an exact live supplier + invoice-number duplicate before any write", async () => {
       const filePath = createTempInvoiceFile("dupnum.pdf", "%PDF-pdf-bytes");
       mockedResolveFileInput.mockResolvedValue({ path: filePath });
@@ -1818,6 +1861,51 @@ describe("resolve_supplier self-supplier guard", () => {
 // payload, never as ordinary "not found, set auto_create" guidance.
 describe("resolve_supplier manual-review holds", () => {
   afterEach(() => { vi.unstubAllGlobals(); });
+
+  it.each([false, true])("holds an existing own-company registry match when invoice settings fail and its client has stale VAT (auto_create=%s)", async (autoCreate) => {
+    const create = vi.fn();
+    const { handler } = setupPdfWorkflowTool("resolve_supplier", {
+      clients: {
+        listAll: vi.fn().mockResolvedValue([
+          { id: 7, name: "Testija Ostja OÜ", code: "12345678", invoice_vat_no: "", is_deleted: false },
+        ]),
+        create,
+      },
+      readonly: {
+        getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }),
+        getInvoiceInfo: vi.fn().mockRejectedValue(new Error("503 invoice settings unavailable")),
+      },
+    });
+
+    const result = parseToolPayload<ResolveSupplierReviewPayload>(
+      (await handler({ reg_code: "12345678", auto_create: autoCreate })).content[0]!.text,
+    );
+
+    expect(result).toMatchObject({
+      found: false, created: false, requires_manual_review: true, code: "own_company_identity_unavailable",
+    });
+    expect(result.suggestion).toContain("Nothing was created.");
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("still resolves a genuine existing supplier during an invoice-settings outage when VAT identifies the own-company registry code", async () => {
+    const { handler } = setupPdfWorkflowTool("resolve_supplier", {
+      clients: {
+        listAll: vi.fn().mockResolvedValue([
+          { id: 7, name: "Testija Ostja OÜ", code: "12345678", invoice_vat_no: "EE123456789", is_deleted: false },
+          { id: 8, name: "Supplier OÜ", code: "10234957", invoice_vat_no: "EE999999999", is_deleted: false },
+        ]),
+      },
+      readonly: {
+        getInvoiceInfo: vi.fn().mockRejectedValue(new Error("503 invoice settings unavailable")),
+      },
+    });
+
+    const result = parseToolPayload<ResolveSupplierFoundPayload>(
+      (await handler({ reg_code: "10234957" })).content[0]!.text,
+    );
+    expect(result).toMatchObject({ found: true, match_type: "registry_code", client: { id: 8 } });
+  });
 
   it("a company deleted from the business register (status K) comes back as a review hold and creates nothing", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({

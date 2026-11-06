@@ -34,7 +34,8 @@ import { checkCurrencyEquivalent, type CurrencyEquivalentWarning } from "../curr
 import { resolveSupplierDefault } from "../resolution/supplier-default-resolution.js";
 import { computeMinOcrConfidence, mixedVatRateLinesText, detectCurrencyEquivalentAmbiguity, extractOrderReferences, extractReceiptFieldsFromText, inferSupplierCountry, toIsoDate, type FieldProvenance, type ExtractedReceiptFields } from "./receipt-extraction.js";
 import { resolveSupplierInternal, type SupplierResolution } from "./supplier-resolution.js";
-import { resolveOwnCompanyIdentifiers } from "./own-company-identity.js";
+import { isOwnCompanyClient, resolveOwnCompanyIdentifiers } from "./own-company-identity.js";
+import { normalizeCompanyName } from "../company-name.js";
 import { buildExtractionConfidenceSignals } from "./receipt-inbox.js";
 import { textHazardSignals } from "./document-text-hazards.js";
 import {
@@ -449,7 +450,7 @@ export type ResolveSupplierReviewPayload = {
   found: false;
   created: false;
   requires_manual_review: true;
-  code?: "supplier_client_deactivated";
+  code?: "supplier_client_deactivated" | "own_company_identity_unavailable";
   match_type?: "strong_identifier_conflict";
   reason?: string;
   registry_data?: ResolveSupplierRegistryData | null;
@@ -810,7 +811,8 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext, run
               found: false,
               created: false,
               requires_manual_review: true,
-              ...(deactivated ? { code: "supplier_client_deactivated" as const } : {}),
+              ...(deactivated ? { code: "supplier_client_deactivated" as const }
+                : resolution.code === "own_company_identity_unavailable" ? { code: "own_company_identity_unavailable" as const } : {}),
               ...(resolution.match_type === "strong_identifier_conflict" ? { match_type: "strong_identifier_conflict" as const } : {}),
               // The reason interpolates supplied and stored identifiers after their
               // sandbox markers were stripped for matching: re-wrap (and cap) it.
@@ -1356,6 +1358,14 @@ export function registerCreatePurchaseInvoiceFromPdfTool(server: McpServer, api:
       }
       return await withPurchaseInvoiceLock(api, async () => {
       const supplier = await api.clients.get(params.supplier_client_id);
+      const allClients = await api.clients.listAll().catch(() => [supplier]);
+      const own = await resolveOwnCompanyIdentifiers(api, allClients, { fresh: true });
+      if (normalizeCompanyName(own.ownCompanyName) === "" && !own.ownCompanyRegistryCode?.trim()) {
+        return toolError({ category: "own_company_identity_unavailable", error: "Your own company's name and registry code could not be established, so the selected supplier cannot be checked against your own company. Retry when invoice settings are available. Nothing was written.", retry: "never", mutation_occurred: false } satisfies CreatePurchaseInvoiceFromPdfFailurePayload);
+      }
+      if (isOwnCompanyClient(supplier, own)) {
+        return toolError({ category: "supplier_is_own", error: "The selected supplier is the active company itself. Select the invoice's vendor and review again. Nothing was written.", retry: "never", mutation_occurred: false } satisfies CreatePurchaseInvoiceFromPdfFailurePayload);
+      }
       // supplier.name is a trusted API read, but a client created before this
       // remediation could carry a marker; strip once and use for BOTH the invoice
       // and the audit log (no-op when already clean).
