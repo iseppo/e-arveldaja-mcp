@@ -111,6 +111,61 @@ beforeEach(() => {
 afterEach(() => { vi.useRealTimers(); vi.clearAllMocks(); });
 
 describe("reading create", () => {
+  it.each([
+    { name: "absent description", itemTitle: undefined, changeHistory: false },
+    { name: "explicit description", itemTitle: "Software license", changeHistory: false },
+    { name: "changed history still refuses create", itemTitle: undefined, changeHistory: true },
+  ])("R7-DRIFT: mixed expense/asset history — $name", async ({ itemTitle, changeHistory }) => {
+    const w = world();
+    const supplier = { ...supplierClient(), cl_code_country: "IRL", invoice_vat_no: "IE1234567T" };
+    w.api.clients.listAll.mockResolvedValue([ownClient(), supplier]);
+    w.api.clients.get.mockImplementation(async (id: number) => id === SUPPLIER_ID ? supplier : ownClient());
+    const history = [
+      { title: "Software license", option: 1, account: 5000 },
+      { title: "Cloud hosting", option: 1, account: 5000 },
+      { title: "Support", option: 1, account: 5000 },
+      { title: "Software license", option: 3, account: 1800 },
+    ].map(({ title, option, account }, index) => {
+      const invoice = Object.freeze({ ...HISTORY_INVOICE, id: 501 + index, number: `H-${index}`, create_date: `2026-01-0${9 - index}` });
+      w.details[invoice.id] = Object.freeze({
+        ...invoice, liability_accounts_id: 2310,
+        items: Object.freeze([Object.freeze({ ...HISTORY_DETAIL.items[0]!, custom_title: title, reversed_vat_id: option, purchase_accounts_id: account })]),
+      });
+      return invoice;
+    });
+    w.rows.splice(0, w.rows.length, ...history);
+    const lines = [...BASE_LINES.map(line => line.replace("EE100000007", "IE1234567T").replace("KM 24% 24,00", "KM 0% 0,00").replace("124,00", "100,00")), "Software license", "Reverse charge applies"];
+    mockedParse.mockResolvedValue(readingParse(lines));
+    const file = writePdf("%PDF R7-DRIFT mixed expense and asset history");
+    const { reading, proof } = readingFor(packetFor(file.sha256, lines), {
+      values: { supplier_vat: "IE1234567T", vat: 0, gross: 100 },
+      evidence: {
+        supplier_vat: { line: "p1:002", quote: "KMKR IE1234567T" },
+        vat: { line: "p1:006", quote: "KM 0% 0,00" },
+        gross: { line: "p1:007", quote: "Kokku EUR 100,00" },
+      },
+    });
+    const verifiedOutcome = await w.ops.verify({ source: { file_path: file.path }, reading, proof, ...(itemTitle ? { booking: { itemTitle } } : {}) });
+    if (!verifiedOutcome.ok) throw new Error(verifiedOutcome.error.message);
+    const verify = verifiedOutcome.value;
+    expect(verify.status).toBe("ready");
+    const notes = verify.bookingNotes!.history_notes.join(" ");
+    expect(notes).toContain("option 1");
+    expect(notes.includes("option 3")).toBe(itemTitle !== undefined);
+    if (changeHistory) {
+      w.details[501] = { ...w.details[501], items: [{ ...HISTORY_DETAIL.items[0]!, custom_title: "Software license", reversed_vat_id: 3 }] };
+    }
+    const outcome = await create(w, file, verify.planHandle!);
+    if (changeHistory) {
+      expect(heldCodes(outcome)).toContain("reading_booking_drift");
+      expect(w.createAndSetTotals).not.toHaveBeenCalled();
+      return;
+    }
+    expect(outcome, JSON.stringify(outcome)).toMatchObject({ ok: true, value: { status: "created" } });
+    expect(w.createAndSetTotals).toHaveBeenCalledTimes(1);
+    expect(w.createAndSetTotals.mock.calls[0]![0]).toMatchObject({ items: [expect.objectContaining({ custom_title: "Software license", reversed_vat_id: 1, purchase_accounts_id: 5000 })] });
+  });
+
   it("R7-DOC: verify and create keep EU reverse charge for printed Irish VAT on a USA supplier with no stored VAT", async () => {
     const w = world();
     const supplier = { ...supplierClient(), cl_code_country: "USA", invoice_vat_no: null };

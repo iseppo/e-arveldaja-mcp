@@ -211,6 +211,8 @@ export interface ReadingPlan {
   /** Present when `booking` is null: what the owner saw instead; create's booking must match it. */
   booking_basis?: DeferredBookingBasis;
   booking_notes: ReadingBookingNotes;
+  /** The original supplier-history search, including no description; create must not introduce the template's title. */
+  suggestion_description: string | null;
   heuristic_keys: { invoiceNumber: string | null; supplierClientId: number | null };
   vat_zero_note_proven: boolean;
   reverse_charge_note_present: boolean;
@@ -1109,6 +1111,7 @@ class ReadingDocumentOperations {
       let isVatReg = false;
       let knownIban: string | undefined;
       let bookingNotes: ReadingBookingNotes | undefined;
+      const suggestionDescription = currentDescription(input.booking);
       let dimensionChoiceRequired: BookingSuggestionCore["dimension_conflicts"] = [];
       let payableAccount: ReadingPayableAccount | undefined;
       const bookingDeferred = ratesDeferredForLostDate(packet, values.invoice_date);
@@ -1122,7 +1125,7 @@ class ReadingDocumentOperations {
       if (supplierClient?.id !== undefined) {
         isVatReg = await isCompanyVatRegistered(this.api, { purchaseDate: values.invoice_date });
         knownIban = sameIban(values.supplier_iban, supplierClient.bank_account_no) ? values.supplier_iban ?? undefined : undefined;
-        const suggestion = await computeBookingSuggestion(this.api, { clients_id: supplierClient.id, description: currentDescription(input.booking), documentVatNo: values.supplier_vat });
+        const suggestion = await computeBookingSuggestion(this.api, { clients_id: supplierClient.id, description: suggestionDescription, documentVatNo: values.supplier_vat });
         bookingNotes = decisionNotes(suggestion);
         itemsSource = await resolveItemsSource(this.api, supplierClient.id, input.booking, suggestion);
         dimensionChoiceRequired = requiredDimensionChoices(suggestion, itemsSource);
@@ -1222,6 +1225,7 @@ class ReadingDocumentOperations {
         booking: booking?.effective?.fingerprint ?? null,
         ...(bookingBasis ? { booking_basis: bookingBasis } : {}),
         booking_notes: bookingNotes!,
+        suggestion_description: suggestionDescription ?? null,
         heuristic_keys: heuristicKeys,
         vat_zero_note_proven: check.vat_zero_note_proven,
         reverse_charge_note_present: check.reverse_charge_note_present,
@@ -1353,10 +1357,9 @@ class ReadingDocumentOperations {
         if (supplierClient) {
           this.api.purchaseInvoices.invalidateListCache();
           const source = plan.items_source as unknown as ReadingItemsSource;
-          const bookingInput = plan.booking_input as Omit<ReadingBookingInput, "items">;
           const suggestion = await computeBookingSuggestion(this.api, {
             clients_id: plan.supplier_client_id,
-            description: currentDescription({ ...bookingInput, items: "items" in source ? source.items : [source.template] }),
+            description: plan.suggestion_description ?? undefined,
             documentVatNo: final.supplier_vat,
           });
           if (canonicalPlanJson(decisionNotes(suggestion)) !== canonicalPlanJson(plan.booking_notes) || requiredDimensionChoices(suggestion, source).length) {
