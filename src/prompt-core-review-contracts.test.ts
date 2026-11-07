@@ -41,7 +41,7 @@ describe("month-end close safety (core prompt review 2026-10-30)", () => {
   });
 
   it("derives HAS BLOCKERS from imbalance and exact duplicates, and leaves KMD/1516 to e-arveldaja", () => {
-    expect(standard).toContain("off by more than 0.01 EUR, OR exact duplicates were found");
+    expect(standard).toContain("off by 0.01 EUR or more, OR exact duplicates were found");
     expect(standard).toContain("Missing documents, suspicious duplicate matches and overdue items are WARNINGS");
     expect(standard).toContain("prepayment-account (1516) entries. Do not compute, propose, or book those entries here.");
   });
@@ -105,6 +105,41 @@ describe("control prompt review 2026-10-31", () => {
     expect(body).toContain("run its owning tool's own preview (the call that returns the `plan_handle`) unless that handle was already supplied");
     expect(body).toContain("follow `workflow.recommended_next_action` on standard/full and `workflow.next_action` on guided");
     expect(body).toContain("`delete_proposed_mirrors: true`, explicit owner approval of the planned deletion");
+  });
+});
+
+describe("control prompt review 2026-11-07", () => {
+  const profiles = ["guided", "guided-sales", "standard", "full"] as const;
+
+  it.each(profiles)("month-end blocks a failed balance-sheet check and a one-cent imbalance on %s", profile => {
+    const body = render("month-end-close", profile);
+    expect(body).toContain("0.01 EUR or more is a blocker");
+    expect(body).toContain("`check.balanced` is false");
+    expect(body).toContain("off by 0.01 EUR or more, OR exact duplicates were found");
+    expect(body).not.toContain("off by more than 0.01 EUR");
+  });
+
+  it.each(profiles)("accounting inbox routes owner-confirmed third-party Wise payments through a fresh import preview on %s", profile => {
+    const body = render("accounting-inbox", profile);
+    expect(body).toContain("If the owner confirms a held row is a payment to or from a third party");
+    expect(body).toContain("no candidate own-account evidence on any bank");
+    expect(body).toContain("**Import Wise** workflow with that exact Wise ID in `not_own_transfer_ids`");
+    expect(body).toContain("Keep all earlier owner decisions");
+    expect(body).toContain("fresh preview, plan handle and digest");
+    expect(body).toContain("owner approval before execution");
+    expect(body).toContain("conflicting or uncertain own-account evidence stays held");
+  });
+
+  it.each(profiles)("CAMT acknowledgement distinguishes drift from storage, context and handle refusals on %s", profile => {
+    const body = render("prepare-accounting-review-action", profile);
+    expect(body).toContain("`plan_drift` means the journal or review item changed");
+    expect(body).toContain("For other refusals, follow the returned `error_code` and explanation");
+    expect(body).toContain("`camt_ack_store_unavailable`");
+    expect(body).toContain("single-file rules mode cannot store acknowledgements");
+    expect(body).toContain("`camt_ack_needs_inbox_scan`");
+    expect(body).toContain("invalid, expired or consumed plan handle");
+    expect(body).toContain("fresh preparation and approval");
+    expect(body).not.toContain("a `plan_drift` or refusal means the journal changed");
   });
 });
 
