@@ -894,7 +894,7 @@ export function applyReverseChargeAutoDetection(
 ): void {
   const supplier = supplierResolution.client ?? supplierResolution.preview_client;
   const applyRegion = (id: number): string => {
-    const reverse = reverseChargeSuggestion(id, supplier);
+    const reverse = reverseChargeSuggestion(id, supplier, extracted.supplier_vat_no);
     bookingSuggestion.item.reversed_vat_id = reverse.id;
     return reverse.note;
   };

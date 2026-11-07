@@ -933,6 +933,25 @@ describe("applyReverseChargeAutoDetection (#18)", () => {
     expect(notes.join(" ")).toContain("KMD row 7");
   });
 
+  it("R7: an EU VAT number printed on the document wins over a non-EU supplier country", () => {
+    const booking = makeBookingSuggestion();
+    const notes: string[] = [];
+    applyReverseChargeAutoDetection(booking, { raw_text: "Reverse charge applies", supplier_vat_no: "\nIE4276970QH\n" } as ApplyArgs[1], {
+      found: true, created: false, client: { cl_code_country: "USA", invoice_vat_no: null },
+    } as ApplyArgs[2], true, notes);
+    expect(booking.item.reversed_vat_id).toBe(1);
+    expect(notes.join(" ")).toContain("KMD row 6");
+  });
+
+  it("R7: an EU VAT number on the supplier record wins over a non-EU VAT on the document", () => {
+    const booking = makeBookingSuggestion(7);
+    const notes: string[] = [];
+    applyReverseChargeAutoDetection(booking, { raw_text: "Invoice", supplier_vat_no: "GB123456789" } as ApplyArgs[1], {
+      found: true, created: false, client: { cl_code_country: "USA", invoice_vat_no: "IE3668997OH" },
+    } as ApplyArgs[2], true, notes);
+    expect(booking.item.reversed_vat_id).toBe(1);
+  });
+
   it("R7: unknown region keeps the option and asks to verify the KMD row", () => {
     const booking = makeBookingSuggestion();
     const notes: string[] = [];
