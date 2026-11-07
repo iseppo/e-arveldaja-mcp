@@ -173,11 +173,11 @@ describe("createAccountingOperations", () => {
     expect(result).toBe(outcome);
   });
 
-  it("prepareReceiptBatch fails closed when the own-company identity read is a retryable error", async () => {
+  it("prepareReceiptBatch keeps the guard per item (ownCompanyNameUnavailable) when the own-company identity read is a retryable error", async () => {
     loadOwnCompanyIdentity.mockResolvedValue({ status: "retryable_error", reason: "invoice_info 503" });
     const operations = createAccountingOperations(api, rsc);
-    await expect(operations.prepareReceiptBatch({ folderPath: "/inbox/receipts", accountsDimensionsId: 404 }))
-      .rejects.toThrow(/invoice_info 503/);
-    expect(receiptRunBatch).not.toHaveBeenCalled();
+    await operations.prepareReceiptBatch({ folderPath: "/inbox/receipts", accountsDimensionsId: 404 });
+    expect(receiptRunBatch).toHaveBeenCalledWith(expect.objectContaining({ ownCompanyNameUnavailable: true, dryRun: true }));
+    expect(receiptRunBatch.mock.calls[0]![0]).not.toHaveProperty("ownCompanyName");
   });
 });

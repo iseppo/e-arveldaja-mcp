@@ -655,7 +655,13 @@ function summarizeAutopilotToolResult(
             .filter((id): id is number => typeof id === "number");
           const referencingJournalIds = (arrayAt(item, "referencing_journal_ids") ?? [])
             .filter((id): id is number => typeof id === "number");
-          const duplicateSuffix = referencingJournalIds.length > 0
+          const supplierResolution = recordAt(item, "supplier_resolution");
+          const identityHoldReason = supplierResolution?.code === "own_company_identity_unavailable"
+            ? stringAt(supplierResolution, "reason")
+            : undefined;
+          const duplicateSuffix = identityHoldReason !== undefined
+            ? `: ${identityHoldReason}`
+            : referencingJournalIds.length > 0
             ? `: journal(s) ${referencingJournalIds.join(", ")} already reference its invoice number`
             : item.journal_reference_scan_unavailable === true
               ? ": the journal list could not be read to check for an earlier booking; re-run the batch"
@@ -666,7 +672,9 @@ function summarizeAutopilotToolResult(
             tool,
             `${fileName} was left for review in the dry run (${classification})${duplicateSuffix}.`,
             reviewGuidanceFromRecord(item) ?? {
-              recommendation: "Review only this flagged receipt and confirm the missing data or the correct tax treatment before execute.",
+              recommendation: identityHoldReason !== undefined
+                ? `${identityHoldReason} Re-run the dry run once invoice settings can be read, or choose the supplier yourself.`
+                : "Review only this flagged receipt and confirm the missing data or the correct tax treatment before execute.",
             },
             {
               review_type: "receipt_review",
