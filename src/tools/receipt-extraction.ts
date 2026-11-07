@@ -4839,8 +4839,20 @@ export function suggestBookingInternal(
   },
   clientId: number,
   description: string,
+  documentText = description,
 ): Promise<BookingSuggestion | undefined> {
-  return suggestBookingInternalImpl(api, context, clientId, description);
+  return suggestBookingInternalImpl(api, context, clientId, description, documentText);
+}
+
+/** Date/period components only: product names such as "5x" are not days. */
+function historyTitlePeriodTokens(text: string): string[] {
+  const months = (text.toLowerCase().match(/\p{L}+/gu) ?? [])
+    .flatMap(word => Object.hasOwn(MONTH_NAME_TO_NUMBER, word) ? [`month:${MONTH_NAME_TO_NUMBER[word]}`] : []);
+  const numbers = [...text.matchAll(/(?<![\p{L}\p{N}])\d{1,4}(?![\p{L}\p{N}])/gu)]
+    .map(match => Number(match[0]))
+    .filter(value => value >= 1 && value <= 31 || value >= 1900 && value <= 2099)
+    .map(value => `number:${value}`);
+  return [...months, ...numbers];
 }
 
 async function suggestBookingInternalImpl(
@@ -4852,6 +4864,7 @@ async function suggestBookingInternalImpl(
   },
   clientId: number,
   description: string,
+  documentText: string,
 ): Promise<BookingSuggestion | undefined> {
   const supplierInvoices = context.purchaseInvoices
     .filter(invoice => invoice.clients_id === clientId && invoice.status === "CONFIRMED")
@@ -4892,6 +4905,11 @@ async function suggestBookingInternalImpl(
       : suggestedArticle?.accounts_id
         ? context.accounts.find(account => account.id === suggestedArticle.accounts_id)
         : undefined;
+    const printedPeriodTokens = new Set(historyTitlePeriodTokens(documentText));
+    const historyTitle = matchedItem.custom_title || description;
+    const title = historyTitlePeriodTokens(historyTitle).every(token => printedPeriodTokens.has(token))
+      ? historyTitle
+      : suggestedArticle?.name_est || suggestedArticle?.name_eng || description;
 
     return withHistoryNote({
       source: "supplier_history",
@@ -4910,7 +4928,7 @@ async function suggestBookingInternalImpl(
         vat_accounts_id: matchedItem.vat_accounts_id,
         cl_vat_articles_id: matchedItem.cl_vat_articles_id,
         reversed_vat_id: matchedItem.reversed_vat_id,
-        custom_title: matchedItem.custom_title || description,
+        custom_title: title,
         amount: 1,
       },
     });

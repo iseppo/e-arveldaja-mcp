@@ -721,7 +721,7 @@ async function processSingleReceipt(
 
     const bookingSuggestion = applyReceiptAutoBookingRule(
       resolvedClientId
-      ? await suggestBookingInternal(api, context, resolvedClientId, extracted.description ?? extracted.supplier_name ?? "Receipt expense")
+      ? await suggestBookingInternal(api, context, resolvedClientId, extracted.description ?? extracted.supplier_name ?? "Receipt expense", extracted.raw_text)
       : buildKeywordSuggestion(
         context.purchaseArticlesWithVat,
         context.accounts,
