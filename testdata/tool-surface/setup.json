@@ -2,9 +2,9 @@
   "profile": "setup",
   "measurement": {
     "toolCount": 131,
-    "toolsListBytes": 157800,
-    "descriptionsBytes": 24695,
-    "inputSchemasBytes": 101546,
+    "toolsListBytes": 158297,
+    "descriptionsBytes": 24817,
+    "inputSchemasBytes": 101921,
     "largestTool": {
       "name": "import_wise_transactions",
       "bytes": 5734
@@ -5458,7 +5458,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Lightyear USD cash-fund pool at the ECB rate. mode \"opening\" (once per pool) replays the statement to as_of (USD cash + ICSUSSDP units at 1.00, from an empty start) and stores the ECB-valued opening checkpoint after approval. The opening books nothing: before approval show the owner the books' USD carrying value (broker account/dimension balance at as_of minus the EUR cash Lightyear shows) next to target_eur and the difference; that one-off difference is shown, not booked, and later revaluations measure from target_eur, so any correction is the owner's separate manual journal. mode \"revalue\" (default) revalues the pool's USD at the ECB rate of as_of: the replayed USD must equal expected_usd_holding, and the difference to the carrying value is booked on fx_account (default 8500) as journal LY-FX:<account>:USD:<as_of>; zero difference records a journal-free checkpoint. DRY RUN by default; anything unproven is a review, never a plug.",
+      "description": "Lightyear USD cash-fund pool at the ECB rate. mode \"opening\" replays the statement to as_of (USD cash + ICSUSSDP units at 1.00, from an empty start) and stores the ECB-valued opening checkpoint after approval; a later opening, dated after every record the pool holds, supersedes the earlier one (the way past a statement row the pool cannot book). The opening books nothing: before approval show the owner the books' USD carrying value (broker account/dimension balance at as_of minus the EUR cash Lightyear shows) next to target_eur and the difference; that one-off difference is shown, not booked, and later revaluations measure from target_eur, so any correction is the owner's separate manual journal. mode \"revalue\" (default) revalues the pool's USD at the ECB rate of as_of: the replayed USD must equal expected_usd_holding, and the difference to the carrying value is booked on fx_account (default 8500) as journal LY-FX:<account>:USD:<as_of>; zero difference records a journal-free checkpoint. DRY RUN by default; anything unproven is a review, never a plug.",
       "execution": {
         "taskSupport": "forbidden"
       },
@@ -5477,6 +5477,14 @@
           "broker_dimension_id": {
             "description": "Dimension ID for broker account (accounts_dimensions_id)",
             "type": "number"
+          },
+          "capital_gains_file": {
+            "description": "opening only: CapitalGainsStatement CSV path, to prove that a USD sale kept in USD has no matching capital-gains row (a re-opening past it).",
+            "type": "string"
+          },
+          "capital_gains_file_ref": {
+            "description": "opening only: opaque capital-gains file reference; exclusive with capital_gains_file.",
+            "type": "string"
           },
           "dry_run": {
             "description": "Preview without writing (default true)",
@@ -5504,7 +5512,7 @@
             "type": "string"
           },
           "mode": {
-            "description": "\"opening\" sets the pool's opening checkpoint once; \"revalue\" (default) revalues at the reporting date.",
+            "description": "\"opening\" sets (or, after every pool record, re-sets) the pool's opening checkpoint; \"revalue\" (default) revalues at the reporting date.",
             "enum": [
               "opening",
               "revalue"

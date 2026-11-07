@@ -100,6 +100,7 @@ import {
   type ConversionLegEvidence,
   type PoolKey,
   type PoolCommand,
+  type PoolOrder,
   type UsdPoolSnapshot,
   type StatementPoolEvent,
   type UsdPoolEvent,
@@ -220,7 +221,7 @@ export const FX_REVIEW_MESSAGES: Record<FxReviewCode, string> = {
   legacy_check_incomplete: "The legacy-booking check for this row was cut short by its request budget, so an existing booking under another document number cannot be ruled out. Not booked automatically — check the broker account for this date and amount, or rerun with a shorter statement.",
   portfolio_arithmetic_overflow: "The portfolio arithmetic exceeds the supported exact bounds.",
   usd_pool_funded: "This USD trade is settled through the USD held at Lightyear (a sale kept in USD, or a buy paid partly or fully from USD already there); book_lightyear_trades values it from the ECB rate and the USD pool.",
-  pool_sell_gains_unmatched: "This USD sale kept in USD has no capital-gains row with the same date and time, ticker and quantity (or more than one), so its cost basis is unknown; it is not booked and later USD pool bookings wait for it.",
+  pool_sell_gains_unmatched: "This USD sale kept in USD has no capital-gains row with the same date and time, ticker and quantity (or more than one), so its cost basis is unknown; it is not booked, and every later USD pool booking waits for it. First supply the capital-gains statement that holds this sale's row (capital_gains_file) and re-run. Only if no such row exists: book the sale by hand (create_journal, document_number LY: followed by the reference), then re-open the pool with book_lightyear_fx_revaluation mode \"opening\" with the same capital_gains_file, dated on or after this row's day and after every record the pool already holds. Rows dated on or before the new opening are then no longer booked by these tools, and the pool's carrying value restarts at that day's ECB value (book any difference to the books by hand).",
   fx_revaluation_conflict: "A journal with this revaluation's document number already exists but does not match the USD pool's checkpoint for the date; nothing is booked. Check the journal by hand.",
   ecb_rate_unavailable: "No ECB reference rate could be read for this day (no publication within 7 days, or the ECB data API did not answer); nothing is guessed. Retry the dry run later.",
   ecb_rate_not_final: "The ECB reference rate for this day is not final yet (today or later); retry the dry run on a later day.",
@@ -5097,6 +5098,74 @@ async function valuePoolTrades(params: {
 
 // ---- USD pool FX revaluation (C5) --------------------------------------------------
 
+/** A statement row that refuses every later pool command (Fable M2): the only reason a pool opening may be replaced. */
+export interface PoolBarrier {
+  code: FxReviewCode;
+  ref: string;
+  ts: number;
+  source_digest: string | null;
+}
+
+const PERMANENT_BARRIER_ROLES: ReadonlyMap<string, FxReviewCode> = new Map([
+  ["unsupported", "usd_pool_unsupported_event"],
+  ["pairing_ambiguous", "usd_pool_pairing_ambiguous"],
+]);
+const LOGGED_POOL_ROLES: ReadonlySet<string> = new Set(["distribution_in", "sell_in", "buy_relief", "conversion_out"]);
+
+/** The days a capital-gains file covers: its file-name period, else the span of its row dates; null when neither. */
+function capitalGainsCoverage(rows: readonly CapitalGainsRow[], fileName: string | undefined): { from: string; to: string } | null {
+  const period = statementPeriodFromFileName(fileName);
+  if (period) return period;
+  const days = rows.map(row => parseLightyearDate(row.date).slice(0, 10)).filter(isStrictDate).sort();
+  return days.length > 0 ? { from: days[0]!, to: days[days.length - 1]! } : null;
+}
+
+/**
+ * The earliest permanent barrier ordered after `after` and before `until` (owner decision 2026-11-07):
+ * an unsupported or ambiguously paired row, a second holding pool inflow and outflow, an unlogged pool row
+ * without an exact source digest or already booked by hand outside the pool log, a sweep booked as a journal,
+ * or an unlogged USD sale kept in USD that the supplied capital-gains file covers but does not match.
+ * Without a gains file, or with one that does not cover the sale's day, such a sale is not proven
+ * unmatched (`unproven` says why when nothing else blocks).
+ */
+function firstPoolBarrier(
+  rows: AccountStatementRow[],
+  gains: { rows: CapitalGainsRow[]; coverage: { from: string; to: string } | null } | null,
+  committedRefs: ReadonlySet<string>,
+  bookedRefs: ReadonlySet<string>,
+  after: PoolOrder,
+  until: PoolOrder,
+): { barrier: PoolBarrier | null; unproven: string | null } {
+  const fundingTickers = KNOWN_CASH_EQUIVALENT_TICKERS;
+  const trades = extractTrades(rows, { fundingTickers });
+  const statement = statementPoolEvents(rows, trades, extractDistributions(rows, tradeReservedConversionRefsWithFunding(rows, fundingTickers)), fundingTickers);
+  const gainsMap = gains === null ? null : matchSellsToCapitalGains(trades.trades.filter(t => t.type === "Sell"), gains.rows);
+  const inInterval = (order: PoolOrder) => compareOrder(order, after) > 0 && compareOrder(order, until) < 0;
+  const found: PoolBarrier[] = [];
+  let unproven: string | null = null;
+  for (const event of statement.events) {
+    if (event.ts === null || !inInterval(eventOrder(event.ref, event.ts))) continue;
+    const digest = poolSourceDigest(statement.rows, event.ref);
+    let code = PERMANENT_BARRIER_ROLES.get(event.role);
+    if (code === undefined && event.role === "sweep" && bookedRefs.has(event.ref)) code = "usd_pool_sweep_booked";
+    if (code === undefined && LOGGED_POOL_ROLES.has(event.role) && !committedRefs.has(event.ref)) {
+      if (digest === null) code = "usd_pool_source_unbound";
+      else if (bookedRefs.has(event.ref)) code = "usd_pool_prerequisite_unbooked";
+      else if (event.role === "sell_in" && !gainsMap?.has(event.ref)) {
+        const day = new Date(event.ts * 1000).toISOString().slice(0, 10);
+        if (gains === null) unproven ??= "a USD sale kept in USD counts only with capital_gains_file";
+        else if (gains.coverage === null || day < gains.coverage.from || day > gains.coverage.to) unproven ??= `capital_gains_file does not cover the sale of ${day}`;
+        else code = "pool_sell_gains_unmatched";
+      }
+    }
+    if (code !== undefined) found.push({ code, ref: event.ref, ts: event.ts, source_digest: digest });
+  }
+  const mixed = checkMixedSeconds(statement.events, after);
+  if (mixed !== null && inInterval(eventOrder("", mixed))) found.push({ code: "usd_pool_ambiguous_order", ref: String(mixed), ts: mixed, source_digest: null });
+  found.sort((a, b) => compareOrder(eventOrder(a.ref, a.ts), eventOrder(b.ref, b.ts)));
+  return { barrier: found[0] ?? null, unproven };
+}
+
 /**
  * Opening replay rows: the cash delta is the statement's own cash rule
  * ({@link getStatementRowCashDelta}) — a USD→EUR conversion takes its gross,
@@ -5133,7 +5202,7 @@ interface FxRevaluationCommand {
 type FxRevaluationEvaluation =
   | { kind: "review"; code: FxReviewCode; detail?: string }
   | { kind: "already_booked"; checkpoint: UsdPoolCheckpoint }
-  | { kind: "opening"; checkpoint: UsdPoolCheckpoint; replay: OpeningReplaySummary }
+  | { kind: "opening"; checkpoint: UsdPoolCheckpoint; replay: OpeningReplaySummary; supersedes: string | null; barrier: PoolBarrier | null }
   | { kind: "checkpoint_only"; checkpoint: UsdPoolCheckpoint; carrying_eur_cents: number; snapshot_digest: string }
   | { kind: "journal"; checkpoint: UsdPoolCheckpoint; carrying_eur_cents: number; snapshot_digest: string; command: FxRevaluationCommand; event: PendingPoolEvent };
 
@@ -5173,7 +5242,7 @@ function evaluationFingerprintView(evaluation: FxRevaluationEvaluation): unknown
     checkpoint,
     ...(evaluation.kind === "review" ? { code: evaluation.code, detail: evaluation.detail ?? null } : {}),
     ...(evaluation.kind === "journal" ? { postings: evaluation.command.postings, title: evaluation.command.title } : {}),
-    ...(evaluation.kind === "opening" ? { replay: evaluation.replay } : {}),
+    ...(evaluation.kind === "opening" ? { replay: evaluation.replay, supersedes: evaluation.supersedes, barrier: evaluation.barrier } : {}),
     ...("snapshot_digest" in evaluation ? { snapshot_digest: evaluation.snapshot_digest } : {}),
   };
 }
@@ -6131,11 +6200,13 @@ export function registerLightyearTools(
   );
 
   registerTool(server, "book_lightyear_fx_revaluation",
-    "Lightyear USD cash-fund pool at the ECB rate. mode \"opening\" (once per pool) replays the statement to as_of (USD cash + ICSUSSDP units at 1.00, from an empty start) and stores the ECB-valued opening checkpoint after approval. The opening books nothing: before approval show the owner the books' USD carrying value (broker account/dimension balance at as_of minus the EUR cash Lightyear shows) next to target_eur and the difference; that one-off difference is shown, not booked, and later revaluations measure from target_eur, so any correction is the owner's separate manual journal. mode \"revalue\" (default) revalues the pool's USD at the ECB rate of as_of: the replayed USD must equal expected_usd_holding, and the difference to the carrying value is booked on fx_account (default 8500) as journal LY-FX:<account>:USD:<as_of>; zero difference records a journal-free checkpoint. DRY RUN by default; anything unproven is a review, never a plug.",
+    "Lightyear USD cash-fund pool at the ECB rate. mode \"opening\" replays the statement to as_of (USD cash + ICSUSSDP units at 1.00, from an empty start) and stores the ECB-valued opening checkpoint after approval; a later opening, dated after every record the pool holds, supersedes the earlier one (the way past a statement row the pool cannot book). The opening books nothing: before approval show the owner the books' USD carrying value (broker account/dimension balance at as_of minus the EUR cash Lightyear shows) next to target_eur and the difference; that one-off difference is shown, not booked, and later revaluations measure from target_eur, so any correction is the owner's separate manual journal. mode \"revalue\" (default) revalues the pool's USD at the ECB rate of as_of: the replayed USD must equal expected_usd_holding, and the difference to the carrying value is booked on fx_account (default 8500) as journal LY-FX:<account>:USD:<as_of>; zero difference records a journal-free checkpoint. DRY RUN by default; anything unproven is a review, never a plug.",
     {
-      mode: z.enum(["opening", "revalue"]).optional().describe("\"opening\" sets the pool's opening checkpoint once; \"revalue\" (default) revalues at the reporting date."),
+      mode: z.enum(["opening", "revalue"]).optional().describe("\"opening\" sets (or, after every pool record, re-sets) the pool's opening checkpoint; \"revalue\" (default) revalues at the reporting date."),
       file_path: z.string().optional().describe("AccountStatement path/base64 input covering the interval since the last checkpoint (from the account's start for mode=opening). Provide exactly one of file_path or file_ref."),
       file_ref: z.string().optional().describe("Opaque Lightyear AccountStatement file reference."),
+      capital_gains_file: z.string().optional().describe("opening only: CapitalGainsStatement CSV path, to prove that a USD sale kept in USD has no matching capital-gains row (a re-opening past it)."),
+      capital_gains_file_ref: z.string().optional().describe("opening only: opaque capital-gains file reference; exclusive with capital_gains_file."),
       as_of: z.string().describe("Opening date or reporting date (YYYY-MM-DD, end of day)."),
       expected_usd_holding: z.number().optional().describe("revalue only (required): USD cash + ICSUSSDP value Lightyear shows for as_of."),
       broker_account: z.number().describe("Broker cash account holding the pool (e.g. 1020 / 1120 Lightyear konto)"),
@@ -6146,7 +6217,7 @@ export function registerLightyearTools(
       plan_handle: z.string().optional().describe("Execution-plan handle from the reviewed dry run. Required for dry_run=false."),
     },
     { ...batch, openWorldHint: true, title: "Revalue Lightyear USD Pool" },
-    async ({ mode, file_path, file_ref, as_of, expected_usd_holding, broker_account, broker_dimension_id, fx_account, lightyear_account, dry_run, plan_handle }) => {
+    async ({ mode, file_path, file_ref, capital_gains_file, capital_gains_file_ref, as_of, expected_usd_holding, broker_account, broker_dimension_id, fx_account, lightyear_account, dry_run, plan_handle }) => {
       const isDryRun = dry_run !== false;
       const operation = mode ?? "revalue";
       const invalid = (error: string) => toolError({ error, category: "invalid_arguments", retry: "never", mutation_occurred: false });
@@ -6156,8 +6227,11 @@ export function registerLightyearTools(
         return invalid("expected_usd_holding (USD cash + ICSUSSDP value Lightyear shows for as_of) is required for mode \"revalue\".");
       }
       const statementSource = fileInputSource(file_path, file_ref);
+      const hasGainsFile = Boolean(capital_gains_file || capital_gains_file_ref);
+      if (hasGainsFile && operation !== "opening") return invalid("capital_gains_file is used only with mode \"opening\".");
+      const gainsSource = hasGainsFile ? fileInputSource(capital_gains_file, capital_gains_file_ref) : null;
       const normalizedArgs = stripUndefinedDeep({
-        mode: operation, as_of,
+        mode: operation, as_of, has_capital_gains_file: hasGainsFile || undefined,
         expected_usd_holding_cents: operation === "revalue" ? expectedCents : undefined,
         broker_account, broker_dimension_id, fx_account,
         lightyear_account: lightyear_account?.toUpperCase(),
@@ -6171,16 +6245,26 @@ export function registerLightyearTools(
       ]);
       if (accountErrors.length > 0) return toolError({ error: "Account validation failed", details: accountErrors });
 
-      const evaluate = async (binding: unknown, frozen: FrozenFxOutcomes | undefined, inLock: boolean) => {
-        const snapshot = await readCsvSnapshot(statementSource, FILE_REFERENCE_OPERATIONS.lightyearStatement, runtimeSafetyContext, binding);
+      const evaluate = async (bindings: readonly unknown[], frozen: FrozenFxOutcomes | undefined, inLock: boolean) => {
+        const snapshot = await readCsvSnapshot(statementSource, FILE_REFERENCE_OPERATIONS.lightyearStatement, runtimeSafetyContext, bindings[0]);
         const rows = parseAccountStatement(snapshot.text());
+        let gainsSnapshot: FileInputSnapshot | null = null;
+        if (gainsSource) {
+          try {
+            gainsSnapshot = await readCsvSnapshot(gainsSource, FILE_REFERENCE_OPERATIONS.lightyearGains, runtimeSafetyContext, bindings[1]);
+          } catch (error) {
+            if (bindings.length > 1 && error instanceof FileInputSnapshotError) return { error: sourceReReadDrift(error, "The reviewed Lightyear capital-gains statement") } as const;
+            throw error;
+          }
+        }
+        const gainsRows = gainsSnapshot ? parseCapitalGains(gainsSnapshot.text()) : null;
         const keyResolution = resolveLightyearPoolKey(api, snapshot, file_path, lightyear_account, broker_account, broker_dimension_id);
         if (!keyResolution.ok) return { error: invalid(keyResolution.error) } as const;
         if (keyResolution.key === null) return { error: invalid(USD_POOL_REVIEW_MESSAGES.usd_pool_account_unknown) } as const;
         const key = keyResolution.key;
         const fxOutcomes = frozen ?? await resolveFrozenFxOutcomes([fxOutcomeKey("USD", as_of)], deps.ecb);
         const outcome = replayFrozenFx(fxOutcomes, "USD", as_of);
-        const done = (evaluation: FxRevaluationEvaluation) => ({ snapshot, key, fxOutcomes, evaluation }) as const;
+        const done = (evaluation: FxRevaluationEvaluation) => ({ snapshot, gainsSnapshot, key, fxOutcomes, evaluation }) as const;
         const review = (code: FxReviewCode, detail?: string) => done({ kind: "review", code, ...(detail !== undefined ? { detail } : {}) });
         const loaded = await loadPoolRecords(api, usdPoolStore, key, inLock);
         if (!loaded.ok) return review(loaded.code);
@@ -6189,7 +6273,31 @@ export function registerLightyearTools(
         const asOfTs = endOfDaySeconds(as_of);
 
         if (operation === "opening") {
-          if (view.checkpoints.length > 0) return review("usd_pool_opening_exists");
+          // A re-opening (M2) supersedes the earlier opening only when it orders after every record the
+          // pool holds, so no logged event or checkpoint is ever replayed from the new opening.
+          const reopening = checkpointOrder("opening", as_of);
+          if ([...view.checkpoints, ...view.events, ...view.intents].some(record => compareOrder(
+            record.record === "checkpoint" ? checkpointOrder(record.kind, record.as_of) : eventOrder(record.ref, record.ts), reopening) >= 0)) {
+            return review("usd_pool_opening_exists", "record_after");
+          }
+          // Owner decision 2026-11-07: an opening is replaced only while a permanent barrier blocks the pool
+          // between the current opening and the end of the new opening's day.
+          let barrier: PoolBarrier | null = null;
+          if (view.opening) {
+            let liveJournals: Journal[];
+            try {
+              api.journals.invalidateListCache();
+              liveJournals = await api.journals.listAll();
+            } catch {
+              return review("usd_pool_validation_unavailable");
+            }
+            const liveNumbers = new Set(liveJournals.filter(j => j.is_deleted !== true).map(j => j.document_number));
+            const bookedRefs = new Set(rows.map(row => row.reference).filter(ref => liveNumbers.has(`LY:${ref}`) || liveNumbers.has(ref)));
+            const gains = gainsRows === null ? null : { rows: gainsRows, coverage: capitalGainsCoverage(gainsRows, gainsSnapshot?.canonicalPath() ?? capital_gains_file) };
+            const found = firstPoolBarrier(rows, gains, new Set(view.events.map(event => event.ref)), bookedRefs, checkpointOrder("opening", view.opening.as_of), reopening);
+            barrier = found.barrier;
+            if (barrier === null) return review("usd_pool_opening_exists", found.unproven === null ? "not_blocked" : `not_blocked (${found.unproven})`);
+          }
           if (period !== null && period.to < as_of) return review("usd_pool_statement_gap");
           const replay = replayUsdOpening(openingReplayRows(rows), asOfTs, KNOWN_CASH_EQUIVALENT_TICKERS);
           if (!replay.ok) return review(replay.code, replay.detail);
@@ -6197,7 +6305,7 @@ export function registerLightyearTools(
           const eur = usdCentsToEurCents(replay.value.usd_cents, outcome.rate.rate);
           if (eur === null) return review("ecb_response_invalid");
           return done({
-            kind: "opening", replay: replay.value,
+            kind: "opening", replay: replay.value, supersedes: view.opening?.as_of ?? null, barrier,
             checkpoint: {
               record: "checkpoint", pool_key: key, kind: "opening", as_of, ts: asOfTs,
               usd_cents: replay.value.usd_cents, eur_cents: eur, fx_cents: 0, journal_id: null, document_number: null,
@@ -6317,7 +6425,7 @@ export function registerLightyearTools(
         };
       };
       if (isDryRun) {
-        const result = await evaluate(undefined, undefined, false);
+        const result = await evaluate([], undefined, false);
         if ("error" in result) return result.error;
         storedOrResolved = result.fxOutcomes;
         const { evaluation } = result;
@@ -6331,9 +6439,12 @@ export function registerLightyearTools(
           LIGHTYEAR_FX_REVALUATION_PLAN_DOMAIN,
           buildLightyearExecutionPlanInput({
             normalizedArgs,
-            sourceIdentities: [sourceIdentityRecord(result.snapshot)],
+            sourceIdentities: [sourceIdentityRecord(result.snapshot), ...(result.gainsSnapshot ? [sourceIdentityRecord(result.gainsSnapshot)] : [])],
             privateExtras: {
-              source_paths: [planBoundFileReference(statementSource, result.snapshot, FILE_REFERENCE_OPERATIONS.lightyearStatement)],
+              source_paths: [
+                planBoundFileReference(statementSource, result.snapshot, FILE_REFERENCE_OPERATIONS.lightyearStatement),
+                ...(gainsSource && result.gainsSnapshot ? [planBoundFileReference(gainsSource, result.gainsSnapshot, FILE_REFERENCE_OPERATIONS.lightyearGains)] : []),
+              ],
               fx_outcomes: result.fxOutcomes as unknown as PlanData,
               usd_pool: { pool_key: result.key as unknown as PlanData },
             },
@@ -6352,6 +6463,9 @@ export function registerLightyearTools(
           plan_handle: planHandleIssued,
           note: evaluation.kind === "opening"
             ? "This is the ECB valuation of the replayed USD at as_of (the replay assumes the statement starts from an empty USD position), not the books' historical carrying value. Approving stores it as the pool's opening checkpoint; set dry_run=false with the plan_handle only after the owner approves."
+              + (evaluation.supersedes !== null
+                ? ` It replaces the opening of ${evaluation.supersedes}, past the blocking row ${wrapUntrustedOcr(evaluation.barrier!.ref)} (${evaluation.barrier!.code}): USD pool rows dated on or before as_of that are not booked yet are no longer booked by these tools (book them by hand first), and the carrying value restarts at target_eur.`
+                : "")
             : "Set dry_run=false and pass the plan_handle from this reviewed dry run. The plan handle is not approval — review the plan first.",
         })) }] };
       }
@@ -6376,13 +6490,14 @@ export function registerLightyearTools(
       return withUsdPoolLock(storedKey, usdPoolStore, async () => {
         let result;
         try {
-          result = await evaluate(storedSourceBindings(storedPlan.privatePayload)[0], storedOrResolved, true);
+          result = await evaluate(storedSourceBindings(storedPlan.privatePayload), storedOrResolved, true);
         } catch (error) {
           if (error instanceof FileInputSnapshotError) return sourceReReadDrift(error, "The reviewed Lightyear statement");
           throw error;
         }
         if ("error" in result) return result.error;
-        const drift = lightyearSourceDrift(result.snapshot, storedPlan.sourceIdentities[0], "The Lightyear statement");
+        const drift = lightyearSourceDrift(result.snapshot, storedPlan.sourceIdentities[0], "The Lightyear statement")
+          ?? (result.gainsSnapshot ? lightyearSourceDrift(result.gainsSnapshot, storedPlan.sourceIdentities[1], "The Lightyear capital-gains statement") : null);
         if (drift) return drift;
         const storedFingerprint = readStoredFingerprint(storedPlan.privatePayload);
         if (poolKeyId(result.key) !== poolKeyId(storedKey) || storedFingerprint !== fingerprintOf(result.evaluation, result.key)) {
