@@ -12,7 +12,7 @@ import { UNTRUSTED_OCR_START_PREFIX } from "../mcp-json.js";
 import { parseMcpResponse } from "../__fixtures__/mcp-response.js";
 import { parseToolPayload } from "../__fixtures__/mcp-response.js";
 import { createTestRuntimeSafetyContext } from "../__fixtures__/runtime-safety.js";
-import type { YearEndClosePreview } from "./annual-report.js";
+import type { CashFlowAccountReview, YearEndClosePreview } from "./annual-report.js";
 import { makePosting, makeJournal } from "../__fixtures__/accounting.js";
 import { resetAccountingRulesCache } from "../accounting-rules.js";
 import { MutationIndeterminateError } from "../mutation-outcome.js";
@@ -2128,6 +2128,72 @@ describe("annual report / year-end close real-chart MINORs", () => {
     expect(cashFlow.operating_activities.excluded_from_operating_adjustments.change_in_short_term_investments).toBe(-200);
     expect(cashFlow.cash_journal_classification.operating).toBe(-50);
     expect(cashFlow.cash_journal_classification.investing).toBe(-200);
+  });
+
+  type CashFlowPayload = {
+    status: string;
+    operating_activities: { change_in_customer_prepayments_and_other_operating_liabilities: number; net_cash_from_operating_activities: number };
+    financing_activities: { net_cash_from_financing_activities: number };
+    operating_bridge: { difference: number; coverage_difference: number };
+    unresolved_cash: { count: number };
+    cash_flow_account_reviews: CashFlowAccountReview[];
+  };
+
+  it("completes the cash flow when a customer prepayment is received and later offset against a sale (M3)", async () => {
+    const extraAccounts = [liabilityAccount(2210, "Ostjate ettemaksed")];
+    const journals = [
+      seed,
+      makeJournal("2025-03-01", [makePosting(1020, "D", 100), makePosting(2210, "C", 100)]),
+      makeJournal("2025-04-01", [makePosting(2210, "D", 60), makePosting(3100, "C", 60)]),
+    ];
+    const report = await buildAnnualReportData(createApi(journals, { extraAccounts }), 2025);
+    const cashFlow = report.cash_flow_statement as CashFlowPayload;
+    expect(cashFlow.status).toBe("complete");
+    expect(cashFlow.operating_bridge).toMatchObject({ difference: 0, coverage_difference: 0 });
+    expect(cashFlow.operating_activities.change_in_customer_prepayments_and_other_operating_liabilities).toBe(40);
+    expect(cashFlow.operating_activities.net_cash_from_operating_activities).toBe(100);
+    expect(cashFlow.unresolved_cash.count).toBe(0);
+    expect(cashFlow.cash_flow_account_reviews).toEqual([]);
+  });
+
+  it.each([
+    { rule: undefined, status: "requires_review", operating: 0, financing: 0, change: 0 },
+    { rule: "operating", status: "complete", operating: 100, financing: 0, change: 100 },
+    { rule: "financing", status: "complete", operating: 0, financing: 100, change: 0 },
+  ])("classifies a 2430 owner/group movement by its explicit account rule ($rule)", async ({ rule, status, operating, financing, change }) => {
+    if (rule) {
+      const dir = mkdtempSync(join(tmpdir(), "earv-annual-cf-rules-"));
+      const rulesPath = join(dir, "accounting-rules.md");
+      writeFileSync(rulesPath, `# Accounting Rules\n\n## Cash Flow Category\n| account_id | category |\n| --- | --- |\n| 2430 | ${rule} |\n`, "utf-8");
+      process.env.EARVELDAJA_RULES_FILE = rulesPath;
+      resetAccountingRulesCache();
+    }
+    const extraAccounts = [liabilityAccount(2430, "Muud lühiajalised võlad")];
+    const journals = [
+      seed,
+      makeJournal("2025-03-01", [makePosting(1020, "D", 100), makePosting(2430, "C", 100)], { id: 9431, title: "Omaniku laen" }),
+    ];
+    const report = await buildAnnualReportData(createApi(journals, { extraAccounts }), 2025);
+    const cashFlow = report.cash_flow_statement as CashFlowPayload;
+    expect(cashFlow.status).toBe(status);
+    expect(cashFlow.operating_bridge.coverage_difference).toBe(0);
+    expect(cashFlow.operating_activities.net_cash_from_operating_activities).toBe(operating);
+    expect(cashFlow.financing_activities.net_cash_from_financing_activities).toBe(financing);
+    expect(cashFlow.operating_activities.change_in_customer_prepayments_and_other_operating_liabilities).toBe(change);
+    if (rule) {
+      expect(cashFlow.cash_flow_account_reviews).toEqual([]);
+    } else {
+      expect(cashFlow.cash_flow_account_reviews).toHaveLength(1);
+      const review = cashFlow.cash_flow_account_reviews[0]!;
+      expect(review).toMatchObject({ account_id: 2430, account_name: "Muud lühiajalised võlad", cash_in: 100, cash_out: 0, net: 100, journal_count: 1, journals_truncated: false });
+      expect(review.journals[0]).toMatchObject({ journal_id: 9431, date: "2025-03-01", amount: 100, direction: "in" });
+      expect(review.journals[0]!.title).toContain(UNTRUSTED_OCR_START_PREFIX);
+      expect(review.explanation).toContain("Põhitegevus");
+      expect(review.explanation).toContain("Finantseerimine");
+      expect(review.action).toContain("| 2430 | operating |");
+      expect(review.action).toContain("| 2430 | financing |");
+      expect((report.warnings as string[]).some((w) => w.includes("Cash-flow category undecided for 2430"))).toBe(true);
+    }
   });
 
   it("wraps staff names, related-party names, YECL document numbers and PROJECT purchase numbers as untrusted", async () => {

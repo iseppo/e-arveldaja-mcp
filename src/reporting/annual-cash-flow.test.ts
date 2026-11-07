@@ -146,7 +146,9 @@ describe("auditable indirect cash flow", () => {
     expect(result.operating_bridge.adjusted_total).toBe(-10); expect(result.operating_bridge.difference).toBe(0);
   });
   it("keeps unsupported operating bridge coverage visible",()=>{
-    const result=calculate([j(14,[p(1020,"D",100),p(2210,"C",100)])]);
+    // An explicit operating rule on an account outside the working-capital
+    // bridge (here 28xx) leaves a visible gap; 22xx is now bridged (M3).
+    const result=calculate([j(14,[p(1020,"D",100),p(2810,"C",100)])],{categoryRule:(id:number)=>id===2810?"operating":undefined});
     expect(result.operating_bridge.adjusted_total).toBe(0); expect(result.operating_bridge.direct_operating_cash).toBe(100);
     expect(result.operating_bridge.difference).toBe(-100); expect(result.status).toBe("requires_review");
   });
@@ -191,5 +193,28 @@ describe("auditable indirect cash flow", () => {
   it("recognizes an internal transfer with an operating bank fee without inventing gross external flows",()=>{
     const result=calculate([j(28,[p(1020,"D",100),p(1020,"C",101),p(5990,"D",1)])]);
     expect(result.operating_bridge.adjusted_total).toBe(-1);expect(result.investing.net).toBe(0);expect(result.financing.net).toBe(0);expect(result.status).toBe("complete");
+  });
+  it("treats a customer prepayment received and later offset against a sale as operating working capital (M3)",()=>{
+    const r=calculate([
+      makeJournal("2026-03-01",[p(1020,"D",100),p(2210,"C",100)],{id:31}),
+      makeJournal("2026-04-01",[p(2210,"D",100),p(3100,"C",100)],{id:32}),
+    ]);
+    expect(r.status).toBe("complete");expect(r.operating_bridge.difference).toBe(0);
+    expect(r.operating_bridge.adjusted_total).toBe(100);expect(r.operating_bridge.direct_operating_cash).toBe(100);
+    expect(r.unresolved_cash.count).toBe(0);
+  });
+  const groupAccounts=[...accounts,makeAccount(2430,"C","Kohustused","Muud lühiajalised võlad")];
+  it.each([
+    {rule:undefined,status:"requires_review",operating:0,financing:0,unresolved:100},
+    {rule:"operating" as const,status:"complete",operating:100,financing:0,unresolved:0},
+    {rule:"financing" as const,status:"complete",operating:0,financing:100,unresolved:0},
+  ])("classifies a 24xx movement only by an explicit account rule ($rule)",({rule,status,operating,financing,unresolved})=>{
+    const r=calculate([
+      makeJournal("2026-03-01",[p(1020,"D",100),p(2430,"C",100)],{id:41}),
+      makeJournal("2026-04-01",[p(5990,"D",40),p(2430,"C",40)],{id:42}),
+    ],{accounts:groupAccounts,categoryRule:(id:number)=>id===2430?rule:undefined});
+    expect(r.status).toBe(status);expect(r.unresolved_cash.net).toBe(unresolved);
+    expect(r.operating_bridge.direct_operating_cash).toBe(operating);expect(r.financing.net).toBe(financing);
+    expect(r.operating_bridge.difference).toBe(0);expect(r.operating_bridge.adjusted_total).toBe(operating);
   });
 });
