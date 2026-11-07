@@ -38,7 +38,7 @@ export type CamtJournalCoverage =
   | { readonly kind: "review"; readonly code: CamtJournalReviewCode; readonly journal_ids: number[] };
 
 export interface InterAccountResolver {
-  resolveInterAccount(q: InterAccountQuery): InterAccountResolution;
+  resolveInterAccount(q: InterAccountQuery, opts?: { consume?: boolean }): InterAccountResolution;
   hasOtherLabelledInterAccount(q: InterAccountQuery): boolean;
 }
 
@@ -78,6 +78,8 @@ export interface CamtJournalCoverageContext {
   readonly laneB: InterAccountResolver;
   /** Statement entries per date + direction + currency + amount, over the whole file. */
   readonly entryAmountOccurrences: Map<string, number>;
+  /** Snapshot-wide one-to-one Lane B assignment; no journal is consumed by row order. */
+  readonly interAccountAssignments: Map<string, { candidates: number[]; journalId?: number }>;
 }
 
 const REVIEW_PRIORITY: CamtJournalReviewCode[] = [
@@ -90,6 +92,10 @@ const cents = (value: number) => Math.round(value * 100);
 
 const entryAmountKey = (entry: ParsedCamtEntry) =>
   `${entry.date}|${entry.direction}|${entry.currency || "EUR"}|${cents(entry.amount)}`;
+
+const assignmentKey = (entry: ParsedCamtEntry, referenceKey?: string) => JSON.stringify([
+  entryAmountKey(entry), normalizeIban(entry.counterparty_iban), bankReferenceLookupKey(entry.bank_reference) ?? referenceKey,
+]);
 
 export function buildCamtJournalCoverageContext(input: CamtJournalCoverageInput): CamtJournalCoverageContext {
   const { snapshot, dimensionId, entries, ledgerTransactions, entryReferenceKeys } = input;
@@ -153,7 +159,7 @@ export function buildCamtJournalCoverageContext(input: CamtJournalCoverageInput)
     const key = entryAmountKey(entry);
     entryAmountOccurrences.set(key, (entryAmountOccurrences.get(key) ?? 0) + 1);
   }
-  return {
+  const context: CamtJournalCoverageContext = {
     accountId: snapshot.accountId,
     dimensionId,
     journals,
@@ -168,7 +174,68 @@ export function buildCamtJournalCoverageContext(input: CamtJournalCoverageInput)
     ownIbanToDimension: lookups.ownIbanToDimension,
     laneB: snapshot.interAccountResolver(laneBJournals, lookups.ownDimensionIds),
     entryAmountOccurrences,
+    interAccountAssignments: new Map(),
   };
+  assignInterAccountJournals(input, context, laneBJournals, lookups.ownDimensionIds);
+  return context;
+}
+
+/** Prefer exact dates, then nearest dates, only when both the row and journal have one choice. */
+function assignInterAccountJournals(
+  input: CamtJournalCoverageInput,
+  context: CamtJournalCoverageContext,
+  journals: Journal[],
+  ownDimensionIds: Set<number>,
+): void {
+  // Reuse Lane B's structural/amount rules rather than inventing another
+  // inter-account predicate. The non-consuming singleton lookup exposes every
+  // eligible candidate, including ties the usual nearest-first lookup hides.
+  const resolvers = journals.map(journal => ({ journal, resolver: input.snapshot.interAccountResolver([journal], ownDimensionIds) }));
+  const rows = input.entries.flatMap((entry, index) => {
+    if (entry.duplicate || (entry.currency || "EUR") !== "EUR") return [];
+    const query = interAccountQuery(entry, context);
+    if (!query) return [];
+    const key = assignmentKey(entry, input.entryReferenceKeys?.[index]);
+    const candidates = resolvers.flatMap(({ journal, resolver }) => {
+      const match = resolver.resolveInterAccount(query, { consume: false });
+      return match.status === "matched" && journalBooksEntryExactly(journal.id!, entry, context) &&
+        !contradictsSourceTransaction(journal, bankReferenceLookupKey(entry.bank_reference) ?? input.entryReferenceKeys?.[index], context)
+        ? [{ id: journal.id!, gap: Math.abs(toUtcDay(journal.effective_date) - toUtcDay(entry.date)) / 86_400_000 }]
+        : [];
+    });
+    if (candidates.length === 0) return [];
+    context.interAccountAssignments.set(key, { candidates: candidates.map(candidate => candidate.id).sort((a, b) => a - b) });
+    return [{ key, candidates, assigned: false }];
+  });
+  const used = new Set<number>();
+  for (let gap = 0; gap <= LANE_B_WINDOW_DAYS; gap++) {
+    const choices = rows.filter(row => !row.assigned).map(row => {
+      const remaining = row.candidates.filter(candidate => !used.has(candidate.id));
+      const nearest = Math.min(...remaining.map(candidate => candidate.gap));
+      return { row, candidates: nearest === gap ? remaining.filter(candidate => candidate.gap === gap) : [] };
+    });
+    const claims = new Map<number, number>();
+    for (const choice of choices) for (const candidate of choice.candidates) {
+      claims.set(candidate.id, (claims.get(candidate.id) ?? 0) + 1);
+    }
+    for (const { row, candidates } of choices) {
+      const only = candidates.length === 1 ? candidates[0] : undefined;
+      if (!only || claims.get(only.id) !== 1) continue;
+      row.assigned = true;
+      used.add(only.id);
+      context.interAccountAssignments.get(row.key)!.journalId = only.id;
+    }
+  }
+}
+
+function interAccountQuery(entry: ParsedCamtEntry, context: CamtJournalCoverageContext): InterAccountQuery | undefined {
+  const iban = normalizeIban(entry.counterparty_iban);
+  const otherDimensions = [...(iban ? context.ownIbanToDimension.get(iban) ?? [] : [])]
+    .filter(dimension => dimension !== context.dimensionId);
+  return otherDimensions.length === 1 ? {
+    sourceDim: context.dimensionId, targetDim: otherDimensions[0]!, amount: entry.amount,
+    date: entry.date, maxGapDays: LANE_B_WINDOW_DAYS, reference: entry.bank_reference ?? null,
+  } : undefined;
 }
 
 /** Signed EUR net (cents) the journal posts on the bank account + dimension, or undefined when inconsistent. */
@@ -244,19 +311,14 @@ export function classifyCamtJournalCoverage(
   }
 
   // b) Lane B: an own transfer to/from exactly one other own bank dimension.
-  const iban = normalizeIban(entry.counterparty_iban);
-  const otherDimensions = [...(iban ? context.ownIbanToDimension.get(iban) ?? [] : [])]
-    .filter((dimension) => dimension !== context.dimensionId);
-  if (otherDimensions.length === 1) {
-    const query: InterAccountQuery = {
-      sourceDim: context.dimensionId,
-      targetDim: otherDimensions[0]!,
-      amount: entry.amount,
-      date: entry.date,
-      maxGapDays: LANE_B_WINDOW_DAYS,
-      reference: entry.bank_reference ?? null,
-    };
-    const resolution = context.laneB.resolveInterAccount(query);
+  const query = interAccountQuery(entry, context);
+  const assignment = context.interAccountAssignments.get(assignmentKey(entry, referenceKey));
+  if (query) {
+    const resolution: InterAccountResolution = assignment
+      ? assignment.journalId !== undefined
+        ? { status: "matched", journal_id: assignment.journalId, matched_on: "refless", pool: "snapshot" }
+        : { status: "ambiguous_refless" }
+      : context.laneB.resolveInterAccount(query);
     if (resolution.status === "matched") {
       const journal = context.journalsById.get(resolution.journal_id);
       if (journal && bankNetCents(journal, context) === undefined) review("camt_journal_inconsistent_amounts", resolution.journal_id);
@@ -264,6 +326,7 @@ export function classifyCamtJournalCoverage(
       else review("camt_journal_conflict", resolution.journal_id);
     } else if (resolution.status === "ambiguous_refless" || context.laneB.hasOtherLabelledInterAccount(query)) {
       review("camt_journal_conflict");
+      for (const id of assignment?.candidates ?? []) review("camt_journal_conflict", id);
     }
   }
 
@@ -275,7 +338,7 @@ export function classifyCamtJournalCoverage(
     amount: entry.amount,
     direction: entry.direction === "CRDT" ? "D" : "C",
     date: entry.date,
-    excludeJournalIds: known,
+    excludeJournalIds: new Set([...known, ...(assignment?.journalId !== undefined ? assignment.candidates : [])]),
   }, { windowDays: POSTING_SCAN_WINDOW_DAYS }).map((suspect) => suspect.journal_id))];
 
   const journalIds = [...new Set([...known, ...scanIds])].sort((left, right) => left - right);

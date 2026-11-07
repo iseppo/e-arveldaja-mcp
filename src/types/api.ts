@@ -483,6 +483,8 @@ export interface Account {
   requires_positive_balance?: boolean;
   transaction_in_user_bindable: boolean;
   transaction_out_user_bindable: boolean;
+  transaction_in_user_bindable_set?: boolean;
+  transaction_out_user_bindable_set?: boolean;
   is_product_account: boolean;
   is_disabled?: boolean;
 }

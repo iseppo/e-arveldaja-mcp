@@ -5,7 +5,7 @@ import { isCompanyVatRegistered } from "../company-vat-status.js";
 import type { RuntimeSafetyContext } from "../runtime-safety-context.js";
 import type { ExecutionPlanInput, PlanData, PlanRecord } from "../plan-store.js";
 import { canonicalPlanJson, stripUndefinedDeep } from "../tools/camt-plan.js";
-import type { Client, CreatePurchaseInvoiceData, PurchaseInvoice, PurchaseInvoiceItem, SaleInvoice, Transaction } from "../types/api.js";
+import type { Account, Client, CreatePurchaseInvoiceData, PurchaseInvoice, PurchaseInvoiceItem, SaleInvoice, Transaction } from "../types/api.js";
 import { roundMoney } from "../money.js";
 import { snapshotBankTransaction, compareBankTransactionMaterial, snapshotLinkedInvoice, TransactionMaterialDriftError } from "../banking/transaction-material-snapshot.js";
 import { withPurchaseInvoiceLock, scanPurchaseIntakeDuplicates } from "../documents/purchase-invoice-lock.js";
@@ -537,6 +537,19 @@ function historyApplicable(history: CounterpartyHistorySuggestion, transaction: 
     clients.some(client => client.id === clientsId && isLiveClient(client));
 }
 
+/** Direct journal history does not prove that the chart allows bank-row binding. */
+function historyAccountBindingRefusal(accountId: number, transaction: Transaction, accounts: readonly Account[]): string | undefined {
+  const account = accounts.find(candidate => candidate.id === accountId);
+  const direction = trustedDirection(transaction);
+  const bindable = direction === "incoming"
+    ? account?.transaction_in_bindable === true || (account?.transaction_in_user_bindable === true && account.transaction_in_user_bindable_set === true)
+    : direction === "outgoing"
+      ? account?.transaction_out_bindable === true || (account?.transaction_out_user_bindable === true && account.transaction_out_user_bindable_set === true)
+      : false;
+  if (account?.is_valid === true && account.is_disabled !== true && bindable) return undefined;
+  return `Account ${accountId} cannot be used on an ${direction ?? "unknown-direction"} bank row in e-arveldaja. Review its eligibility and enable it in the chart settings, or book a separate journal and remove the bank row after verifying that journal and approving the deletion.`;
+}
+
 /** The distribution a plan-bound apply confirms the row with, re-derived from fresh history. */
 interface HistoryDistribution {
   account_id: number;
@@ -820,6 +833,7 @@ class ClassificationOperationsImpl implements ClassificationOperations {
     historyUnavailable: boolean;
     historyDistributions: Map<number, HistoryDistribution>;
     ruleDecided: ReadonlySet<number>;
+    accounts: readonly Account[];
   }): Promise<ApplyClassificationGroupResult> {
     const api = this.api;
     const { group, transactionIds, freshTransactions, notes, dryRun, ledgerBlocks, historyDistributions } = input;
@@ -850,6 +864,11 @@ class ClassificationOperationsImpl implements ClassificationOperations {
       const distribution = historyDistributions.get(id);
       if (!distribution) {
         notes.push(`Transaction ${id} skipped — it may pay an open invoice, or its counterparty's confirmed history no longer books every row to one account; re-classify.`);
+        continue;
+      }
+      const bindingRefusal = historyAccountBindingRefusal(distribution.account_id, transaction, input.accounts);
+      if (bindingRefusal) {
+        notes.push(`Transaction ${id} skipped — ${bindingRefusal}`);
         continue;
       }
       const target = `account ${distribution.account_id}${distribution.dimension_id !== null ? ` dimension ${distribution.dimension_id}` : ""}`;
@@ -1011,12 +1030,19 @@ class ClassificationOperationsImpl implements ClassificationOperations {
       // supplier-invoice history > keyword. History is review-only, never a rule.
       const fixedBySource = suggestion.source === "category_default" || suggestion.source === "local_rules";
       const unresolvedHistory = history ? undefined : unresolvedGroupHistory(group.transactions.map(historyResultOf));
+      const bindingRefusal = history
+        ? group.transactions.map(transaction => historyAccountBindingRefusal(history.account_id, transaction, accounts)).find(reason => reason !== undefined)
+        : undefined;
       if (!fixedBySource && history) {
         // A consistent history is offered for the plan-bound apply; anything
         // weaker (a recent run over a mixed past, a name-only or own-bank match)
         // stays a review-only hint.
-        const applicable = group.transactions.every(transaction => historyApplicable(history, transaction, clients));
+        const applicable = !bindingRefusal && group.transactions.every(transaction => historyApplicable(history, transaction, clients));
         suggestion = historyBookingSuggestion(history, accounts, applicable);
+        if (bindingRefusal) {
+          delete suggestion.suggested_distribution;
+          suggestion.reason = bindingRefusal;
+        }
         applyMode = applicable ? "account_distribution" : "review_only";
       } else if (
         !fixedBySource &&
@@ -1050,7 +1076,8 @@ class ClassificationOperationsImpl implements ClassificationOperations {
             ...(historyHint
               ? { history: { accountId: historyHint.account_id, dimensionId: historyHint.dimension_id, streak: historyHint.streak, historyTotal: historyHint.history_total } }
               : {}),
-            ...(suggestion.counterparty_history ? { historyReviewReason: suggestion.reason } : {}),
+            ...(suggestion.counterparty_history || (suggestion.source === "transaction_history" && bindingRefusal)
+              ? { historyReviewReason: suggestion.reason } : {}),
           })
         : undefined;
       // A name-only history match says so in the guidance too (A4).
@@ -1131,7 +1158,7 @@ class ClassificationOperationsImpl implements ClassificationOperations {
       api.clients.listAll(),
       getPurchaseArticlesWithVat(api),
       api.purchaseInvoices.listAll(),
-      api.readonly.getAccounts(),
+      api.readonly.getAccounts({ fresh: !dryRun }),
     ]);
     const isVatRegistered = await isCompanyVatRegistered(api, { freshVatInfo: !dryRun });
     const openPurchases = purchaseInvoices.filter(invoice =>
@@ -1209,7 +1236,9 @@ class ClassificationOperationsImpl implements ClassificationOperations {
                 ? undefined
                 : historyDistributionFor(history, transaction, clients);
               if (distribution) historyDistributions.set(transaction.id!, distribution);
-              historyCheck[String(transaction.id)] = distribution ? { ...distribution } : null;
+              historyCheck[String(transaction.id)] = distribution
+                ? { ...distribution, bank_row_bindable: historyAccountBindingRefusal(distribution.account_id, transaction, accounts) === undefined }
+                : null;
             }
           }
         }
@@ -1329,7 +1358,7 @@ class ClassificationOperationsImpl implements ClassificationOperations {
         if (group.apply_mode === "account_distribution") {
           results.push(await this.applyHistoryDistributions({
             group, transactionIds, freshTransactions, notes, dryRun, ledgerCheck, ledgerBlocks,
-            historyUnavailable: historyCheck === "unavailable", historyDistributions, ruleDecided,
+            historyUnavailable: historyCheck === "unavailable", historyDistributions, ruleDecided, accounts,
           }));
           continue;
         }
@@ -1789,7 +1818,8 @@ export interface ClassificationReviewTransaction {
   readonly clients_id?: number | null;
   /** Purchase-invoice effect (supplier, invoice number, accounts/VAT, amounts); null when nothing is booked. */
   readonly booking?: PlanData;
-  /** History-distribution effect (account, dimension, amount, client and whether it is set first). */
+  /** History-distribution effect (account, dimension, amount, client and whether it is set first).
+   * bank_row_bindable=false means the chart disallows that direction: the row is skipped. */
   readonly history_distribution?: PlanData;
   readonly ledger_check?: string;
   readonly [key: string]: PlanData | undefined;

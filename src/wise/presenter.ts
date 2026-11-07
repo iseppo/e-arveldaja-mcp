@@ -70,6 +70,9 @@ export type WiseImportSummary = {
   created: number;
   skipped: number;
   error_count: number;
+  /** Reviewed inter-account confirmation commands, in preview and execute;
+   * excludes already-journalized assertions. Actual outcomes are reported in
+   * inter_account_reconciliation, not in this planned count. */
   inter_account_total: number;
   needs_review: number;
   /** The needs_review items that block approval (wiseReviewBlocksApproval). */
@@ -411,11 +414,7 @@ export function renderWiseImportFull(data: WiseImportRenderData): { content: Arr
     created: created.length,
     skipped: executionSkipped.length,
     error_count: executionErrors.length,
-    // Preview: the planned inter-account confirmations (results exist only
-    // after execute). Execute: the inter-account results.
-    inter_account_total: mode === "DRY_RUN"
-      ? commands.filter(command => command.action === "inter_account").length
-      : interAccountResults.length,
+    inter_account_total: commands.filter(command => command.action === "inter_account").length,
     needs_review: ownershipReviews.length,
     blocking_review_count: ownershipReviews.filter(review => wiseReviewBlocksApproval(review.code)).length,
   };
@@ -492,10 +491,11 @@ export function renderWiseImportFull(data: WiseImportRenderData): { content: Arr
     execute: false,
   };
   const workflowSummary = !executeRequested
-    ? `Wise dry run would create ${summary.created} bank transaction(s), skip ${summary.skipped}, and report ${summary.error_count} error(s).`
-    : `Wise import created ${summary.created} bank transaction(s), skipped ${summary.skipped}, and reported ${summary.error_count} error(s).`;
+    ? `Wise dry run would create ${summary.created} bank transaction(s), skip ${summary.skipped}, and report ${summary.error_count} error(s).${summary.needs_review > 0 ? ` ${summary.needs_review} item(s) need review.` : ""}`
+    : `Wise import created ${summary.created} bank transaction(s), skipped ${summary.skipped}, and reported ${summary.error_count} error(s).${summary.needs_review > 0 ? ` ${summary.needs_review} item(s) need review.` : ""}`;
   const workflow = buildWorkflowEnvelope({
     summary: workflowSummary,
+    needs_review: ownershipReviews,
     dry_run_steps: !executeRequested
       ? [{
           tool: "import_wise_transactions",
@@ -720,11 +720,8 @@ export function renderWiseImportCompact(input: WiseCompactInput): WiseImportComp
     errors: executionErrors.length,
     needs_review: data.ownershipReviews.length,
     blocking_review_count: blockingReviewCount,
-    // Preview: the planned inter-account confirmations (results exist only
-    // after execute). Execute: the inter-account results.
-    inter_account: dryRun
-      ? data.commands.filter(command => command.action === "inter_account").length
-      : data.interAccountResults.length,
+    // Same reviewed command count as the full summary, in both modes.
+    inter_account: data.commands.filter(command => command.action === "inter_account").length,
     // Preview: the rows the plan asserts as already booked. Execute: only the
     // ones whose journal the post-write re-check verified.
     already_journalized: dryRun
