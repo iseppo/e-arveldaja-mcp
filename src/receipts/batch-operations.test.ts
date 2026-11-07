@@ -275,6 +275,50 @@ const baseRun = {
   directoryAccessOptions: {},
 } as const;
 
+describe("receipt batch checks history title periods against the document text (L2)", () => {
+  it.each([
+    ["previous period", "Hosting Sep 20–Oct 20, 2026", "Software"],
+    ["current period", "Hosting Oct 20–Nov 20, 2026", "Hosting Oct 20–Nov 20, 2026"],
+  ])("previews and creates a title for the %s", async (_case, historyTitle, expectedTitle) => {
+    const actual = await vi.importActual<typeof import("../tools/receipt-extraction.js")>("../tools/receipt-extraction.js");
+    vi.mocked(suggestBookingInternal).mockImplementation(actual.suggestBookingInternal);
+    vi.mocked(extractReceiptFieldsFromText).mockReturnValue({
+      ...extractReceiptFieldsFromText("", "receipt.pdf"),
+      description: "Hosting",
+      raw_text: "Hosting\nOct 20–Nov 20, 2026",
+    });
+    const { api, spies } = makeApi();
+    const typedApi: ApiContext = api;
+    const previousInvoice = {
+      id: 2, clients_id: 7, client_name: "Supplier OU", number: "HISTORY-2", create_date: "2026-09-20",
+      journal_date: "2026-09-20", term_days: 0, status: "CONFIRMED", cl_currencies_id: "EUR",
+      items: [{ custom_title: historyTitle, cl_purchase_articles_id: 501, purchase_accounts_id: 5230 }],
+    };
+    vi.mocked(typedApi.purchaseInvoices.listAll).mockResolvedValue([previousInvoice]);
+    const get = typedApi.purchaseInvoices.get;
+    typedApi.purchaseInvoices.get = async (id, ...args) => id === 2
+      ? previousInvoice
+      : get(id, ...args);
+    vi.mocked(typedApi.readonly.getPurchaseArticles).mockResolvedValue([
+      { id: 501, name_est: "Software", name_eng: "Software", accounts_id: 5230, level: 1, cl_account_groups: [] },
+    ]);
+    const ops = makeOperations(api);
+    const dry = await ops.runBatch({ ...baseRun, executionMode: "dry_run", dryRun: true });
+    if (!dry.ok) throw new Error("dry run failed");
+    expect(dry.value.results[0]?.booking_suggestion?.item.custom_title).toBe(expectedTitle);
+
+    const result = await ops.runBatch({
+      ...baseRun, executionMode: "create", dryRun: false,
+      approvedManifest: dry.value.manifest, planHandle: dry.value.planHandles!.create,
+    });
+    expect(result.ok && result.value.results[0]?.status).toBe("created");
+    const body: { items: Array<{ custom_title: string }> } = spies.createAndSetTotals.mock.calls[0]![0];
+    // Creation already uses the current extracted description, independently
+    // of the history title presented in booking_suggestion.
+    expect(body.items[0]?.custom_title).toBe("Hosting");
+  });
+});
+
 it("R3: receipt execute refreshes VAT registration through the real reference-data cache", async () => {
   readonlyCache.invalidate();
   let vatNumber: string | null = "EE123456789";
@@ -625,6 +669,49 @@ it("M3: changed final bank counterparty leaves the created draft held without re
   expect(spies.confirmWithTotals).not.toHaveBeenCalled();
   expect((api as any).transactions.confirm).not.toHaveBeenCalled();
   expect(outcome.value.results[0]).toMatchObject({ status: "needs_review", created_invoice: { id: 555, confirmed: false }, bank_match: { linked: false } });
+});
+
+describe("L1: non-auto-linkable receipt candidates do not hold invoice confirmation", () => {
+  it.each(["available", "unavailable"] as const)("confirms the reviewed invoice without linking an 85-score card candidate (bank read %s)", async bankRead => {
+    const { api, spies } = makeApi();
+    const typedApi = api as ApiContext;
+    const bank = {
+      id: 42, status: "PROJECT", type: "C", amount: 124, base_amount: 124,
+      date: "2026-03-20", accounts_dimensions_id: 100, clients_id: 7,
+      cl_currencies_id: "EUR", description: "WISE:CARD [source_direction=OUT]",
+    };
+    vi.mocked(typedApi.transactions.listAll).mockResolvedValue([bank]);
+    typedApi.transactions.get = vi.fn(async () => {
+      if (bankRead === "unavailable" && spies.createAndSetTotals.mock.calls.length > 0) {
+        throw new Error("Transient bank read failure");
+      }
+      return bank;
+    });
+    typedApi.transactions.confirm = vi.fn();
+    const ops = makeOperations(api);
+    const dry = await ops.runBatch({ ...baseRun, executionMode: "dry_run", dryRun: true });
+    if (!dry.ok || !dry.value.planHandles) throw new Error("dry run failed");
+    expect(dry.value.results[0]).toMatchObject({
+      status: "dry_run_preview",
+      bank_match: { candidate: { transaction_id: 42, confidence: 85 }, linked: false },
+    });
+    const executed = await ops.runBatch({
+      ...baseRun, executionMode: "create_and_confirm", dryRun: false,
+      approvedManifest: dry.value.manifest, planHandle: dry.value.planHandles.create_and_confirm,
+    });
+    if (!executed.ok) throw new Error(executed.error.code);
+    const row = executed.value.results[0]!;
+    expect(row).toMatchObject({
+      status: "created", created_invoice: { id: 555, confirmed: true, uploaded_document: true },
+      bank_match: { candidate: { transaction_id: 42, confidence: 85 }, linked: false },
+    });
+    expect(row.creation_partial).toBeUndefined();
+    expect(row.notes.join(" ")).toMatch(/candidate 42.*confidence 85.*below auto-link threshold 90/);
+    expect(executed.value.summary).toMatchObject({ created: 1, matched: 0, needs_review: 0 });
+    expect(spies.confirmWithTotals).toHaveBeenCalledTimes(1);
+    expect(typedApi.transactions.confirm).not.toHaveBeenCalled();
+    expect(bank.status).toBe("PROJECT");
+  });
 });
 
 describe("M3 material boundary matrix", () => {

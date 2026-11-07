@@ -458,6 +458,15 @@ export async function createAndMaybeMatchPurchaseInvoice(
 
   const dryRunMatch = findBestTransactionMatch(bankTransactions, invoiceDraft, consumedTransactionIds);
   const candidate = dryRunMatch?.candidate;
+  // Base-amount-only matches need a manual distribution in the transaction's
+  // currency, even at a high score. Share this eligibility with the dry run,
+  // invoice confirmation checks and the eventual bank link.
+  const crossCurrencyMatch = candidate !== undefined &&
+    candidate.reasons.includes("exact_base_amount") && !candidate.reasons.includes("exact_amount");
+  // Only a candidate approved for automatic linking can gate confirmation of
+  // the invoice. Other candidates stay available for later reconciliation.
+  const canAutoLink = candidate !== undefined &&
+    candidate.confidence >= EXACT_MATCH_THRESHOLD && !crossCurrencyMatch;
   const approvedTransaction = candidate ? bankTransactions.find(tx => tx.id === candidate.transaction_id) : undefined;
   const approvedSnapshot = approvedTransaction ? snapshotBankTransaction(approvedTransaction) : undefined;
   const approvedClientTransition = approvedSnapshot && supplierId !== undefined && approvedSnapshot.clients_id !== supplierId
@@ -469,12 +478,7 @@ export async function createAndMaybeMatchPurchaseInvoice(
       // when it would meet the execute-time auto-link criteria, so a second
       // receipt in the same dry-run can't also preview linking this exact
       // transaction. Mirror the execute-path canAutoLink guard (#2).
-      const crossCurrencyMatch =
-        candidate.reasons.includes("exact_base_amount") &&
-        !candidate.reasons.includes("exact_amount");
-      const wouldAutoLink =
-        candidate.confidence >= EXACT_MATCH_THRESHOLD && !crossCurrencyMatch;
-      if (wouldAutoLink) {
+      if (canAutoLink) {
         consumedTransactionIds.add(candidate.transaction_id);
       }
       notes.push(`Dry run: matched candidate transaction ${candidate.transaction_id} at confidence ${candidate.confidence}.`);
@@ -683,7 +687,7 @@ export async function createAndMaybeMatchPurchaseInvoice(
       (score.candidate.reasons.includes("exact_base_amount") && !score.candidate.reasons.includes("exact_amount"))) return ["match_score"];
     return undefined;
   };
-  if (candidate) {
+  if (canAutoLink) {
     try { const drift = await checkApprovedBank(); if (drift) return heldCreated(drift); }
     catch { return heldCreated(["transaction_read_unavailable"]); }
   }
@@ -715,7 +719,7 @@ export async function createAndMaybeMatchPurchaseInvoice(
     } catch (error) { return heldCreated(["purchase_invoice_or_document_read_unavailable"], error); }
   }
   const intendedInvoiceFingerprint = draftFingerprint(createdInvoice);
-  if (candidate) {
+  if (canAutoLink) {
     try { const drift = await checkApprovedBank(); if (drift) return heldCreated(drift); }
     catch (error) { return heldCreated(["transaction_read_unavailable"], error); }
   }
@@ -755,25 +759,11 @@ export async function createAndMaybeMatchPurchaseInvoice(
   };
   const matchResult = findBestTransactionMatch(bankTransactions, matchedInvoice, consumedTransactionIds);
   const matchedCandidate = candidate;
-  // Cross-currency guard: when the match survived only on base-currency evidence
-  // (base amounts equal but nominal amounts differ), the transaction amount is
-  // in a different currency than the invoice gross. Auto-confirming would post
-  // the invoice's EUR figure against a foreign-currency transaction — the wrong
-  // distribution amount. Surface for manual review instead. Same guard the
-  // sibling bank-reconciliation auto-confirm path applies.
-  const crossCurrencyMatch =
-    matchedCandidate !== undefined &&
-    matchedCandidate.reasons.includes("exact_base_amount") &&
-    !matchedCandidate.reasons.includes("exact_amount");
-  const canAutoLink =
-    matchedCandidate !== undefined &&
-    matchedCandidate.confidence >= EXACT_MATCH_THRESHOLD &&
-    !crossCurrencyMatch;
   let linked = false;
   if (matchResult.ambiguous) {
     notes.push(`Skipped bank match because ${matchResult.tiedCount} candidate transactions tied at confidence ${matchResult.topConfidence}; invoice was created without bank link.`);
   } else if (crossCurrencyMatch && matchedCandidate) {
-    notes.push(`Skipped auto-link of transaction ${matchedCandidate.transaction_id}: cross-currency match (base-amount only). Compute the correct distribution amount manually before confirming; invoice was created without bank link.`);
+    notes.push(`Skipped auto-link of transaction ${matchedCandidate.transaction_id} at confidence ${matchedCandidate.confidence}: cross-currency match (base-amount only). Compute the correct distribution amount manually before confirming; invoice was created without bank link.`);
   }
   if (createdInvoice.id && matchedCandidate && canAutoLink) {
     try {
