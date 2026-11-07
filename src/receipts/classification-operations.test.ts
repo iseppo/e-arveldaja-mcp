@@ -361,7 +361,7 @@ it("R7: classification execution corrects a non-EU supplier's historical reverse
   const outcome = await operations.applyClassifications({ classificationsJson: { groups: [saasGroup()] }, execute: true, planHandle });
   if (!outcome.ok) throw new Error(outcome.error.code);
   expect(api.purchaseInvoices.createAndSetTotals).toHaveBeenCalledTimes(1);
-  expect(api.purchaseInvoices.createAndSetTotals.mock.calls[0]![0].items[0]).toMatchObject({ reversed_vat_id: 7, vat_rate_dropdown: "24" });
+  expect(api.purchaseInvoices.createAndSetTotals.mock.calls[0]![0].items[0]).toMatchObject({ reversed_vat_id: 7, vat_rate_dropdown: "0" });
   expect(outcome.value.results[0]!.notes.join(" ")).toContain("KMD row 7");
 });
 

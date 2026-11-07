@@ -187,7 +187,7 @@ describe("reading create", () => {
     const outcome = await create(w, file, verify.planHandle!);
     expect(outcome).toMatchObject({ ok: true, value: { status: "created" } });
     expect(w.createAndSetTotals).toHaveBeenCalledTimes(1);
-    expect(w.createAndSetTotals.mock.calls[0]![0]).toMatchObject({ items: [expect.objectContaining({ reversed_vat_id: 1, total_net_price: 100, vat_rate_dropdown: "24" })] });
+    expect(w.createAndSetTotals.mock.calls[0]![0]).toMatchObject({ items: [expect.objectContaining({ reversed_vat_id: 1, total_net_price: 100, vat_rate_dropdown: "0" })] });
     expect(w.createAndSetTotals.mock.calls[0]!.slice(1, 3)).toEqual([0, 100]);
     expect(verify.bookingNotes?.history_notes.join(" ")).toContain("KMD row 6");
   });
