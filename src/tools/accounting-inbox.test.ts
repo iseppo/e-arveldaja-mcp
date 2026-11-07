@@ -1283,7 +1283,7 @@ ${entryXml}
             path: "/tmp/receipt.pdf",
           },
           review_guidance: {
-            recommendation: "Soovitus: kinnita puudu olevad arveandmed enne automaatset broneerimist.",
+            recommendation: "Soovitus: kinnita puudu olevad arveandmed enne automaatset kirjendamist.",
             compliance_basis: ["RPS § 6–7"],
             follow_up_questions: [],
           },

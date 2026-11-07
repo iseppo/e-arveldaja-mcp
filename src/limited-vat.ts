@@ -550,10 +550,10 @@ export function limitedVatPointOfUseNote(
 ): string | undefined {
   if (status === "full" || !supplier || !isForeignSupplier(supplier)) return undefined;
   if (status === "unknown") {
-    return "Ettevõtte käibemaksustaatus ei ole teada (limited-vat.json ei ole loetav või EMTA KMKR päring ei andnud KMKR numbri kohta vastust), seega ei saa otsustada, kas sisendkäibemaks või pöördmaksustamine kehtib. Käibemaksust sõltuv broneerimine keeldub, kuni staatus on teada; vaata limited_vat mode \"status\".";
+    return "Ettevõtte käibemaksustaatus ei ole teada (limited-vat.json ei ole loetav või EMTA KMKR päring ei andnud KMKR numbri kohta vastust), seega ei saa otsustada, kas sisendkäibemaks või pöördmaksustamine kehtib. Käibemaksust sõltuvat kirjendamist ei tehta, kuni staatus on teada; vaata limited_vat mode \"status\".";
   }
   if (hasExSuffix(supplier.invoice_vat_no) || hasEstonianRegistrationEvidence(supplier) || isFinancialServiceSupplier(supplier.name)) return undefined;
   return status === "limited"
     ? "Piiratud maksukohustuslane: kui see on KMS § 10 lg 5 teenus (nt pilv/SaaS/API), arvestab selle käibemaksu igakuine limited_vat mode \"month\" (standard-profiil). Arvel ise sisendkäibemaksu ega pöördmaksustamist ei ole."
-    : "Välismaa teenus: kui see on KMS § 10 lg 5 teenus (nt pilv/SaaS/API) ja ettevõte ei ole käibemaksukohustuslane, tekib kohustus registreerida end piiratud maksukohustuslaseks alates teenuse saamise päevast (KMS § 21 lg 1, piirmäära ei ole). Vaata limited_vat mode \"guide\" (standard-profiil). Broneerimist see ei peata.";
+    : "Välismaa teenus: kui see on KMS § 10 lg 5 teenus (nt pilv/SaaS/API) ja ettevõte ei ole käibemaksukohustuslane, tekib kohustus registreerida end piiratud maksukohustuslaseks alates teenuse saamise päevast (KMS § 21 lg 1, piirmäära ei ole). Vaata limited_vat mode \"guide\" (standard-profiil). Kirjendamist see ei peata.";
 }

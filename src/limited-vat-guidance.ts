@@ -67,7 +67,7 @@ const SECTIONS: readonly LimitedVatGuidanceSection[] = [
     paragraphs: [
       "Anna saadud number välismaa tarnijatele (nende arveldusliideses maksunumbri väljale), et nad lõpetaksid käibemaksu lisamise.",
       "Kui number on e-arveldajas olemas, kontrollib server EMTA avalikust KMKR päringust ise, kas see on piiratud või täieliku käibemaksukohustuslase number, ja võtab registreerimise kuupäeva staatuse alguseks; vaata limited_vat mode \"status\". Piiratud maksukohustuslasena ei käsitle server ettevõtet täieliku käibemaksukohustuslasena: ostuarvetel sisendkäibemaksu maha ei arvata ja pöördmaksustamise sisendrida ei teki. Müügiarvetele ära lisa käibemaksu.",
-      "Kui EMTA päring ei õnnestu või ei näita täpselt üht kehtivat registreeringut, keeldub käibemaksust sõltuv broneerimine, kuni päring õnnestub või omanik kinnitab staatuse: limited_vat mode \"set_status\" status \"limited\" koos effective_from kuupäevaga (või \"full\"). Omaniku kinnitus kehtib selle KMKR numbri kohta ja on EMTA päringust ülimuslik.",
+      "Kui EMTA päring ei õnnestu või ei näita täpselt üht kehtivat registreeringut, keeldub server käibemaksust sõltuvast kirjendamisest, kuni päring õnnestub või omanik kinnitab staatuse: limited_vat mode \"set_status\" status \"limited\" koos effective_from kuupäevaga (või \"full\"). Omaniku kinnitus kehtib selle KMKR numbri kohta ja on EMTA päringust ülimuslik.",
     ],
   },
   {
@@ -78,7 +78,7 @@ const SECTIONS: readonly LimitedVatGuidanceSection[] = [
       "Käibedeklaratsioon e-arveldajas (RIK-i juhis, 06.11.2026): rida 1 ja rida 4 on maksustatav väärtus ja käibemaks; saadud teenuse väärtus läheb ritta 6 (ELi tarnija) või ritta 7 (ELi-väline tarnija). Need summad on limited_vat mode \"month\" väljundis. Kui KMD on eeltäidetud, kustuta rida \"sh pöördmaksustamisega seotud käive\" ja rida 5: piiratud maksukohustuslane sisendkäibemaksu maha ei arva. Kui salvestamisel küsitakse rida 12 (tasumisele kuuluv käibemaks), täida see käsitsi.",
       "Esitatud KMD alusel teeb e-arveldaja ise kande D 2511 / K 2510. Seepärast krediteerib PKM-kanne kontot 2511, mitte 2510: pärast KMD kannet on 2511 null ja võlg on kontol 2510. Kontot 2510 PKM-kandes ei kasutata.",
       "See server KMD-d ei esita.",
-      "Maksu tasumine EMTA-le käib nagu tavaliselt ettemaksukonto (1516) kaudu: pangamakse EMTA-le broneeritakse ettemaksukonto täiendusena.",
+      "Maksu tasumine EMTA-le käib nagu tavaliselt ettemaksukonto (1516) kaudu: pangamakse EMTA-le kirjendatakse ettemaksukonto täiendusena.",
     ],
   },
   {

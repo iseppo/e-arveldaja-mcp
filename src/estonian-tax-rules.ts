@@ -783,7 +783,7 @@ export function detectVatDeductionNotes(input: {
       severity: "warning",
       title: "Külaliste vastuvõtt / esinduskulu — sisendkäibemaks ei ole mahaarvatav",
       detail:
-        "Kui tegu on külaliste või koostööpartnerite vastuvõtu kuluga (toitlustus, meelelahutus), siis sisendkäibemaksu maha ei arvata — broneeri kulu koos käibemaksuga (bruto) kulukontole. " +
+        "Kui tegu on külaliste või koostööpartnerite vastuvõtu kuluga (toitlustus, meelelahutus), siis sisendkäibemaksu maha ei arvata — kirjenda kulu koos käibemaksuga (bruto) kulukontole. " +
         "Sama kulu kuulub ka tulumaksu vastuvõtukulude piirmäära alla: maksuvaba 50 € kalendrikuus + 2% palgafondist (kasvavalt), ületav osa maksustatakse 22/78. " +
         "Erand: töötaja töölähetuse majutuse sisendkäibemaks on mahaarvatav (KMS § 30). " +
         "Kui kulu on tegelikult oma töötajate jaoks (toitlustus/majutus), võib tegu olla erisoodustusega (TuMS § 48). Küsi kasutajalt kulu eesmärki, kui see pole selge.",
