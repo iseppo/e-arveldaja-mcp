@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.41.0] - 2026-11-07
+
 ### Fixed
 
 - **The inbox receipt preview no longer stops when e-arveldaja briefly cannot return your company's own name.** Before, one failed read of your invoice settings made the whole inbox receipt preview fail. Now it behaves like the receipt batch: receipts from suppliers you already have are previewed when your company's registry code can be found from its VAT number, a receipt that would create a new supplier waits for review, and otherwise every receipt waits for review. The inbox list shows the reason. Nothing is written in the preview. Details: `AccountingOperations.prepareReceiptBatch` passes `ownCompanyNameUnavailable: true` to `runBatch` instead of throwing; held rows carry `own_company_identity_unavailable`, and the accounting-inbox follow-up summary and recommendation now include that row's reason.
