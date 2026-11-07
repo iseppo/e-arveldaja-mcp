@@ -614,8 +614,10 @@ carrying value inside the broker account/dimension, in the connection-scoped bun
 `AccountStatement-LY-<ACCOUNT>-…` or `lightyear_account`) + broker account/dimension; another
 broker target for the same Lightyear account is `usd_pool_target_mismatch`. Records: one
 owner-approved opening checkpoint (`book_lightyear_fx_revaluation` `mode: "opening"`, replayed
-from the statement and valued at the ECB rate; set once — redoing it means deleting the pool's
-entries from the store), `distribution_in` events (retained USD distributions,
+from the statement and valued at the ECB rate; a later opening is accepted only when it orders after every record
+of the pool — committed events, intents, checkpoints — and then supersedes the earlier one: `poolRecordsFor`
+takes the latest opening, so replay, completeness, mixed-second and before-opening checks start from it;
+earlier records stay as history; otherwise `usd_pool_opening_exists`), `distribution_in` events (retained USD distributions,
 `book_lightyear_distributions` `fx_source: "ecb"`; without a pool key or store they are reviews, never
 booked unlogged; a new one dated on/before the approved opening is held `usd_pool_before_opening`), `sell_in` events (a USD sell with no 1:1
 conversion keeps its net in the pool at the ECB rate; `book_lightyear_trades` needs its capital-gains row matched by
@@ -661,6 +663,11 @@ Statement roles (`src/lightyear/pool-statement.ts`): every USD row gets exactly 
 booked, checked at price 1.00 / fee 0 / gross = quantity), `distribution_in`, `sell_in`, `buy_relief`,
 `conversion_out`, `unsupported` (EUR→USD conversion with no trade, USD deposit/withdrawal),
 `pairing_ambiguous` or `unplaceable` (no valid timestamp: blocks the whole pool for that statement).
+An `unsupported` / `pairing_ambiguous` row (and an ambiguous second) refuses every later pool command, and a
+hand-booked `LY:<ref>` journal does not clear it (a pool EUR effect for such a row is not provable from the
+journal: a EUR→USD conversion nets to ~0 inside the broker account). The owner's way out is a re-opening dated on
+or after the row's day (Fable M2); the review messages say so. Rows on or before the new opening are
+`usd_pool_before_opening`, and the carrying value restarts at the new opening's ECB value (not booked).
 Trade↔conversion pairing is computed over the whole statement before anything is consumed
 (`assignOneToOne`): a same-day same-amount group pairs only when unambiguous (one trade + one
 conversion, or unique ±60 s edges covering the smaller side); otherwise every member is

@@ -177,7 +177,7 @@ export const USD_POOL_REVIEW_MESSAGES: Record<UsdPoolReviewCode, string> = {
   usd_pool_event_mismatch: "A journal logged in the USD pool was edited or deleted after logging.",
   usd_pool_event_unregistered: "A journal logged in the USD pool is still an unregistered draft; confirm it before revaluing.",
   usd_pool_prerequisite_unbooked: "A USD pool event on the statement (a retained USD distribution, a USD sale kept in USD, a buy paid from USD at Lightyear or a USD→EUR conversion) is not booked and logged yet; book it first.",
-  usd_pool_unsupported_event: "The statement holds a USD movement this tool does not book into the pool (a EUR→USD conversion with no trade, a USD deposit, withdrawal or fee, or a distribution whose conversion is reserved by a trade).",
+  usd_pool_unsupported_event: "The statement holds a USD movement this tool does not book into the pool (a EUR→USD conversion with no trade, a USD deposit, withdrawal or fee, or a distribution whose conversion is reserved by a trade); this and every later pool booking is refused — booking it by hand alone does not clear it. To unblock: book this movement by hand (create_journal, document_number LY: followed by the reference), then re-open the pool with book_lightyear_fx_revaluation mode \"opening\" dated on or after this row's day and after every record the pool already holds. Rows dated on or before the new opening are then no longer booked by these tools, and the pool's carrying value restarts at that day's ECB value (book any difference to the books by hand).",
   usd_pool_sweep_booked: "A cash-fund sweep row was booked as a journal that moves the broker account; the pool cannot be replayed.",
   usd_pool_insufficient: "The USD pool holds less USD than this buy or conversion takes from it.",
   usd_pool_prerequisite_failed: "An earlier USD pool command in this plan is not bookable, so later pool commands are not booked either.",
@@ -187,10 +187,10 @@ export const USD_POOL_REVIEW_MESSAGES: Record<UsdPoolReviewCode, string> = {
   usd_pool_quantity_mismatch: "The replayed USD pool quantity differs from the holding Lightyear shows for this date; nothing is booked.",
   usd_pool_fund_price_not_stable: "An ICSUSSDP row is not priced at exactly 1.00, so its units cannot be valued as USD cash.",
   usd_pool_opening_replay_unproven: "Replaying the statement drives USD cash or ICSUSSDP units negative, so it does not start from an empty USD position.",
-  usd_pool_opening_exists: "The USD pool already has a checkpoint; the opening is set only once (delete the pool's store entry to redo it).",
+  usd_pool_opening_exists: "The USD pool already holds a record dated after this day (a logged event, or an opening or revaluation on or after it); a new opening is accepted only when it orders after every record the pool holds.",
   usd_pool_before_opening: "This USD pool row is dated on or before the USD pool's approved opening, which already holds its effect; a new journal for it now would leave books and pool apart. Nothing is booked — book such rows before storing the opening, or correct them by hand.",
-  usd_pool_pairing_ambiguous: "Same-day USD trades and conversions of the same amount cannot be paired one to one without guessing; none of them is booked and the USD pool stays blocked until they are booked by hand.",
-  usd_pool_ambiguous_order: "One statement second holds both USD arriving in the pool and USD leaving it; the statement's 1-second resolution does not prove their order, so this and every later pool booking is refused.",
+  usd_pool_pairing_ambiguous: "Same-day USD trades and conversions of the same amount cannot be paired one to one without guessing; none of them is booked, and this and every later pool booking is refused — booking them by hand alone does not clear it. To unblock: book each of them by hand (create_journal, document_number LY: followed by its reference), then re-open the pool with book_lightyear_fx_revaluation mode \"opening\" dated on or after this row's day and after every record the pool already holds. Rows dated on or before the new opening are then no longer booked by these tools, and the pool's carrying value restarts at that day's ECB value (book any difference to the books by hand).",
+  usd_pool_ambiguous_order: "One statement second holds both USD arriving in the pool and USD leaving it; the statement's 1-second resolution does not prove their order, so this and every later pool booking is refused. To unblock: book these movements by hand (create_journal, document_number LY: followed by the reference), then re-open the pool with book_lightyear_fx_revaluation mode \"opening\" dated on or after that second's day and after every record the pool already holds. Rows dated on or before the new opening are then no longer booked by these tools, and the pool's carrying value restarts at that day's ECB value (book any difference to the books by hand).",
   usd_pool_source_changed: "The statement now shows a USD pool row already logged in the USD pool with another time, role or USD amount than when it was logged; this and every later pool booking is refused until the difference is reviewed.",
   usd_pool_source_unbound: "The statement rows of this USD pool row cannot be fingerprinted exactly (an amount is not a whole number of cents), so a later statement could not be checked against it; it is not booked and later pool bookings wait for it.",
   usd_pool_row_unplaceable: "A USD row of the statement has no valid date and time, so its place in the USD pool's history is unknown; no pool booking or revaluation is made from this statement.",
@@ -325,7 +325,8 @@ export function poolRecordsFor(records: readonly UsdPoolRecord[], key: PoolKey):
     events: events.filter(e => e.state === "committed").sort((a, b) => compareOrder(orderOf(a), orderOf(b))),
     checkpoints,
     intents: events.filter(e => e.state === "intent"),
-    opening: checkpoints.find(c => c.kind === "opening"),
+    // A later opening supersedes an earlier one (re-opening past a statement barrier, M2).
+    opening: checkpoints.filter(c => c.kind === "opening").at(-1),
   };
 }
 

@@ -5133,7 +5133,7 @@ interface FxRevaluationCommand {
 type FxRevaluationEvaluation =
   | { kind: "review"; code: FxReviewCode; detail?: string }
   | { kind: "already_booked"; checkpoint: UsdPoolCheckpoint }
-  | { kind: "opening"; checkpoint: UsdPoolCheckpoint; replay: OpeningReplaySummary }
+  | { kind: "opening"; checkpoint: UsdPoolCheckpoint; replay: OpeningReplaySummary; supersedes: string | null }
   | { kind: "checkpoint_only"; checkpoint: UsdPoolCheckpoint; carrying_eur_cents: number; snapshot_digest: string }
   | { kind: "journal"; checkpoint: UsdPoolCheckpoint; carrying_eur_cents: number; snapshot_digest: string; command: FxRevaluationCommand; event: PendingPoolEvent };
 
@@ -5173,7 +5173,7 @@ function evaluationFingerprintView(evaluation: FxRevaluationEvaluation): unknown
     checkpoint,
     ...(evaluation.kind === "review" ? { code: evaluation.code, detail: evaluation.detail ?? null } : {}),
     ...(evaluation.kind === "journal" ? { postings: evaluation.command.postings, title: evaluation.command.title } : {}),
-    ...(evaluation.kind === "opening" ? { replay: evaluation.replay } : {}),
+    ...(evaluation.kind === "opening" ? { replay: evaluation.replay, supersedes: evaluation.supersedes } : {}),
     ...("snapshot_digest" in evaluation ? { snapshot_digest: evaluation.snapshot_digest } : {}),
   };
 }
@@ -6131,9 +6131,9 @@ export function registerLightyearTools(
   );
 
   registerTool(server, "book_lightyear_fx_revaluation",
-    "Lightyear USD cash-fund pool at the ECB rate. mode \"opening\" (once per pool) replays the statement to as_of (USD cash + ICSUSSDP units at 1.00, from an empty start) and stores the ECB-valued opening checkpoint after approval. The opening books nothing: before approval show the owner the books' USD carrying value (broker account/dimension balance at as_of minus the EUR cash Lightyear shows) next to target_eur and the difference; that one-off difference is shown, not booked, and later revaluations measure from target_eur, so any correction is the owner's separate manual journal. mode \"revalue\" (default) revalues the pool's USD at the ECB rate of as_of: the replayed USD must equal expected_usd_holding, and the difference to the carrying value is booked on fx_account (default 8500) as journal LY-FX:<account>:USD:<as_of>; zero difference records a journal-free checkpoint. DRY RUN by default; anything unproven is a review, never a plug.",
+    "Lightyear USD cash-fund pool at the ECB rate. mode \"opening\" replays the statement to as_of (USD cash + ICSUSSDP units at 1.00, from an empty start) and stores the ECB-valued opening checkpoint after approval; a later opening, dated after every record the pool holds, supersedes the earlier one (the way past a statement row the pool cannot book). The opening books nothing: before approval show the owner the books' USD carrying value (broker account/dimension balance at as_of minus the EUR cash Lightyear shows) next to target_eur and the difference; that one-off difference is shown, not booked, and later revaluations measure from target_eur, so any correction is the owner's separate manual journal. mode \"revalue\" (default) revalues the pool's USD at the ECB rate of as_of: the replayed USD must equal expected_usd_holding, and the difference to the carrying value is booked on fx_account (default 8500) as journal LY-FX:<account>:USD:<as_of>; zero difference records a journal-free checkpoint. DRY RUN by default; anything unproven is a review, never a plug.",
     {
-      mode: z.enum(["opening", "revalue"]).optional().describe("\"opening\" sets the pool's opening checkpoint once; \"revalue\" (default) revalues at the reporting date."),
+      mode: z.enum(["opening", "revalue"]).optional().describe("\"opening\" sets (or, after every pool record, re-sets) the pool's opening checkpoint; \"revalue\" (default) revalues at the reporting date."),
       file_path: z.string().optional().describe("AccountStatement path/base64 input covering the interval since the last checkpoint (from the account's start for mode=opening). Provide exactly one of file_path or file_ref."),
       file_ref: z.string().optional().describe("Opaque Lightyear AccountStatement file reference."),
       as_of: z.string().describe("Opening date or reporting date (YYYY-MM-DD, end of day)."),
@@ -6189,7 +6189,13 @@ export function registerLightyearTools(
         const asOfTs = endOfDaySeconds(as_of);
 
         if (operation === "opening") {
-          if (view.checkpoints.length > 0) return review("usd_pool_opening_exists");
+          // A re-opening (M2) supersedes the earlier opening only when it orders after every record the
+          // pool holds, so no logged event or checkpoint is ever replayed from the new opening.
+          const reopening = checkpointOrder("opening", as_of);
+          if ([...view.checkpoints, ...view.events, ...view.intents].some(record => compareOrder(
+            record.record === "checkpoint" ? checkpointOrder(record.kind, record.as_of) : eventOrder(record.ref, record.ts), reopening) >= 0)) {
+            return review("usd_pool_opening_exists");
+          }
           if (period !== null && period.to < as_of) return review("usd_pool_statement_gap");
           const replay = replayUsdOpening(openingReplayRows(rows), asOfTs, KNOWN_CASH_EQUIVALENT_TICKERS);
           if (!replay.ok) return review(replay.code, replay.detail);
@@ -6197,7 +6203,7 @@ export function registerLightyearTools(
           const eur = usdCentsToEurCents(replay.value.usd_cents, outcome.rate.rate);
           if (eur === null) return review("ecb_response_invalid");
           return done({
-            kind: "opening", replay: replay.value,
+            kind: "opening", replay: replay.value, supersedes: view.opening?.as_of ?? null,
             checkpoint: {
               record: "checkpoint", pool_key: key, kind: "opening", as_of, ts: asOfTs,
               usd_cents: replay.value.usd_cents, eur_cents: eur, fx_cents: 0, journal_id: null, document_number: null,
@@ -6352,6 +6358,9 @@ export function registerLightyearTools(
           plan_handle: planHandleIssued,
           note: evaluation.kind === "opening"
             ? "This is the ECB valuation of the replayed USD at as_of (the replay assumes the statement starts from an empty USD position), not the books' historical carrying value. Approving stores it as the pool's opening checkpoint; set dry_run=false with the plan_handle only after the owner approves."
+              + (evaluation.supersedes !== null
+                ? ` It replaces the opening of ${evaluation.supersedes}: USD pool rows dated on or before as_of that are not booked yet are no longer booked by these tools (book them by hand first), and the carrying value restarts at target_eur.`
+                : "")
             : "Set dry_run=false and pass the plan_handle from this reviewed dry run. The plan handle is not approval — review the plan first.",
         })) }] };
       }
