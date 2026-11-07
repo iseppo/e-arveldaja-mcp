@@ -111,7 +111,7 @@ Call `compute_trial_balance` with `date_from`: YYYY-MM-01 and `date_to`: the las
 Call `run_accounting_report` with report="trial_balance", `date_from`: YYYY-MM-01 and `date_to`: the last day of the month.
 <!-- E_ARVELDAJA_FEATURE_END:guided -->
 
-Verify total debits = total credits. Treat sub-cent rounding deltas (under 0.01 EUR) as acceptable in multi-currency books; anything larger is a blocker that needs investigation.
+Verify total debits = total credits. Treat sub-cent rounding deltas (under 0.01 EUR) as acceptable in multi-currency books; a difference of 0.01 EUR or more is a blocker that needs investigation.
 
 <!-- E_ARVELDAJA_FEATURE_START:standard -->
 Call `compute_profit_and_loss` with `date_from`: YYYY-01-01 and `date_to`: the last day of the month.
@@ -129,7 +129,7 @@ Call `compute_balance_sheet` with `date_to`: the last day of the month.
 Call `run_accounting_report` with report="balance_sheet" and `date_to`: the last day of the month.
 <!-- E_ARVELDAJA_FEATURE_END:guided -->
 
-Verify balanced (assets = liabilities + equity).
+Verify balanced (assets = liabilities + equity). If `check.balanced` is false, treat it as a blocker.
 
 ## Step 6: Summary report
 
@@ -149,7 +149,7 @@ YTD Net Profit:  X.XX EUR
 Status: READY TO CLOSE (within the checked coverage) / HAS BLOCKERS
 ```
 
-Status is HAS BLOCKERS when `ready_to_close` is false, OR the trial balance or balance sheet is off by more than 0.01 EUR, OR exact duplicates were found — even if the tool reported `ready_to_close: true`. Missing documents, suspicious duplicate matches and overdue items are WARNINGS.
+Status is HAS BLOCKERS when `ready_to_close` is false, OR `check.balanced` is false, OR the trial balance or balance sheet is off by 0.01 EUR or more, OR exact duplicates were found — even if the tool reported `ready_to_close: true`. Missing documents, suspicious duplicate matches and overdue items are WARNINGS.
 
 If blockers exist, list specific actions needed. Offer to help fix them.
 <!-- E_ARVELDAJA_FEATURE_START:year-end -->
