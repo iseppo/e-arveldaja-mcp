@@ -1724,7 +1724,7 @@ export function registerReceiptInboxTools(
 
   registerCapturedTool(
     "classify_unmatched_transactions",
-    "Classify unconfirmed bank transactions that do not match any sale or purchase invoice. Read-only analysis with suggested booking defaults.",
+    "Classify unconfirmed bank transactions that do not match any sale or purchase invoice. Read-only analysis with suggested booking defaults. History-based account distributions require a valid, enabled account allowed for the row's direction; otherwise the group stays review-only.",
     {
       accounts_dimensions_id: coerceId.describe("Bank account dimension ID"),
       date_from: z.string().optional().describe("Optional lower transaction date bound (YYYY-MM-DD)"),
@@ -1751,7 +1751,7 @@ export function registerReceiptInboxTools(
 
   registerCapturedTool(
     "apply_transaction_classifications",
-    "Apply the output of classify_unmatched_transactions. DRY RUN by default. Only expense-like categories are auto-booked as purchase invoices; review-only categories are reported back.",
+    "Apply the output of classify_unmatched_transactions. DRY RUN by default. Expense-like categories create purchase invoices; account_distribution groups confirm bank rows only to accounts allowed for their direction. Execute rechecks chart permissions against the reviewed plan. Review-only categories are reported back.",
     {
       classifications_json: jsonObjectOrArrayInput.describe("Structured output from classify_unmatched_transactions."),
       execute: z.boolean().optional().describe("Actually create invoices and link transactions (default false = dry run)"),
@@ -1781,7 +1781,7 @@ export function registerReceiptInboxTools(
 
   registerTool(server,
     "classify_bank_transactions",
-    "Merged unmatched-bank classification. classify groups; dry_run_apply previews; execute_apply requires approval.",
+    "Merged unmatched-bank classification. classify groups; dry_run_apply previews; execute_apply requires approval. History-based account distributions require an enabled account allowed for the bank row's direction, rechecked at execute.",
     {
       mode: z.enum(["classify", "dry_run_apply", "execute_apply"]).optional().describe("Workflow phase to run. Defaults to classify."),
       accounts_dimensions_id: coerceId.optional().describe("Bank account dimension ID. Required for mode='classify'."),

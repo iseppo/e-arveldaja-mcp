@@ -581,7 +581,7 @@ describe("Wise acknowledged_journal_holds round trip (compact and full)", () => 
     expect(full.workflow.approval_previews[0].execute_args.acknowledged_journal_holds).toEqual(acknowledgement);
   });
 
-  it("guided counts.inter_account counts the planned inter-account confirmations of a preview (a released row)", () => {
+  it("guided counts.inter_account counts planned confirmations in both modes, excluding already-journalized results", () => {
     const data = makeData(1);
     data.acknowledgedHolds = acknowledgement;
     data.commands = [
@@ -589,9 +589,12 @@ describe("Wise acknowledged_journal_holds round trip (compact and full)", () => 
       { action: "inter_account", wise_id: "TRANSFER-ACK" },
     ] as unknown as WiseImportCommand[];
     expect(renderWiseImportCompact({ data }).summary.counts).toMatchObject({ inter_account: 1 });
-    // Execute: the inter-account results.
     const executed = makeData(1, "EXECUTED");
-    executed.interAccountResults = [{ wise_id: "TRANSFER-ACK", amount: 10, status: "confirmed_inter_account", ownership_basis: "verified_endpoints" }] as WiseImportRenderData["interAccountResults"];
+    executed.commands = data.commands;
+    executed.interAccountResults = [
+      { wise_id: "TRANSFER-ACK", amount: 10, status: "confirmed_inter_account", ownership_basis: "verified_endpoints" },
+      { wise_id: "TRANSFER-BOOKED", amount: 10, status: "already_journalized" },
+    ] as WiseImportRenderData["interAccountResults"];
     expect(renderWiseImportCompact({ data: executed }).summary.counts).toMatchObject({ inter_account: 1 });
   });
 

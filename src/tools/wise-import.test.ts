@@ -8461,7 +8461,7 @@ describe("Wise transfer to a third party is imported as an ordinary payment (okt
     expect(setup.api.clients.findByName).not.toHaveBeenCalledWith("LHV Own Account");
   });
 
-  it("O4 acceptance: a hand-booked journal D 1010 / C 1020-Wise labelled WISE:<id>, without a bank row, reads as already_journalized", async () => {
+  it("B2c / O4: an already-journalized assertion is separate from planned inter-account confirmations in both modes", async () => {
     // Wise on account 1020 (dimension 5), the cash desk on 1010 without a dimension.
     const accountDimensions = [
       { id: 5, accounts_id: 1020, title_est: "Wise", is_deleted: false },
@@ -8490,6 +8490,9 @@ describe("Wise transfer to a third party is imported as an ordinary payment (okt
       expect(setup.api.transactions.create).toHaveBeenCalledTimes(1);
       expect(setup.api.transactions.create.mock.calls[0][0].description).toMatch(/^WISE:CARD_TRANSACTION-PLAN-1 /);
       expect(executed.execution.errors).toEqual([]);
+      expect(dry.summary.inter_account_total).toBe(0);
+      expect(executed.summary.inter_account_total).toBe(0);
+      expect(executed.inter_account_reconciliation).toMatchObject({ total: 1, already_journalized: 1, confirmed: 0 });
     }
   });
 });
@@ -8587,24 +8590,59 @@ describe("not_own_transfer_ids: the owner marks a transfer as a payment to a thi
     }
   });
 
-  it("a row held for its counterpart stays held, with an unbound not_own_transfer_conflicts_evidence review", async () => {
+  it("B2a: the owner's not-own decision needs no counterpart bank when no bank has own-account evidence", async () => {
     // Three banks and no inter_account_dimension_id: the counterpart is unresolved.
     mockedReadFile.mockResolvedValue(buildCsvRows([transferOut(), cardPaymentValues("2026-10-16")]));
     const setup = setupWiseTool([], undefined, options({
       accountDimensions: [...configuredTransferDimensions(), { id: 30, accounts_id: 1030, title_est: "Coop", is_deleted: false }, FEE_DIMENSION],
       bankAccounts: [...configuredTransferBankAccounts(5, 20, COMPANY, "LHV Own Account"), { accounts_dimensions_id: 30, beneficiary_name: "Coop Own Account" }],
     }));
-    const dry = parseWiseResponse(await setup.handler({
-      file_path: "/tmp/wise.csv", accounts_dimensions_id: 5, not_own_transfer_ids: ["TRANSFER-900011"], execute: false,
-    }));
+    const { dry, executed } = await runApprovedWiseImport(setup, {
+      file_path: "/tmp/wise.csv", accounts_dimensions_id: 5, not_own_transfer_ids: ["TRANSFER-900011"],
+    });
 
-    expect(commandsOf(dry)).toEqual([["main_create", "CARD_TRANSACTION-PLAN-1"]]);
-    expect(dry.ownership_reviews).toEqual([
-      expect.objectContaining({ wise_id: "TRANSFER-900011", code: "wise_transfer_dimensions_unverified" }),
-      expect.objectContaining({ wise_id: "TRANSFER-900011", code: "not_own_transfer_conflicts_evidence" }),
-    ]);
-    expect(dry.transfers_treated_as_payments).toBeUndefined();
-    expect(JSON.stringify(dry.skipped_details)).toContain("Held for review (wise_transfer_dimensions_unverified)");
+    expect(commandsOf(dry)).toEqual([["main_create", "TRANSFER-900011"], ["main_create", "CARD_TRANSACTION-PLAN-1"]]);
+    expect(dry.ownership_reviews).toBeUndefined();
+    expect(dry.transfers_treated_as_payments).toEqual([{ wise_id: "TRANSFER-900011", basis: "owner" }]);
+    expect(executed.execution.errors).toEqual([]);
+    expect(setup.api.transactions.create).toHaveBeenCalledTimes(2);
+    expect(setup.api.transactions.confirm).not.toHaveBeenCalled();
+  });
+
+  it("B2a: uncertain own-account evidence keeps the owner's not-own decision held, including with a fallback bank", async () => {
+    const uncertain = {
+      id: 703, status: "PROJECT", is_deleted: false, type: "C", amount: 100, cl_currencies_id: "EUR", date: "2026-10-15",
+      accounts_dimensions_id: 20, bank_account_name: COMPANY, description: "unsigned bank row",
+    };
+    for (const fallback of [undefined, 20]) {
+      mockedReadFile.mockResolvedValue(buildCsvRows([transferOut(), cardPaymentValues("2026-10-16")]));
+      const setup = setupWiseTool([uncertain], undefined, options({
+        accountDimensions: [...configuredTransferDimensions(), { id: 30, accounts_id: 1030, title_est: "Coop", is_deleted: false }, FEE_DIMENSION],
+        bankAccounts: [...configuredTransferBankAccounts(5, 20, COMPANY, "LHV Own Account"), { accounts_dimensions_id: 30, beneficiary_name: "Coop Own Account" }],
+      }));
+      const dry = parseWiseResponse(await setup.handler({
+        file_path: "/tmp/wise.csv", accounts_dimensions_id: 5, inter_account_dimension_id: fallback,
+        not_own_transfer_ids: ["TRANSFER-900011"], execute: false,
+      }));
+      expect(commandsOf(dry)).toEqual([["main_create", "CARD_TRANSACTION-PLAN-1"]]);
+      expect(dry.ownership_reviews).toEqual(expect.arrayContaining([
+        expect.objectContaining({ wise_id: "TRANSFER-900011", code: "not_own_transfer_conflicts_evidence" }),
+      ]));
+      expect(dry.transfers_treated_as_payments).toBeUndefined();
+      expectNoWiseMutations(setup.api);
+    }
+  });
+
+  it("B2b: held rows appear in workflow.needs_review and its summary", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRows([transferOut(), cardPaymentValues("2026-10-16")]));
+    const setup = setupWiseTool([], undefined, options({
+      accountDimensions: [...configuredTransferDimensions(), { id: 30, accounts_id: 1030, title_est: "Coop", is_deleted: false }, FEE_DIMENSION],
+      bankAccounts: [...configuredTransferBankAccounts(5, 20, COMPANY, "LHV Own Account"), { accounts_dimensions_id: 30, beneficiary_name: "Coop Own Account" }],
+    }));
+    const dry = parseWiseResponse(await setup.handler({ file_path: "/tmp/wise.csv", accounts_dimensions_id: 5, execute: false }));
+    expect(dry.summary.needs_review).toBe(1);
+    expect(dry.workflow.needs_review).toEqual(dry.execution.needs_review);
+    expect(dry.workflow.summary).toContain("1 item(s) need review");
   });
 
   it("a row whose counterpart own-account evidence decided is held with not_own_transfer_conflicts_evidence", async () => {

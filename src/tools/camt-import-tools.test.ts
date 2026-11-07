@@ -3633,6 +3633,34 @@ function journalCoverageFixture(id: number, documentNumber: string | null, overr
 describe("camt import — journals that already book the movement (F1)", () => {
   const args = { file_path: "/tmp/camt.xml", accounts_dimensions_id: 7 };
 
+  it("B1: skips two adjacent same-amount transfers using their own exact-date journals", async () => {
+    const firstXml = withCounterpartyIban(singleEntryXml, "BE08905767222113");
+    const firstEntry = firstXml.match(/<Ntry>[\s\S]*?<\/Ntry>/)![0];
+    const secondEntry = firstEntry.replaceAll("2026-02-01", "2026-02-02").replaceAll("REF-VOID-1", "REF-VOID-2");
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+    mockedReadFile.mockResolvedValue(firstXml.replace(firstEntry, `${firstEntry}${secondEntry}`));
+    const journals = ["2026-02-01", "2026-02-02"].map((date, index) => journalCoverageFixture(701 + index, null, {
+      effective_date: date, operation_type: "TRANSACTION", operations_id: 9800 + index,
+      postings: [
+        { accounts_id: 1020, accounts_dimensions_id: 8, type: "D", amount: 10, base_amount: 10, cl_currencies_id: "EUR", is_deleted: false },
+        { accounts_id: 1020, accounts_dimensions_id: 7, type: "C", amount: 10, base_amount: 10, cl_currencies_id: "EUR", is_deleted: false },
+      ],
+    }));
+    const { api, handler } = setupCamtTool({ allowWrites: true, journals,
+      bankAccounts: [fixtureBankAccount({ accounts_dimensions_id: 7 }), fixtureBankAccount({ accounts_dimensions_id: 8, account_no: "BE08905767222113", iban_code: "BE08905767222113" })],
+      accountDimensions: [fixtureAccountDimension({ id: 7 }), fixtureAccountDimension({ id: 8 })],
+    });
+
+    const payload = parseToolPayload<CamtImportFullPayload>((await handler(args)).content[0]!.text);
+    expect(payload.workflow.needs_review).toEqual([]);
+    expect(payload.execution.skipped).toEqual([
+      expect.objectContaining({ bank_reference: expect.stringMatching(wrapped("REF-VOID-1")), journal_ids: [701], reason: "Already booked by journal 701" }),
+      expect.objectContaining({ bank_reference: expect.stringMatching(wrapped("REF-VOID-2")), journal_ids: [702], reason: "Already booked by journal 702" }),
+    ]);
+    expect(payload.created_count).toBe(0);
+    expect(api.transactions.create).not.toHaveBeenCalled();
+  });
+
   it("(a) skips an entry a manual BANK:<ref> journal books, naming the journal, and never creates", async () => {
     mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
     mockedReadFile.mockResolvedValue(singleEntryXml);

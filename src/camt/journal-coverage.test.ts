@@ -112,10 +112,55 @@ describe("classifyCamtJournalCoverage", () => {
     expect(classify([wiseTransfer()], wiseEntry({ date: "2026-09-25" }))).toEqual({ kind: "inter_account", journal_ids: [701] });
   });
 
-  it("8: two same-key entries → first skip, second review", () => {
+  it("8: two same-date entries competing for one journal both stay in review", () => {
     const [first, second] = classifyAll([wiseTransfer()], [wiseEntry(), wiseEntry({ bank_reference: "LHV-IN-2" })]);
-    expect(first).toEqual({ kind: "inter_account", journal_ids: [701] });
+    expect(first).toEqual({ kind: "review", code: "camt_journal_conflict", journal_ids: [701] });
     expect(second!.kind).toBe("review");
+  });
+
+  it.each([false, true])("B1: adjacent same-amount transfers each use their exact-date journal (reversed=%s)", reversed => {
+    const rows = [wiseEntry(), wiseEntry({ date: "2026-09-25", bank_reference: "LHV-IN-2" })];
+    const journals = [wiseTransfer(), wiseTransfer({ id: 702, effective_date: "2026-09-25", operations_id: 9801 })];
+    if (reversed) { rows.reverse(); journals.reverse(); }
+    expect(classifyAll(journals, rows)).toEqual(rows.map(row => ({
+      kind: "inter_account", journal_ids: [row.date === DATE ? 701 : 702],
+    })));
+  });
+
+  it("B1: exact-date claims take priority over an earlier row's nearest-date match", () => {
+    const rows = [wiseEntry({ date: "2026-09-23" }), wiseEntry({ bank_reference: "LHV-IN-2" })];
+    expect(classifyAll([wiseTransfer()], rows)).toEqual([
+      { kind: "review", code: "camt_journal_conflict", journal_ids: [701] },
+      { kind: "inter_account", journal_ids: [701] },
+    ]);
+  });
+
+  it("B1: two equally near journals for one row stay in review", () => {
+    expect(classify([
+      wiseTransfer({ effective_date: "2026-09-23" }),
+      wiseTransfer({ id: 702, effective_date: "2026-09-25", operations_id: 9801 }),
+    ], wiseEntry())).toEqual({ kind: "review", code: "camt_journal_conflict", journal_ids: [701, 702] });
+  });
+
+  it("B1: one row prefers its exact-date journal over a further candidate", () => {
+    expect(classify([
+      wiseTransfer(), wiseTransfer({ id: 702, effective_date: "2026-09-25", operations_id: 9801 }),
+    ], wiseEntry())).toEqual({ kind: "inter_account", journal_ids: [701] });
+  });
+
+  it("B1: an unrelated posting suspect still holds a uniquely assigned own transfer", () => {
+    const extra = journal(702, [p(1020, LHV, "D", 15), p(1410, LOAN, "C", 15)]);
+    expect(classify([wiseTransfer(), extra], wiseEntry()))
+      .toEqual({ kind: "review", code: "camt_journal_conflict", journal_ids: [701, 702] });
+  });
+
+  it("B1: two same-date rows and two same-date journals have no unique assignment", () => {
+    const results = classifyAll([wiseTransfer(), wiseTransfer({ id: 702, operations_id: 9801 })],
+      [wiseEntry(), wiseEntry({ bank_reference: "LHV-IN-2" })]);
+    expect(results).toEqual([
+      { kind: "review", code: "camt_journal_conflict", journal_ids: [701, 702] },
+      { kind: "review", code: "camt_journal_conflict", journal_ids: [701, 702] },
+    ]);
   });
 
   it("9: labelled inter-account journal (WISE-NATIVE-REF) → review", () => {

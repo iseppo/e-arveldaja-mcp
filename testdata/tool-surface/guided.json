@@ -2,8 +2,8 @@
   "profile": "guided",
   "measurement": {
     "toolCount": 19,
-    "toolsListBytes": 35468,
-    "descriptionsBytes": 4971,
+    "toolsListBytes": 35591,
+    "descriptionsBytes": 5094,
     "inputSchemasBytes": 25865,
     "largestTool": {
       "name": "process_accounting_document",
@@ -365,7 +365,7 @@
         "openWorldHint": false,
         "readOnlyHint": false
       },
-      "description": "Merged unmatched-bank classification. classify groups; dry_run_apply previews; execute_apply requires approval.",
+      "description": "Merged unmatched-bank classification. classify groups; dry_run_apply previews; execute_apply requires approval. History-based account distributions require an enabled account allowed for the bank row's direction, rechecked at execute.",
       "execution": {
         "taskSupport": "forbidden"
       },

@@ -429,6 +429,18 @@ async function runWiseImport(
         ownCompanyIdentity,
         approvedSet.has(row.id),
       );
+      // A confirmed third-party payment needs no counterpart bank. Only the
+      // absence of all candidate evidence makes the dimension hold moot.
+      if (notOwnSet.has(row.id) && resolution !== undefined && "hold" in resolution &&
+        resolution.hold.code === "wise_transfer_dimensions_unverified" &&
+        resolution.hold.evidence_transaction_ids.length === 0) {
+        transferDecisions.set(row, {
+          sourceVerified: decision.sourceVerified,
+          targetVerified: decision.targetVerified,
+          externalPayment: "owner",
+        });
+        continue;
+      }
       if (resolution !== undefined && "hold" in resolution) {
         transferDecisions.set(row, {
           sourceVerified: decision.sourceVerified,
@@ -446,11 +458,14 @@ async function runWiseImport(
       // Own-account evidence (or the owner's pick among the evidenced banks)
       // says the row is an own transfer: the owner's not-own decision
       // contradicts it, so the row is held rather than booked either way.
-      if (notOwnSet.has(row.id) && resolution !== undefined && (resolution.basis === "evidence" || resolution.basis === "owner_selected")) {
+      if (notOwnSet.has(row.id) && resolution !== undefined &&
+        (resolution.basis === "evidence" || resolution.basis === "owner_selected" || resolution.otherEvidenceDims !== undefined)) {
         transferDecisions.set(row, {
           sourceVerified: decision.sourceVerified,
           targetVerified: decision.targetVerified,
-          counterpartHold: notOwnConflictReview(row, WISE_NOT_OWN_TRANSFER_EVIDENCE_REASON(resolution.dim), decision),
+          counterpartHold: notOwnConflictReview(row, resolution.otherEvidenceDims !== undefined
+            ? "not_own_transfer_ids lists this transfer, but candidate own-account bank rows remain uncertain. The row is not imported. Review those bank rows with the owner before treating it as a third-party payment."
+            : WISE_NOT_OWN_TRANSFER_EVIDENCE_REASON(resolution.dim), decision),
           ...(resolution.basis === "owner_selected" ? { counterpartOverrideApplied: true as const } : {}),
         });
         continue;
