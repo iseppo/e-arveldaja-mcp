@@ -790,7 +790,7 @@ describe("applyReverseChargeAutoDetection (#18)", () => {
     );
     expect(booking.item.reversed_vat_id).toBe(1);
     expect(booking.reverse_charge_reason).toBe("supplier_history");
-    expect(notes).toEqual([]);
+    expect(notes.join(" ")).toMatch(/verify.*KMD row/i);
   });
 
   it("auto-applies reverse-charge from explicit Estonian phrase 'pöördmaksustamise alusel'", () => {
@@ -846,7 +846,7 @@ describe("applyReverseChargeAutoDetection (#18)", () => {
       true,
       notes,
     );
-    expect(booking.item.reversed_vat_id).toBe(1);
+    expect(booking.item.reversed_vat_id).toBe(7);
     expect(booking.reverse_charge_reason).toBe("foreign_supplier_default");
     expect(notes[0]).toContain("USA");
   });
@@ -906,6 +906,74 @@ describe("applyReverseChargeAutoDetection (#18)", () => {
     );
     expect(booking.reverse_charge_reason).toBe("phrase_match");
     expect(notes).toHaveLength(1);
+  });
+
+  it.each([
+    ["USA", undefined, 1, 7], ["GBR", undefined, 2, 8], ["USA", "US123", 3, 9],
+    ["USA", "IE4276970QH", 7, 1], ["DEU", "GB123", 1, 7], ["GBR", "XI123", 8, 2],
+    ["DEU", undefined, 9, 3], ["USA", undefined, 4, 4], ["USA", undefined, 5, 5], ["USA", undefined, 6, 6],
+  ])("R7: history country %s VAT %s option %s selects %s", (country, vat, historical, expected) => {
+    const booking = makeBookingSuggestion(historical);
+    booking.source = "supplier_history";
+    const notes: string[] = [];
+    applyReverseChargeAutoDetection(booking, { raw_text: "Invoice" } as ApplyArgs[1], {
+      found: true, created: false, client: { cl_code_country: country, invoice_vat_no: vat },
+    } as ApplyArgs[2], true, notes);
+    expect(booking.item.reversed_vat_id).toBe(expected);
+    if ([1, 2, 3, 7, 8, 9].includes(expected)) expect(notes.join(" ")).toContain(`KMD row ${expected < 7 ? 6 : 7}`);
+  });
+
+  it.each(["Reverse charge applies", "Plain invoice"])("R7: non-EU automatic option uses KMD row 7: %s", raw_text => {
+    const booking = makeBookingSuggestion();
+    const notes: string[] = [];
+    applyReverseChargeAutoDetection(booking, { raw_text } as ApplyArgs[1], {
+      found: true, created: false, client: { cl_code_country: "USA" },
+    } as ApplyArgs[2], true, notes);
+    expect(booking.item.reversed_vat_id).toBe(7);
+    expect(notes.join(" ")).toContain("KMD row 7");
+  });
+
+  it("R7: an EU VAT number printed on the document wins over a non-EU supplier country", () => {
+    const booking = makeBookingSuggestion();
+    const notes: string[] = [];
+    applyReverseChargeAutoDetection(booking, { raw_text: "Reverse charge applies", supplier_vat_no: "\nIE4276970QH\n" } as ApplyArgs[1], {
+      found: true, created: false, client: { cl_code_country: "USA", invoice_vat_no: null },
+    } as ApplyArgs[2], true, notes);
+    expect(booking.item.reversed_vat_id).toBe(1);
+    expect(notes.join(" ")).toContain("KMD row 6");
+  });
+
+  it("R7: an EU VAT number on the supplier record wins over a non-EU VAT on the document", () => {
+    const booking = makeBookingSuggestion(7);
+    const notes: string[] = [];
+    applyReverseChargeAutoDetection(booking, { raw_text: "Invoice", supplier_vat_no: "GB123456789" } as ApplyArgs[1], {
+      found: true, created: false, client: { cl_code_country: "USA", invoice_vat_no: "IE3668997OH" },
+    } as ApplyArgs[2], true, notes);
+    expect(booking.item.reversed_vat_id).toBe(1);
+  });
+
+  it("R7: unknown region keeps the option and asks to verify the KMD row", () => {
+    const booking = makeBookingSuggestion();
+    const notes: string[] = [];
+    applyReverseChargeAutoDetection(booking, { raw_text: "Reverse charge applies" } as ApplyArgs[1], { found: false, created: false }, true, notes);
+    expect(booking.item.reversed_vat_id).toBe(1);
+    expect(notes.join(" ")).toMatch(/verify.*KMD row/i);
+  });
+
+  it("R7: preserves an explicit local-rule reverse-charge option", () => {
+    const booking = makeBookingSuggestion(1);
+    booking.source = "local_rules";
+    applyReverseChargeAutoDetection(booking, { raw_text: "Reverse charge applies" } as ApplyArgs[1], {
+      found: true, created: false, client: { cl_code_country: "USA" },
+    } as ApplyArgs[2], true, []);
+    expect(booking.item.reversed_vat_id).toBe(1);
+  });
+
+  it("R7: retains the existing non-VAT safeguard for local-rule reverse charge", () => {
+    const booking = makeBookingSuggestion(1);
+    booking.source = "local_rules";
+    applyReverseChargeAutoDetection(booking, { raw_text: "Invoice" } as ApplyArgs[1], { found: false, created: false }, false, []);
+    expect(booking.item.reversed_vat_id).toBeNull();
   });
 });
 

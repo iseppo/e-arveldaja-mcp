@@ -11,6 +11,7 @@ import { toMcpJson, wrapUntrustedOcr, capUntrustedText } from "../mcp-json.js";
 import { desandboxAllStrings, desandboxText, renderExternalEntity, sandboxExternalText } from "../external-text-renderer.js";
 import { isCompanyVatRegistered, resolveCompanyVatStatus } from "../company-vat-status.js";
 import { limitedVatPointOfUseNote, type SupplierFacts } from "../limited-vat.js";
+import { reverseChargeSuggestion } from "../reverse-charge.js";
 import { LIMITED_VAT_GUIDANCE_VERIFIED_AT, LIMITED_VAT_NUMBER_CHECK_URL } from "../limited-vat-guidance.js";
 import { type ApiContext, parseJsonObjectArray, parsePurchaseInvoiceItems, jsonObjectArrayInput, coerceId, tagNotes } from "./crud-tools.js";
 import type { Client, PurchaseInvoice, CreatePurchaseInvoiceData, PurchaseInvoiceItem } from "../types/api.js";
@@ -884,7 +885,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext, run
   );
 
   registerTool(server, "suggest_booking",
-    "Suggest purchase articles, accounts, and VAT settings for a new invoice based on similar confirmed invoices from the same supplier.",
+    "Suggest purchase articles, accounts, and VAT settings for a new invoice based on similar confirmed invoices from the same supplier. Reverse-charge suggestions retain the historical rate/asset class and select KMD row 6 (EU) or 7 (non-EU) by supplier VAT prefix, then country; unknown region needs review. Returned past-invoice VAT options reflect this suggestion, not a change to the saved invoice.",
     {
       clients_id: coerceId.describe("Supplier client ID"),
       description: z.string().optional().describe("Invoice item description to match"),
@@ -927,6 +928,7 @@ interface BookingSuggestionParams {
   clients_id: number;
   description?: string;
   limit?: number;
+  documentVatNo?: string | null;
 }
 
 export interface BookingSuggestionPastInvoiceItem {
@@ -988,7 +990,7 @@ const SUGGEST_BOOKING_MAX_LIMIT = 20;
 
 export async function computeBookingSuggestion(
   api: ApiContext,
-  { clients_id, description, limit }: BookingSuggestionParams,
+  { clients_id, description, limit, documentVatNo }: BookingSuggestionParams,
 ): Promise<BookingSuggestionCore> {
       const maxResults = limit !== undefined && Number.isFinite(limit)
         ? Math.min(SUGGEST_BOOKING_MAX_LIMIT, Math.max(1, Math.floor(limit)))
@@ -1128,6 +1130,15 @@ export async function computeBookingSuggestion(
       // Detection runs on plain strings (supplier name, the description arg,
       // and past-invoice titles) — the resulting note text is server-authored.
       const supplier = await api.clients.get(clients_id).catch(() => null);
+      if (vatStatus === "full") {
+        for (const item of detailed.flatMap(inv => inv.items ?? [])) {
+          if (item.reversed_vat_id !== undefined && item.reversed_vat_id !== null) {
+            const reverse = reverseChargeSuggestion(item.reversed_vat_id, supplier, documentVatNo);
+            item.reversed_vat_id = reverse.id;
+            if (!historyNotes.includes(reverse.note)) historyNotes.push(reverse.note);
+          }
+        }
+      }
       const tax_notes = detectVatDeductionNotes({
         supplierName: supplier?.name,
         descriptions: [

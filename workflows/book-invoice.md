@@ -161,8 +161,9 @@ If there is no suitable basis either way, call `list_purchase_articles` or ask t
 - Do not infer reverse charge from country alone; use explicit invoice wording or confirmed same-kind supplier history, otherwise ask.
 - Estonian reverse-charge rules cover several distinct cases, including EU B2B services with place of supply in Estonia, non-EU services with place of supply in Estonia, intra-community acquisitions of goods, and certain domestic construction/scrap schemes.
 - Reuse a confirmed prior VAT treatment from `suggest_booking` when it clearly fits the same supplier and same kind of transaction.
-- Only carry over `reversed_vat_id: 1` from a past confirmed invoice when the current invoice is the same kind of transaction.
+- Only carry over a reverse-charge option (`reversed_vat_id`) from a past confirmed invoice when the current invoice is the same kind of transaction.
 - Reverse-charge rows use `vat_rate_dropdown: "0"`, `vat_accounts_id: null`, `vat_accounts_dimensions_id: null` and `cl_vat_articles_id: null`; `reversed_vat_id` itself carries the self-assessed rate. Keep the reviewed reverse-charge option (including service/goods choice); a legacy 9% history rate maps option 1 to 2 or 7 to 8. Do not put 24% or 9% in the row's dropdown for reverse charge.
+- For automatic or history-based reverse-charge suggestions, keep the prior rate and asset class but choose the KMD row from the supplier region: EU → row 6 (`reversed_vat_id` 1/2/3); non-EU → row 7 (7/8/9), including non-EU services (RIK #15766149). The supplier VAT-number prefix wins over its country; with no VAT number use the client's ISO3 country. Treat XI as EU. IDs 4/5/6 stay unchanged. An unknown region keeps the prior/default option and requires checking the KMD row. Show the chosen KMD row on the approval card. Preserve explicit owner or local-rule values.
 - If the VAT treatment is unclear from the document and prior confirmed history, stop and ask the user instead of guessing.
 
 ## Step 9: Derive the remaining invoice fields

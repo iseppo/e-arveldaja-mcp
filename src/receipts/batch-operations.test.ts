@@ -33,6 +33,7 @@ import { firstText } from "../__fixtures__/mcp-result.js";
 import { sanitizeReceiptResultForOutput } from "../tools/receipt-inbox-output.js";
 import { receiptAttachmentDigestStore } from "./attachment-digest-store.js";
 import { createHash } from "crypto";
+import * as accountingRules from "../accounting-rules.js";
 
 // The typed operation is exercised DIRECTLY (no mock McpServer): narrow api / fs
 // / OCR ports only. These pin the staged-approval invariants the refactor must
@@ -388,6 +389,29 @@ describe("actual attachment transport through approved receipt batch plans", () 
 beforeEach(() => {
   primeFilesystem();
   primeExtraction();
+});
+
+it.each(["history", "phrase", "local_rule"] as const)("R7: batch create uses regional reverse charge and preserves explicit rules (%s)", async source => {
+  const fields = extractReceiptFieldsFromText("ignored", "receipt.pdf");
+  vi.mocked(extractReceiptFieldsFromText).mockReturnValue({ ...fields, total_net: 100, total_vat: 0, total_gross: 100, raw_text: "Reverse charge applies" });
+  vi.mocked(resolveSupplierInternal).mockResolvedValue({ found: true, created: false, client: { id: 7, name: "Supplier Inc", cl_code_country: "USA" } } as never);
+  vi.mocked(suggestBookingInternal).mockResolvedValue({
+    source: source === "history" ? "supplier_history" : "fallback",
+    item: { custom_title: "Service", amount: 1, cl_purchase_articles_id: 501, purchase_accounts_id: 5230,
+      vat_rate_dropdown: "24", ...(source === "history" ? { reversed_vat_id: 1 } : {}) },
+  });
+  const rule = vi.spyOn(accountingRules, "findAutoBookingRule").mockReturnValue(source === "local_rule"
+    ? { match: "supplier", purchase_account_id: 5230, reversed_vat_id: 1 } : undefined);
+  try {
+    const { api, spies } = makeApi();
+    const ops = makeOperations(api);
+    const plan = await dryRunPlan(ops);
+    const result = await ops.runBatch({ ...baseRun, executionMode: "create", dryRun: false, approvedManifest: plan.manifest, planHandle: plan.planHandles.create });
+    if (!result.ok) throw new Error(result.error.code);
+    expect(spies.createAndSetTotals).toHaveBeenCalledTimes(1);
+    expect(spies.createAndSetTotals.mock.calls[0]![0].items[0]).toMatchObject({ reversed_vat_id: source === "local_rule" ? 1 : 7 });
+    if (source !== "local_rule") expect(result.value.results[0]!.notes.join(" ")).toContain("KMD row 7");
+  } finally { rule.mockRestore(); }
 });
 
 it("carries the document's cart number into the created invoice's notes (okt 2026 finding 5)", async () => {

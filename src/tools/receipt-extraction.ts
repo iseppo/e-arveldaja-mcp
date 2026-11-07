@@ -1158,7 +1158,7 @@ const REVERSE_CHARGE_PHRASES_RE =
 
 /**
  * Detect explicit reverse-charge language in raw OCR text. Used by the
- * receipt-batch flow to set `reversed_vat_id=1` on booking suggestions
+ * receipt-batch flow to set a supplier-region-specific `reversed_vat_id` on booking suggestions
  * automatically (issue #18). Phrase coverage is the high-precision signal;
  * a foreign-supplier heuristic can be applied separately as a backstop.
  */

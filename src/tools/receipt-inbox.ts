@@ -19,6 +19,7 @@ import { bankTransactionDirection } from "../bank-transaction-direction.js";
 import { type ApiContext, jsonObjectOrArrayInput, coerceId } from "./crud-tools.js";
 import { getPurchaseArticlesWithVat } from "./purchase-vat-defaults.js";
 import { normalizeVatValue } from "../document-identifiers.js";
+import { reverseChargeSuggestion } from "../reverse-charge.js";
 import { normalizeCompanyName, sameCompanyIdentity } from "../company-name.js";
 import { CREATION_GATING_EXTRACTION_SIGNALS, TEXT_HAZARD_GATING_SIGNALS, type ExtractionConfidenceSignals, type InvoiceExtractionFallback } from "../invoice-extraction-fallback.js";
 import {
@@ -647,15 +648,21 @@ export async function resolveClassificationSuggestion(
       sample.description ?? group.display_counterparty,
     );
     if (bookingSuggestion?.source === "supplier_history") {
+      const reverseId = bookingSuggestion.item.reversed_vat_id;
+      let reverseNote: string | undefined;
+      if (reverseId !== undefined && reverseId !== null) {
+        const reverse = reverseChargeSuggestion(reverseId, supplierResolution.client);
+        bookingSuggestion.item.reversed_vat_id = reverse.id;
+        reverseNote = reverse.note;
+      }
+      const suggestion = buildClassificationSuggestion(
+        context.purchaseArticlesWithVat, context.accounts, classification.category,
+        group.normalized_counterparty, { bookingSuggestion },
+      );
+      if (reverseNote) suggestion.reason += ` ${reverseNote}`;
       return {
         applyMode: classification.apply_mode,
-        suggestion: buildClassificationSuggestion(
-          context.purchaseArticlesWithVat,
-          context.accounts,
-          classification.category,
-          group.normalized_counterparty,
-          { bookingSuggestion },
-        ),
+        suggestion,
       };
     }
   }
@@ -865,8 +872,8 @@ export async function loadOwnCompanyIdentity(
  * Auto-detect reverse-charge VAT and apply it to a booking suggestion (#18).
  *
  * Precedence:
- *  1. If supplier history (or local rules) already set `reversed_vat_id`,
- *     keep it — the call site has the strongest signal.
+ *  1. Keep explicit local-rule options. Supplier history keeps its rate/asset
+ *     class, while the supplier VAT prefix (then country) decides KMD row 6/7.
  *  2. Otherwise, an explicit reverse-charge phrase in OCR text wins
  *     (`reverse charge`, `pöördmaksustamine`, `Steuerschuldnerschaft des
  *     Leistungsempfängers`, …).
@@ -885,6 +892,12 @@ export function applyReverseChargeAutoDetection(
   isVatRegistered: boolean,
   notes: string[],
 ): void {
+  const supplier = supplierResolution.client ?? supplierResolution.preview_client;
+  const applyRegion = (id: number): string => {
+    const reverse = reverseChargeSuggestion(id, supplier, extracted.supplier_vat_no);
+    bookingSuggestion.item.reversed_vat_id = reverse.id;
+    return reverse.note;
+  };
   // Case 1: history / local rule already decided.
   if (bookingSuggestion.item.reversed_vat_id !== undefined &&
       bookingSuggestion.item.reversed_vat_id !== null) {
@@ -897,6 +910,10 @@ export function applyReverseChargeAutoDetection(
       notes.push("Reverse charge from supplier history was not applied: the company is not fully VAT-registered (no input-VAT deduction).");
       return;
     }
+    // Local-rule values are owner choices, not automatic suggestions.
+    if (bookingSuggestion.source !== "local_rules") {
+      notes.push(applyRegion(bookingSuggestion.item.reversed_vat_id));
+    }
     bookingSuggestion.reverse_charge_reason = "supplier_history";
     return;
   }
@@ -904,10 +921,10 @@ export function applyReverseChargeAutoDetection(
   // Case 2: phrase match. Like the foreign default, only meaningful for a
   // VAT-registered company (reverse charge is self-assessed input/output VAT).
   if (isVatRegistered && detectReverseChargeFromText(extracted.raw_text)) {
-    bookingSuggestion.item.reversed_vat_id = 1;
+    const regionNote = applyRegion(1);
     bookingSuggestion.reverse_charge_reason = "phrase_match";
     notes.push(
-      "Reverse-charge VAT auto-applied from explicit phrase in invoice text (#18). Verify the booking before confirming.",
+      `Reverse-charge VAT auto-applied from explicit phrase in invoice text (#18). ${regionNote} Verify the booking before confirming.`,
     );
     return;
   }
@@ -918,10 +935,10 @@ export function applyReverseChargeAutoDetection(
   const supplierCountry =
     supplierResolution.client?.cl_code_country ?? supplierResolution.preview_client?.cl_code_country;
   if (isVatRegistered && supplierCountry && supplierCountry !== "EST") {
-    bookingSuggestion.item.reversed_vat_id = 1;
+    const regionNote = applyRegion(1);
     bookingSuggestion.reverse_charge_reason = "foreign_supplier_default";
     notes.push(
-      `Reverse-charge VAT auto-applied as foreign-supplier default (supplier country: ${supplierCountry}). Override if the invoice is for goods imports rather than services (#18).`,
+      `Reverse-charge VAT auto-applied as foreign-supplier default (supplier country: ${supplierCountry}). ${regionNote} Override if the invoice is for goods imports rather than services (#18).`,
     );
     return;
   }

@@ -348,6 +348,23 @@ it("M4: checksum-proven incoming after creation leaves the draft unconfirmed", a
   expect(outcome.value.results[0]).toMatchObject({ status: "failed", created_invoice_ids: [9001], partial_mutations: [{ created_invoice_id: 9001, failed_stage: "transaction_drift", created_invoice_status: "PROJECT" }] });
 });
 
+it("R7: classification execution corrects a non-EU supplier's historical reverse-charge option", async () => {
+  const { operations, api } = makeSaasOperations(SAAS_TX, {
+    allowWrites: true,
+    clientRows: [{ ...SAAS_CLIENT, cl_code_country: "USA", invoice_vat_no: null }],
+    purchaseInvoiceDetails: { 88: { ...SAAS_HISTORY_DETAILS[88], items: [{ ...SAAS_HISTORY_DETAILS[88].items[0], reversed_vat_id: 1 }] } },
+  });
+  const dryRun = await operations.applyClassifications({ classificationsJson: { groups: [saasGroup()] } });
+  if (!dryRun.ok || dryRun.value.planHandle === undefined) throw new Error("dry run failed");
+  expect(dryRun.value.results[0]!.notes.join(" ")).toContain("KMD row 7");
+  const planHandle = dryRun.value.planHandle;
+  const outcome = await operations.applyClassifications({ classificationsJson: { groups: [saasGroup()] }, execute: true, planHandle });
+  if (!outcome.ok) throw new Error(outcome.error.code);
+  expect(api.purchaseInvoices.createAndSetTotals).toHaveBeenCalledTimes(1);
+  expect(api.purchaseInvoices.createAndSetTotals.mock.calls[0]![0].items[0]).toMatchObject({ reversed_vat_id: 7, vat_rate_dropdown: "24" });
+  expect(outcome.value.results[0]!.notes.join(" ")).toContain("KMD row 7");
+});
+
 it("a non-VAT company auto-books the folded gross, never the net derived from the history VAT rate or a reverse charge", async () => {
   for (const historyItem of [SAAS_HISTORY_DETAILS[88].items[0], { ...SAAS_HISTORY_DETAILS[88].items[0], reversed_vat_id: 1 }]) {
     const { operations, api } = makeSaasOperations(SAAS_TX, {

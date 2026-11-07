@@ -1476,6 +1476,9 @@ class ClassificationOperationsImpl implements ClassificationOperations {
           if (!isVatRegistered && resolved.suggestion.reversed_vat_id !== undefined && resolved.suggestion.reversed_vat_id !== null) {
             notes.push(`Transaction ${transaction.id}: reverse charge from supplier history was not applied — the company is not fully VAT-registered (no input-VAT deduction).`);
           }
+          if (isVatRegistered && resolved.suggestion.source === "supplier_history" && resolved.suggestion.reversed_vat_id != null) {
+            notes.push(`Transaction ${transaction.id}: ${resolved.suggestion.reason}`);
+          }
           const netAmount = deriveAutoBookedNetAmount(grossAmount, vatConfig);
           const purchaseItem = applyPurchaseVatDefaults(
             purchaseArticlesWithVat,

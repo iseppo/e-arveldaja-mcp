@@ -197,7 +197,7 @@ describe("company VAT status", () => {
     applyReverseChargeAutoDetection(fromHistory, { raw_text: "" } as Parameters<typeof applyReverseChargeAutoDetection>[1], resolution, false, notes);
     expect(fromHistory.item.reversed_vat_id).toBeNull();
     applyReverseChargeAutoDetection(suggestion, { raw_text: "" } as Parameters<typeof applyReverseChargeAutoDetection>[1], resolution, true, notes);
-    expect(suggestion.item.reversed_vat_id).toBe(1);
+    expect(suggestion.item.reversed_vat_id).toBe(7);
   });
 });
 

@@ -2,8 +2,8 @@
   "profile": "standard",
   "measurement": {
     "toolCount": 128,
-    "toolsListBytes": 154449,
-    "descriptionsBytes": 23876,
+    "toolsListBytes": 154716,
+    "descriptionsBytes": 24143,
     "inputSchemasBytes": 99757,
     "largestTool": {
       "name": "import_wise_transactions",
@@ -3525,7 +3525,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Suggest purchase articles, accounts, and VAT settings for a new invoice based on similar confirmed invoices from the same supplier.",
+      "description": "Suggest purchase articles, accounts, and VAT settings for a new invoice based on similar confirmed invoices from the same supplier. Reverse-charge suggestions retain the historical rate/asset class and select KMD row 6 (EU) or 7 (non-EU) by supplier VAT prefix, then country; unknown region needs review. Returned past-invoice VAT options reflect this suggestion, not a change to the saved invoice.",
       "execution": {
         "taskSupport": "forbidden"
       },

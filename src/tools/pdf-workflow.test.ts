@@ -625,6 +625,16 @@ describe("pdf workflow tools", () => {
     expect(fullPayload.past_invoices[0]!.items![0]!.reversed_vat_id).toBe(1);
   });
 
+  it("R7: suggest_booking corrects the non-EU row while retaining the historical rate and asset class", async () => {
+    const { handler } = setupPdfWorkflowTool("suggest_booking", {
+      purchaseInvoices: { get: vi.fn().mockResolvedValue({ id: 1, items: [{ custom_title: "Cloud", reversed_vat_id: 3, vat_rate_dropdown: "24" }] }) },
+      clients: { get: vi.fn().mockResolvedValue({ id: 7, name: "Cloud Inc", cl_code_country: "USA" }) },
+    });
+    const payload = parseToolPayload<SuggestBookingPayload>((await handler({ clients_id: 7 })).content[0]!.text);
+    expect(payload.past_invoices[0]!.items![0]).toMatchObject({ reversed_vat_id: 9, vat_rate_dropdown: "24" });
+    expect(payload.notes?.join(" ")).toContain("KMD row 7");
+  });
+
   it("returns the historical vat_accounts_dimensions_id for reuse (P10)", async () => {
     const { handler } = setupPdfWorkflowTool("suggest_booking", {
       purchaseInvoices: {
