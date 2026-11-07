@@ -71,9 +71,19 @@ Capability condition for `standard`: inspect the connected MCP server's advertis
 
 ## Step 1: Check VAT registration
 
-Call `get_vat_info` first to confirm whether this company is currently VAT-registered.
+Establish the company's resolved VAT status (`none`, `limited`, `full` or `unknown`) before choosing a VAT treatment. Never infer `full` from a VAT number: `get_vat_info` alone cannot distinguish full from limited registration.
+<!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:standard -->
+<!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:limited-vat -->
+Capability condition for `limited-vat`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `limited_vat`. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.
 
-Use that status when deciding which VAT treatments are valid. A non-VAT company may keep VAT folded (no VAT account, article 11, rate `"-"`, invoice VAT 0 — an exception to the exact document VAT) or book non-deductible VAT on EUR invoices: VAT account and dimension equal the item's own cost account and dimension, article 11, one document rate, invoice `vat_price` equal to the document VAT. The chart must say `is_vat_account: false`; never use 1510. Only the last row may absorb one cent; do not supply row `vat_amount`.
+Call `limited_vat` with `mode: "status"` to resolve the company's status and its evidence. If it returns `unknown`, follow its recovery guidance; any owner-confirmed status change uses the tool's approved `set_status` preview/execute flow.
+<!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:limited-vat -->
+<!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:standard -->
+Capability condition for `standard`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `extract_pdf_invoice`. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.
+
+If the status-resolution tool is unavailable, use `get_vat_info` only as raw VAT-number information and ask the owner for evidence of full versus limited registration; restore the status-resolution capability if needed. If status remains unknown, stop before choosing VAT treatment or asking for booking approval.
+
+Only resolved `full` status permits ordinary input-VAT deduction, subject to the document and tax restrictions below. For `none` or `limited`, use non-deductible treatment: keep VAT folded (no VAT account, article 11, rate `"-"`, invoice VAT 0 — an exception to the exact document VAT) or book non-deductible VAT on EUR invoices: VAT account and dimension equal the item's own cost account and dimension, article 11, one document rate, invoice `vat_price` equal to the document VAT. The chart must say `is_vat_account: false`; never use 1510. Only the last row may absorb one cent; do not supply row `vat_amount`.
 
 ## Step 2: Extract the document text
 
@@ -157,7 +167,7 @@ Review `past_invoices` and reuse the most relevant:
 - `purchase_accounts_dimensions_id` (required when the account has sub-accounts, alamkontod)
 - VAT fields such as `vat_rate_dropdown`, `vat_accounts_id`, `vat_accounts_dimensions_id`, `cl_vat_articles_id`, `reversed_vat_id`
 
-For a non-VAT company, review which of the two forms the document supports before copying VAT fields: a document with no VAT stays folded. Rows carrying a VAT account must pass the non-deductible proof again before confirmation; edit unsupported rows in e-arveldaja or recreate the draft.
+For status `none` or `limited`, review which of the two non-deductible forms in step 1 the document supports before copying VAT fields: a document with no VAT stays folded. Rows carrying a VAT account must pass the non-deductible proof again before confirmation; edit unsupported rows in e-arveldaja or recreate the draft.
 
 `suggest_booking` returns the historical `vat_accounts_dimensions_id` last used for this supplier's VAT account (and `purchase_accounts_dimensions_id` for the expense account). Reuse it — but do NOT guess a dimension you do not have:
 - If the account carries dimensions (alamkontod) but the returned history has no dimension id for it (the dimension is missing), call `list_account_dimensions` for that account and confirm the correct dimension with the operator.
@@ -186,16 +196,16 @@ Capability condition for `standard`: inspect the connected MCP server's advertis
 
 ## Step 8: Determine VAT treatment
 
-- Take the VAT-registration status from step 1 into account.
+- Use the resolved VAT status from step 1: only `full` permits ordinary deduction or these reverse-charge options; `none` and `limited` use non-deductible treatment, including domestic purchases.
 - Honor any `tax_notes` from step 7 here: an entertainment note means input VAT is non-deductible; a passenger-car note caps deduction at 50%.
-- For normal domestic invoices, keep the VAT treatment shown on the document.
+- For normal domestic invoices, keep the printed VAT rate and amounts, but allow input-VAT deduction only for resolved `full` status.
 - A `mixed_vat_rates` warning (extraction `mixed_vat_rates.proven: true`) means the document prints a VAT breakdown by rate, for example a non-taxed repair-fund line next to a 24 % line. For a VAT-registered company book one item per printed line: the non-taxed line first at `vat_rate_dropdown: "-"` (no input VAT, same cost account), the rated line last at its rate; the invoice `vat_price` and `gross_price` stay the printed totals. A non-VAT company keeps the folded single item. A breakdown that does not add up is `mixed_vat_rate_review`: check the document before booking.
 - Do not infer reverse charge from country alone; use explicit invoice wording or confirmed same-kind supplier history, otherwise ask.
 - Estonian reverse-charge rules cover several distinct cases, including EU B2B services with place of supply in Estonia, non-EU services with place of supply in Estonia, intra-community acquisitions of goods, and certain domestic construction/scrap schemes.
 - Reuse a confirmed prior VAT treatment from `suggest_booking` when it clearly fits the same supplier and same kind of transaction.
 - Only carry over a reverse-charge option (`reversed_vat_id`) from a past confirmed invoice when the current invoice is the same kind of transaction.
 - Reverse-charge rows use `vat_rate_dropdown: "0"`, `vat_accounts_id: null`, `vat_accounts_dimensions_id: null` and `cl_vat_articles_id: null`; `reversed_vat_id` itself carries the self-assessed rate. Keep the reviewed reverse-charge option (including service/goods choice); a legacy 9% history rate maps option 1 to 2 or 7 to 8. Do not put 24% or 9% in the row's dropdown for reverse charge.
-- For automatic or history-based reverse-charge suggestions, keep the prior rate and asset class but choose the KMD row from the supplier region: EU → row 6 (`reversed_vat_id` 1/2/3); non-EU → row 7 (7/8/9), including non-EU services (RIK #15766149). The supplier VAT-number prefix wins over its country; with no VAT number use the client's ISO3 country. Treat XI as EU. IDs 4/5/6 stay unchanged. An unknown region keeps the prior/default option and requires checking the KMD row. Show the chosen KMD row on the approval card. Preserve explicit owner or local-rule values.
+- For automatic or history-based reverse-charge suggestions, keep the prior rate and asset class but inspect BOTH the current invoice's VAT number and the supplier record's VAT number before choosing the KMD row. An EU member-state VAT prefix (including XI) on EITHER the current invoice OR the supplier record selects EU row 6 (`reversed_vat_id` 1/2/3), regardless of the stored country; otherwise use a non-EU VAT prefix, then the client's ISO3 country only when neither has a VAT number. `EU…` OSS numbers are non-EU prefixes, not EU member-state VAT numbers. Non-EU selects row 7 (7/8/9), including non-EU services (RIK #15766149). `suggest_booking` does not receive the current document VAT number, so check its suggested row against the invoice before reusing it. IDs 4/5/6 stay unchanged. An unknown region keeps the prior/default option and requires checking the KMD row. Show the chosen KMD row on the approval card. Preserve explicit owner or local-rule values.
 - If the VAT treatment is unclear from the document and prior confirmed history, stop and ask the user instead of guessing.
 
 ## Step 9: Derive the remaining invoice fields

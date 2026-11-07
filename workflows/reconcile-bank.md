@@ -168,8 +168,13 @@ Review the results:
   - <!-- E_ARVELDAJA_FEATURE_START:guided -->`ambiguous_refless` (`ambiguous_refless_more` counts the unshown rows of every code in this list, not only this one)<!-- E_ARVELDAJA_FEATURE_END:guided --><!-- E_ARVELDAJA_FEATURE_START:standard -->Without a code<!-- E_ARVELDAJA_FEATURE_END:standard -->: a same-key journal or several possible target accounts; follow the row's `reason`.
 
 Ask for approval. If the user does not explicitly approve, stop — the plan handle is not approval. If approved, call `reconcile_bank_transactions` with `mode: "execute_inter_account"` and `plan_handle` set to the handle from the reviewed dry run (required; consumed once). Pass the same `target_accounts_dimensions_id` / `max_date_gap` / `delete_proposed_mirrors` / `keep_side` as the dry run, or the plan is refused with `plan_drift`.
+<!-- E_ARVELDAJA_FEATURE_START:standard -->
 - After execute, inspect the execution report (`status`, `command_partitions`, `stop_reason`) — on a partial execution do not retry automatically, re-run the dry run.
 - In `pairs`, `incoming_action: "deleted"` is normal; `incoming_action: "orphan"` means the duplicate incoming row could not be deleted and needs explicit follow-up.
+<!-- E_ARVELDAJA_FEATURE_END:standard -->
+<!-- E_ARVELDAJA_FEATURE_START:guided -->
+- After inter-account execute, inspect `summary.status`, `summary.blockers` and `summary.warnings`. Follow `summary.details` with `get_operation_result_page`, using its supplied arguments and every `next_cursor`, to inspect affected rows when details are available. A `partial` status or undeleted-mirror warning needs explicit follow-up; do not retry automatically, re-run the inter-account dry run for a fresh plan.
+<!-- E_ARVELDAJA_FEATURE_END:guided -->
 
 **WARNING:** Do not manually confirm Wise-side transfers that were already confirmed via the other bank's CAMT import — this creates duplicate journal entries.
 

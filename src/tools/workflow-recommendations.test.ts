@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { parseMcpResponse } from "../mcp-json.js";
+import { parseToolPayload } from "../__fixtures__/mcp-response.js";
+import type { toolResponseEnvelope } from "../tool-response.js";
 import { registerWorkflowRecommendationTools } from "./workflow-recommendations.js";
 import type { ToolExposureConfig } from "../config.js";
 import { ESTONIAN_VAT_METADATA, VAT_REGISTRATION_THRESHOLD_DISPLAY } from "../estonian-tax-rules.js";
@@ -338,24 +340,38 @@ describe("recommend_workflow", () => {
     expect(recommended.recommended_workflow?.id).not.toBe("vat-registration-threshold");
   });
 
-  it("starts book-invoice recommendations with current VAT status before extraction", async () => {
+  it.each(["standard", "full"] as const)("resolves book-invoice VAT status through limited_vat before extraction on %s", async (profile) => {
     const { handler } = getRecommendWorkflowHarness();
 
-    const result = await handler({ goal: "book this supplier invoice PDF" });
-    const payload = parseMcpResponse(result.content[0]!.text) as Record<string, any>;
+    const result = await runWithToolProfile(profile, () => handler({ goal: "book this supplier invoice PDF" }));
+    const payload = parseToolPayload<ReturnType<typeof toolResponseEnvelope>>(result.content[0]!.text);
 
     expect(payload.recommended_workflow).toMatchObject({
       id: "book-invoice",
     });
-    expect(payload.raw.primary_tools[0]).toBe("get_vat_info");
-    expect(payload.next_actions[0]).toMatchObject({
-      tool: "get_vat_info",
-      args: {},
-    });
-    expect(payload.next_actions[1]).toMatchObject({
+    expect(payload.raw).toMatchObject({ primary_tools: expect.arrayContaining(["limited_vat"]) });
+    expect(payload.next_actions).toMatchObject([{
+      tool: "limited_vat",
+      args: { mode: "status" },
+      why: expect.stringContaining("none/limited/full"),
+    }, {
       tool: "extract_pdf_invoice",
       args: { file_path: "<absolute invoice PDF/image path>" },
-    });
+    }]);
+  });
+
+  it.each(["standard", "custom"] as const)("does not claim get_vat_info resolves full versus limited status when tax tools are disabled on %s", async (profile) => {
+    const { handler } = getRecommendWorkflowHarness({ enableTaxTools: false });
+    const result = await runWithToolProfile(profile, () => handler({ goal: "book this supplier invoice PDF" }));
+    const payload = parseToolPayload<ReturnType<typeof toolResponseEnvelope>>(result.content[0]!.text);
+    expect(payload.next_actions).toMatchObject([{
+      tool: "get_vat_info", args: {},
+      why: expect.stringContaining("cannot distinguish full from limited"),
+    }, {
+      tool: "extract_pdf_invoice",
+      why: expect.stringContaining("resolve unknown VAT status before approving VAT treatment"),
+    }]);
+    expect(payload.next_actions).not.toContainEqual(expect.objectContaining({ tool: "limited_vat" }));
   });
   interface CompactWorkflow { id: string; prompt: string; default_mode: string; primary_tools: string[]; required_inputs: string[] }
   interface RecommendPayload {
