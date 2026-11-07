@@ -928,6 +928,7 @@ interface BookingSuggestionParams {
   clients_id: number;
   description?: string;
   limit?: number;
+  documentVatNo?: string | null;
 }
 
 export interface BookingSuggestionPastInvoiceItem {
@@ -989,7 +990,7 @@ const SUGGEST_BOOKING_MAX_LIMIT = 20;
 
 export async function computeBookingSuggestion(
   api: ApiContext,
-  { clients_id, description, limit }: BookingSuggestionParams,
+  { clients_id, description, limit, documentVatNo }: BookingSuggestionParams,
 ): Promise<BookingSuggestionCore> {
       const maxResults = limit !== undefined && Number.isFinite(limit)
         ? Math.min(SUGGEST_BOOKING_MAX_LIMIT, Math.max(1, Math.floor(limit)))
@@ -1132,7 +1133,7 @@ export async function computeBookingSuggestion(
       if (vatStatus === "full") {
         for (const item of detailed.flatMap(inv => inv.items ?? [])) {
           if (item.reversed_vat_id !== undefined && item.reversed_vat_id !== null) {
-            const reverse = reverseChargeSuggestion(item.reversed_vat_id, supplier);
+            const reverse = reverseChargeSuggestion(item.reversed_vat_id, supplier, documentVatNo);
             item.reversed_vat_id = reverse.id;
             if (!historyNotes.includes(reverse.note)) historyNotes.push(reverse.note);
           }

@@ -77,6 +77,24 @@ afterEach(() => { vi.clearAllMocks(); });
 beforeEach(() => { mockedParseDocument.mockResolvedValue(docWithRegCode()); });
 
 describe("AccountingDocumentOperations.prepare", () => {
+  it("R7-DOC: document review uses printed Irish VAT when a USA supplier has no stored VAT", async () => {
+    mockedParseDocument.mockResolvedValue(parseOfLines([
+      "ACME OÜ", "Reg. nr 17487472", "VAT IE1234567T", "Arve INV-1", "Total EUR 100.00", "Reverse charge applies",
+    ]));
+    const { path } = writeTempPdf();
+    const supplier = fixtureClient({ id: 4242, name: "ACME OÜ", code: REG_CODE, is_supplier: true, cl_code_country: "USA", invoice_vat_no: null });
+    const { ops } = setup({
+      clientRows: [supplier],
+      purchaseInvoiceRows: [{ id: 10, clients_id: 4242, number: "H-1", status: "CONFIRMED", create_date: "2026-01-10" }],
+      purchaseInvoiceDetails: { 10: { id: 10, items: [{ custom_title: "Service", purchase_accounts_id: 5000, total_net_price: 100, vat_rate_dropdown: "24", reversed_vat_id: 1 }] } },
+      clients: { get: vi.fn().mockResolvedValue(supplier) },
+    });
+    const outcome = await ops.prepare({ source: { file_path: path } });
+    if (!outcome.ok) throw new Error(outcome.error.message);
+    expect(outcome.value.supplierResolution.status).toBe("resolved");
+    expect(outcome.value.proposedBooking?.past_invoices[0]?.items?.[0]).toMatchObject({ reversed_vat_id: 1, vat_rate_dropdown: "24", total_net_price: 100 });
+  });
+
   it("returns a compact extraction preview with NO raw OCR text and NO create plan handle (P0-1: an OCR preview is not create approval)", async () => {
     const { path } = writeTempPdf();
     const { ops } = setup({ clientRows: [], purchaseInvoiceRows: [] });

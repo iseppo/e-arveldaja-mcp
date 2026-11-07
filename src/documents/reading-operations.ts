@@ -1122,7 +1122,7 @@ class ReadingDocumentOperations {
       if (supplierClient?.id !== undefined) {
         isVatReg = await isCompanyVatRegistered(this.api, { purchaseDate: values.invoice_date });
         knownIban = sameIban(values.supplier_iban, supplierClient.bank_account_no) ? values.supplier_iban ?? undefined : undefined;
-        const suggestion = await computeBookingSuggestion(this.api, { clients_id: supplierClient.id, description: currentDescription(input.booking) });
+        const suggestion = await computeBookingSuggestion(this.api, { clients_id: supplierClient.id, description: currentDescription(input.booking), documentVatNo: values.supplier_vat });
         bookingNotes = decisionNotes(suggestion);
         itemsSource = await resolveItemsSource(this.api, supplierClient.id, input.booking, suggestion);
         dimensionChoiceRequired = requiredDimensionChoices(suggestion, itemsSource);
@@ -1357,6 +1357,7 @@ class ReadingDocumentOperations {
           const suggestion = await computeBookingSuggestion(this.api, {
             clients_id: plan.supplier_client_id,
             description: currentDescription({ ...bookingInput, items: "items" in source ? source.items : [source.template] }),
+            documentVatNo: final.supplier_vat,
           });
           if (canonicalPlanJson(decisionNotes(suggestion)) !== canonicalPlanJson(plan.booking_notes) || requiredDimensionChoices(suggestion, source).length) {
             holds.push({ code: "reading_booking_drift" });

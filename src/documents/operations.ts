@@ -547,7 +547,7 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
 
       // Proposed booking — ONLY when the supplier resolved uniquely.
       const proposedBooking = resolvedClientId !== undefined
-        ? await computeBookingSuggestion(this.api, { clients_id: resolvedClientId, description: extracted.description })
+        ? await computeBookingSuggestion(this.api, { clients_id: resolvedClientId, description: extracted.description, documentVatNo: extracted.supplier_vat_no })
         : undefined;
 
       // Blockers / warnings surfaced compactly.

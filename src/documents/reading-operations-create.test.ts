@@ -14,7 +14,7 @@ import type { BlankLeaderProof, LostValueSeam } from "./lost-value-ocr.js";
 import { fakeSeam, LOST_DOTS, lostValueLines, lostValueParse, ocrRow, PLAIN_PDF, type LostRow } from "../__fixtures__/document-reading/lost-value.js";
 import {
   BASE_LINES, FIXTURE_NOW, HISTORY_DETAIL, HISTORY_INVOICE, packetFor, readingApi, readingFor, readingParse, SUPPLIER_ID, type ReadingCaseInput,
-  served,
+  served, ownClient, supplierClient,
 } from "../__fixtures__/document-reading/verified-draft.js";
 
 vi.mock("../audit-log.js", () => ({ logAudit: vi.fn() }));
@@ -111,6 +111,32 @@ beforeEach(() => {
 afterEach(() => { vi.useRealTimers(); vi.clearAllMocks(); });
 
 describe("reading create", () => {
+  it("R7-DOC: verify and create keep EU reverse charge for printed Irish VAT on a USA supplier with no stored VAT", async () => {
+    const w = world();
+    const supplier = { ...supplierClient(), cl_code_country: "USA", invoice_vat_no: null };
+    w.api.clients.listAll.mockResolvedValue([ownClient(), supplier]);
+    w.api.clients.get.mockImplementation(async (id: number) => id === SUPPLIER_ID ? supplier : ownClient());
+    w.details[HISTORY_INVOICE.id] = { ...HISTORY_DETAIL, items: [{ ...HISTORY_DETAIL.items[0]!, reversed_vat_id: 1 }] };
+    const lines = [...BASE_LINES.map(line => line.replace("EE100000007", "IE1234567T").replace("KM 24% 24,00", "KM 0% 0,00").replace("124,00", "100,00")), "Reverse charge applies"];
+    mockedParse.mockResolvedValue(readingParse(lines));
+    const file = writePdf("%PDF R7-DOC printed Irish VAT");
+    const verify = await verified(w, file, {
+      values: { supplier_vat: "IE1234567T", vat: 0, gross: 100 },
+      evidence: {
+        supplier_vat: { line: "p1:002", quote: "KMKR IE1234567T" },
+        vat: { line: "p1:006", quote: "KM 0% 0,00" },
+        gross: { line: "p1:007", quote: "Kokku EUR 100,00" },
+      },
+    }, lines);
+    expect(verify.status).toBe("ready");
+    const outcome = await create(w, file, verify.planHandle!);
+    expect(outcome).toMatchObject({ ok: true, value: { status: "created" } });
+    expect(w.createAndSetTotals).toHaveBeenCalledTimes(1);
+    expect(w.createAndSetTotals.mock.calls[0]![0]).toMatchObject({ items: [expect.objectContaining({ reversed_vat_id: 1, total_net_price: 100, vat_rate_dropdown: "24" })] });
+    expect(w.createAndSetTotals.mock.calls[0]!.slice(1, 3)).toEqual([0, 100]);
+    expect(verify.bookingNotes?.history_notes.join(" ")).toContain("KMD row 6");
+  });
+
   it("books the history invoice's payable account (2350), not the default 2310, through verify and create", async () => {
     const w = world();
     w.details[HISTORY_INVOICE.id] = { ...HISTORY_DETAIL, liability_accounts_id: 2350 };
