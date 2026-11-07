@@ -451,16 +451,31 @@ export function limitedVatJournalProblem(journal: Journal, effectiveDate: string
   return undefined;
 }
 
+/**
+ * A lone `PKM-YYYY-MM` journal with no booking record (booked by hand, or the
+ * record write was lost) whose postings equal the full proposal. Adopting it
+ * stores a booking record binding these invoices and postings, so later late
+ * invoices become `-Pn` deltas instead of a permanent conflict.
+ */
+export interface LimitedVatAdoption {
+  journal_id: number;
+  document_number: string;
+  effective_date: string;
+  invoice_ids: number[];
+  postings: string[];
+}
+
 export type LimitedVatMonthState =
   | { kind: "new"; document_number: string; invoices: LimitedVatIncludedInvoice[] }
   | { kind: "delta"; document_number: string; invoices: LimitedVatIncludedInvoice[]; booked_journal_ids: number[] }
-  | { kind: "already_booked"; journal_ids: number[] }
+  | { kind: "already_booked"; journal_ids: number[]; adopt?: LimitedVatAdoption }
   | { kind: "conflict"; journal_ids: number[]; reason: string };
 
 /**
  * The idempotency state of the month: no live `PKM-YYYY-MM[-Pn]` journal →
  * `new`; every live journal matches its stored booking record (or a lone
- * unrecorded main journal equals the full proposal) and the booked invoices
+ * unrecorded main journal equals the full proposal — `already_booked` with
+ * `adopt`, to be recorded on approval) and the booked invoices
  * still compute the recorded amounts → `already_booked`, or `delta` for
  * invoices added since; anything else → `conflict` (never a second full journal).
  */
@@ -491,7 +506,11 @@ export function resolveLimitedVatMonthState(
     }
     if (!record) {
       if (family.length === 1 && journal.document_number === main && signature.join() === full.join()) {
-        return { kind: "already_booked", journal_ids: journalIds };
+        return {
+          kind: "already_booked",
+          journal_ids: journalIds,
+          adopt: { journal_id: journal.id!, document_number: main, effective_date: to, invoice_ids: computation.included.map(invoice => invoice.invoice_id), postings: signature },
+        };
       }
       return { kind: "conflict", journal_ids: journalIds, reason: `Journal ${journal.id} (${journal.document_number}) has no booking record from this tool, or its postings differ from the computed month.` };
     }
