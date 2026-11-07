@@ -407,6 +407,83 @@ describe("limited_vat mode month", () => {
   });
 });
 
+describe("limited_vat adoption of a lone hand-booked PKM journal", () => {
+  const args = { mode: "month", month: "2026-03", supplier_classifications: [{ clients_id: 10, classification: "counts" }] };
+  const handJournal = (amount: number): Journal => ({
+    id: 500, document_number: "PKM-2026-03", effective_date: "2026-03-31", registered: true, is_deleted: false,
+    postings: [
+      { accounts_id: 5000, type: "D", amount, accounts_dimensions_id: null },
+      { accounts_id: 2410, type: "C", amount, accounts_dimensions_id: null },
+    ],
+  });
+  const bookingRecords = () => (readLimitedVatRecords() ?? []).filter(record => record.kind === "booking");
+
+  it("a journal equal to the month: dry run offers adoption, execute stores its record and writes no journal", async () => {
+    const state = baseState({ journals: [handJournal(12)] });
+    const { call } = setup(state);
+    await setLimited(call);
+    const dry = parseToolPayload<LimitedVatMonthPayload>((await call(args)).text);
+    expect(dry).toMatchObject({ status: "ready_for_approval", state: "already_booked", journal_ids: [500], adoption: { journal_id: 500, document_number: "PKM-2026-03", invoice_ids: [1], adopted: false } });
+    expect(dry.plan_handle).toBeDefined();
+    expect(dry.proposed_journal).toBeUndefined();
+    expect(bookingRecords()).toEqual([]);
+
+    const adopted = parseToolPayload<LimitedVatMonthPayload>((await call({ ...args, execute: true, plan_handle: dry.plan_handle })).text);
+    expect(adopted).toMatchObject({ status: "adopted", adoption: { journal_id: 500, adopted: true } });
+    expect(state.writes).toEqual([]);
+    expect(bookingRecords()).toEqual([expect.objectContaining({
+      key: "booking:PKM-2026-03", month: "2026-03", document_number: "PKM-2026-03", journal_id: 500, effective_date: "2026-03-31",
+      invoice_ids: [1], postings: ["2410||C|1200", "5000||D|1200"],
+    })]);
+
+    // Adopted: the re-run is plainly already booked, with no adoption offer.
+    const rerun = parseToolPayload<LimitedVatMonthPayload>((await call({ mode: "month", month: "2026-03" })).text);
+    expect(rerun.status).toBe("already_booked");
+    expect(rerun.adoption).toBeUndefined();
+  });
+
+  it("after adoption a late invoice is a PKM-YYYY-MM-P1 correction, not a conflict", async () => {
+    const state = baseState({ journals: [handJournal(12)] });
+    const { call } = setup(state);
+    await setLimited(call);
+    const dry = parseToolPayload<LimitedVatMonthPayload>((await call(args)).text);
+    await call({ ...args, execute: true, plan_handle: dry.plan_handle });
+
+    state.invoices.push(invoice(5, 10, "2026-03-25", 10));
+    const delta = parseToolPayload<LimitedVatMonthPayload>((await call({ mode: "month", month: "2026-03" })).text);
+    expect(delta).toMatchObject({ state: "delta", document_number: "PKM-2026-03-P1", journal_ids: [500] });
+    expect(delta.proposed_journal!.postings.map(posting => posting.amount)).toEqual([2.4, 2.4]);
+    const booked = parseToolPayload<LimitedVatMonthPayload>((await call({ mode: "month", month: "2026-03", execute: true, plan_handle: delta.plan_handle })).text);
+    expect(booked.status).toBe("booked");
+    expect(state.writes).toEqual(["create:PKM-2026-03-P1", "confirm:900"]);
+  });
+
+  it("a journal differing from the month stays a conflict and records nothing", async () => {
+    const state = baseState({ journals: [handJournal(13)] });
+    const { call } = setup(state);
+    await setLimited(call);
+    const conflict = await call(args);
+    expect(conflict.result.isError).toBe(true);
+    expect(conflict.text).toContain("limited_vat_journal_conflict");
+    expect(bookingRecords()).toEqual([]);
+    expect(state.writes).toEqual([]);
+  });
+
+  it("a journal changed between dry run and execute is plan_drift and records nothing", async () => {
+    const state = baseState({ journals: [handJournal(12)] });
+    const { call } = setup(state);
+    await setLimited(call);
+    const dry = parseToolPayload<LimitedVatMonthPayload>((await call(args)).text);
+    // Replaced by another journal with the same postings: the adopted id is bound.
+    state.journals = [{ ...handJournal(12), id: 501 }];
+    const drift = await call({ ...args, execute: true, plan_handle: dry.plan_handle });
+    expect(drift.result.isError).toBe(true);
+    expect(drift.text).toContain("plan_drift");
+    expect(bookingRecords()).toEqual([]);
+    expect(state.writes).toEqual([]);
+  });
+});
+
 describe("limited_vat review fixes (fail closed)", () => {
   const writeStoreFile = (content: string) => {
     const path = resolveBundleStorePath(LIMITED_VAT_STORE_FILE)!;

@@ -164,8 +164,10 @@ export interface LimitedVatMonthInvoiceView extends Omit<LimitedVatIncludedInvoi
 export interface LimitedVatMonthPayload {
   mode: "month";
   month: string;
-  status: "ready_for_approval" | "already_booked" | "nothing_to_book" | "booked";
+  status: "ready_for_approval" | "already_booked" | "nothing_to_book" | "booked" | "adopted";
   state: LimitedVatMonthState["kind"];
+  /** A lone hand-booked PKM journal equal to the month, not yet recorded by this tool; adopted on execute. */
+  adoption?: { journal_id: number; document_number: string; invoice_ids: number[]; adopted: boolean };
   document_number?: string;
   journal_ids?: number[];
   plan_handle?: string;
@@ -593,6 +595,7 @@ function monthFingerprint(build: MonthBuild): string {
     invoice_ids: state.kind === "new" || state.kind === "delta" ? state.invoices.map(invoice => invoice.invoice_id) : [],
     postings: postingSignature(build.postings),
     reviews: build.computation.reviews.map(review => `${review.code}:${review.invoice_id}`),
+    adopt: (state.kind === "already_booked" ? state.adopt ?? null : null) as unknown as PlanData,
     excluded: build.computation.excluded.map(exclusion => `${exclusion.reason}:${exclusion.invoice_id}`),
   });
 }
@@ -615,6 +618,7 @@ function monthPayload(build: MonthBuild, status: LimitedVatMonthPayload["status"
   const { month, state } = build;
   const { to } = monthBounds(month);
   const documentNumber = state.kind === "new" || state.kind === "delta" ? state.document_number : undefined;
+  const adopt = state.kind === "already_booked" ? state.adopt : undefined;
   return {
     mode: "month",
     month,
@@ -623,6 +627,7 @@ function monthPayload(build: MonthBuild, status: LimitedVatMonthPayload["status"
     ...(documentNumber ? { document_number: documentNumber } : {}),
     ...(state.kind === "already_booked" || state.kind === "conflict" || state.kind === "delta"
       ? { journal_ids: state.kind === "delta" ? state.booked_journal_ids : state.journal_ids } : {}),
+    ...(adopt ? { adoption: { journal_id: adopt.journal_id, document_number: adopt.document_number, invoice_ids: adopt.invoice_ids, adopted: false } } : {}),
     liability_account: build.liabilityAccount,
     included_invoices: build.computation.included.map(wrapView),
     excluded_invoices: build.computation.excluded.map(wrapView),
@@ -639,6 +644,7 @@ function monthPayload(build: MonthBuild, status: LimitedVatMonthPayload["status"
         ? ["Offer each review item to the owner inline (yes/no per supplier for unclassified suppliers); a resolved item is booked later as a correction (PKM-YYYY-MM-Pn), never a second full journal."]
         : []),
       ...(state.kind === "delta" ? ["The month is already booked; this is a correction for invoices added since."] : []),
+      ...(adopt ? [`Journal ${adopt.journal_id} (${adopt.document_number}) books exactly this month but has no booking record from this tool. Adopting it (owner approval, no journal write) records it for these invoices, so invoices added later can be booked as a correction (PKM-YYYY-MM-Pn).`] : []),
     ],
     ...extra,
   };
@@ -652,7 +658,8 @@ async function handleMonth(api: ApiContext, ctx: RuntimeSafetyContext, args: Mon
       return refuse("limited_vat_journal_conflict", build.state.reason, { month: build.month, journal_ids: build.state.journal_ids });
     }
     const bookable = build.postings.length > 0;
-    if (!bookable && build.proposed.length === 0) {
+    const adopt = build.state.kind === "already_booked" ? build.state.adopt : undefined;
+    if (!bookable && !adopt && build.proposed.length === 0) {
       return respond(monthPayload(build, build.state.kind === "already_booked" ? "already_booked" : "nothing_to_book"));
     }
     const normalizedArgs = monthNormalizedArgs(build);
@@ -663,7 +670,11 @@ async function handleMonth(api: ApiContext, ctx: RuntimeSafetyContext, args: Mon
       commands: [{
         id: `limited-vat-${build.month}`,
         category: "book_limited_vat_month",
-        reviewProjection: { postings: postingSignature(build.postings), classifications: normalizedArgs.supplier_classifications! },
+        reviewProjection: {
+          postings: postingSignature(build.postings),
+          classifications: normalizedArgs.supplier_classifications!,
+          ...(adopt ? { adopt_journal_id: adopt.journal_id, adopt_invoice_ids: adopt.invoice_ids } : {}),
+        },
       }],
       counts: { included: build.computation.included.length, reviews: build.computation.reviews.length },
       totals: { vat: roundMoney(build.postings.filter(posting => posting.type === "C").reduce((sum, posting) => sum + posting.amount, 0)) },
@@ -676,7 +687,9 @@ async function handleMonth(api: ApiContext, ctx: RuntimeSafetyContext, args: Mon
       plan_handle: planHandle,
       next_step_summary: bookable
         ? "Show the owner the proposed journal, the KMD figures and every review item. Only after approval, call limited_vat mode \"month\" again with the same month, liability_account and supplier_classifications, execute: true and this plan_handle: the journal is created and confirmed, and the supplier classifications are saved."
-        : "Nothing to book; after the owner approves, call again with execute: true and this plan_handle to save the supplier classifications.",
+        : adopt
+          ? `No journal to create: journal ${adopt.journal_id} already books the month. After the owner approves adopting it, call limited_vat mode "month" again with the same month, liability_account and supplier_classifications, execute: true and this plan_handle: its booking record is stored (no journal write) and the supplier classifications are saved.`
+          : "Nothing to book; after the owner approves, call again with execute: true and this plan_handle to save the supplier classifications.",
     }));
   }
   if (!args.plan_handle) return refuse("plan_handle_required", "execute: true needs the plan_handle from the month dry run.");
@@ -701,10 +714,37 @@ async function handleMonth(api: ApiContext, ctx: RuntimeSafetyContext, args: Mon
     kind: "supplier", key: supplierRecordKey(entry.clients_id), clients_id: entry.clients_id, classification: entry.classification, set_at: now,
   }));
   if (build.postings.length === 0 || (build.state.kind !== "new" && build.state.kind !== "delta")) {
+    const adopt = build.state.kind === "already_booked" ? build.state.adopt : undefined;
+    // Adoption: the fresh build re-proved the lone journal equals the month and the fingerprint bound its id, postings and invoices.
+    const adoptionRecords: LimitedVatStoreRecord[] = adopt ? [{
+      kind: "booking",
+      key: bookingRecordKey(adopt.document_number),
+      month: build.month,
+      document_number: adopt.document_number,
+      journal_id: adopt.journal_id,
+      effective_date: adopt.effective_date,
+      invoice_ids: adopt.invoice_ids,
+      postings: adopt.postings,
+      booked_at: now,
+    }] : [];
     try {
-      limitedVatStore.upsert(supplierRecords);
+      limitedVatStore.upsert([...supplierRecords, ...adoptionRecords]);
     } catch (error) {
-      return refuse("limited_vat_store_unavailable", `The supplier classifications could not be stored (${(error as Error).message}).`);
+      return refuse("limited_vat_store_unavailable", `The ${adopt ? "booking record and " : ""}supplier classifications could not be stored (${(error as Error).message}).`);
+    }
+    if (adopt) {
+      logAudit({
+        tool: "limited_vat",
+        action: "UPDATED",
+        entity_type: "journal",
+        entity_id: adopt.journal_id,
+        summary: `Limited-taxpayer VAT ${adopt.document_number}: adopted existing journal ${adopt.journal_id}`,
+        details: { month: build.month, document_number: adopt.document_number, invoice_ids: adopt.invoice_ids, postings: adopt.postings, booking_status: "adopted" },
+      });
+      return respond(monthPayload(build, "adopted", {
+        adoption: { journal_id: adopt.journal_id, document_number: adopt.document_number, invoice_ids: adopt.invoice_ids, adopted: true },
+        notes: [`Journal ${adopt.journal_id} (${adopt.document_number}) adopted: its booking record is stored, no journal was written. Invoices added to ${build.month} later are booked as a correction (PKM-YYYY-MM-Pn).`],
+      }));
     }
     return respond(monthPayload(build, build.state.kind === "already_booked" ? "already_booked" : "nothing_to_book", {
       notes: ["Supplier classifications saved; no journal was needed."],
@@ -767,7 +807,7 @@ async function handleMonth(api: ApiContext, ctx: RuntimeSafetyContext, args: Mon
   try {
     limitedVatStore.upsert([...supplierRecords, bookingRecord]);
   } catch (error) {
-    return refuse("limited_vat_record_failed", `Journal ${journalId} was created and confirmed, but its booking record could not be stored (${(error as Error).message}). Do not book the month again; the next dry run reports the journal as already booked when its postings equal the month.`, { journal_ids: [journalId], note: "The journal was written; only the local record failed." });
+    return refuse("limited_vat_record_failed", `Journal ${journalId} was created and confirmed, but its booking record could not be stored (${(error as Error).message}). Do not book the month again; the next dry run reports the journal as already booked when its postings equal the month and offers to adopt it (store its record).`, { journal_ids: [journalId], note: "The journal was written; only the local record failed." });
   }
   return respond(monthPayload(build, "booked", {
     journal_ids: [journalId],
