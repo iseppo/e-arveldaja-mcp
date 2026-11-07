@@ -52,12 +52,25 @@ function openings(records: readonly unknown[]): string[] {
     .map(record => record.as_of);
 }
 
+const GAINS_PATH = "/tmp/CapitalGainsStatement-TESTACCT1-2026.csv";
+const GAINS_HEADER = "Date,Ticker,Name,ISIN,Country,Asset Class,Fees (EUR),Quantity,Cost Basis (EUR),Proceeds (EUR),Capital Gains (EUR)";
+/** A USD sale kept in USD (`sell_in`): 100.00 USD. */
+const SELL = ["10/02/2026 10:00:00", "OR-TESTSELL1", "AMD", "US0079031078", "Sell", "1", "USD", "100", "100.00", "0", "0", "100.00", "0"];
+/** A capital-gains file without that sale's row (another ticker). */
+const UNRELATED_GAINS = [["2026-02-10 10:00:00", "NVDA", "NVDA", "US67066G1040", "United States", "equity", "0", "1", "80.00", "90.00", "10.00"]];
+
+let statementRows: string[][] = [];
+
 describe("USD pool barrier: re-opening after a row the pool cannot book (Fable M2)", () => {
   beforeEach(() => {
+    statementRows = [...BLOCKING, ...LATER];
     mockedResolveFileInput.mockReset();
     mockedResolveFileInput.mockImplementation(async (input: string) => ({ path: input }));
     mockedReadFileCapped.mockReset();
-    mockedReadFileCapped.mockImplementation(async () => Buffer.from(lightyearStatementCsv([...BLOCKING, ...LATER]), "utf8"));
+    mockedReadFileCapped.mockImplementation(async (path: string) => Buffer.from(
+      path === GAINS_PATH ? `${GAINS_HEADER}\n${UNRELATED_GAINS.map(row => row.map(value => `"${value}"`).join(",")).join("\n")}\n` : lightyearStatementCsv(statementRows),
+      "utf8",
+    ));
   });
 
   function tools() {
@@ -82,7 +95,7 @@ describe("USD pool barrier: re-opening after a row the pool cannot book (Fable M
     const { store, trades, revaluation } = tools();
     const reopen = await revaluation.book({ mode: "opening", as_of: "2026-02-10" });
     expect(reopen.dry.payload).toMatchObject({ status: "would_store_opening", usd_amount: 200 });
-    expect(reopen.dry.payload.note).toContain("It replaces the opening of 2025-12-31");
+    expect(reopen.dry.payload.note).toContain("It replaces the opening of 2025-12-31, past the blocking row CN-TESTBLOCK (usd_pool_unsupported_event)");
     expect(reopen.exec.payload.status).toBe("opening_stored");
     expect(openings(store.records)).toEqual(["2025-12-31", "2026-02-10"]);
 
@@ -102,12 +115,49 @@ describe("USD pool barrier: re-opening after a row the pool cannot book (Fable M
     expect(reviewCode((await trades.run({ dry_run: true })).payload, "CN-TESTLATER")).toBe("usd_pool_unsupported_event");
   });
 
-  it("a re-opening dated before the blocked row leaves it blocked", async () => {
+  it("a re-opening dated before the blocked row is refused: the pool is not blocked up to that day", async () => {
     const { store, trades, revaluation } = tools();
-    expect((await revaluation.book({ mode: "opening", as_of: "2026-02-09" })).exec.payload.status).toBe("opening_stored");
-    expect(openings(store.records)).toEqual(["2025-12-31", "2026-02-09"]);
+    const refused = await revaluation.run({ mode: "opening", as_of: "2026-02-09", dry_run: true });
+    expect(refused.payload).toMatchObject({ status: "review", review_reason: { code: "usd_pool_opening_exists", detail: expect.stringContaining("not_blocked") } });
+    expect(refused.payload.plan_handle).toBeUndefined();
+    expect(openings(store.records)).toEqual(["2025-12-31"]);
     expect(reviewCode((await trades.run({ dry_run: true })).payload, "CN-TESTLATER")).toBe("usd_pool_unsupported_event");
-    expect(trades.create).not.toHaveBeenCalled();
+  });
+
+  it("a re-opening of a pool that is not blocked is refused, with no plan handle", async () => {
+    statementRows = [...LATER];
+    const { store, revaluation } = tools();
+    const refused = await revaluation.run({ mode: "opening", as_of: "2026-03-31", dry_run: true });
+    expect(refused.payload).toMatchObject({ status: "review", review_reason: { code: "usd_pool_opening_exists", detail: expect.stringContaining("not_blocked") } });
+    expect(refused.payload.review_reason?.message).toContain("cannot be replaced");
+    expect(refused.payload.plan_handle).toBeUndefined();
+    expect(openings(store.records)).toEqual(["2025-12-31"]);
+  });
+
+  it("a USD sale without its capital-gains row: re-opening needs the gains file proving it, then the later conversion books", async () => {
+    statementRows = [SELL, ...LATER];
+    const { store, trades, revaluation } = tools();
+    const blocked = await trades.run({ dry_run: true, capital_gains_file: GAINS_PATH });
+    expect(reviewCode(blocked.payload, "OR-TESTSELL1")).toBe("pool_sell_gains_unmatched");
+    const warning = (blocked.payload.warnings ?? []).find(text => text.includes("OR-TESTSELL1"))!;
+    expect(warning).toContain("First supply the capital-gains statement");
+    expect(reviewCode(blocked.payload, "CN-TESTLATER")).toBe("usd_pool_prerequisite_failed");
+    // The owner books the sale by hand; that alone does not clear the pool.
+    trades.ledger.set(802, {
+      id: 802, document_number: "LY:OR-TESTSELL1", effective_date: "2026-02-10", registered: true, is_deleted: false,
+      postings: [{ accounts_id: 1120, type: "D", amount: 90 }, { accounts_id: 1550, type: "C", amount: 90 }],
+    });
+    expect(reviewCode((await trades.run({ dry_run: true, capital_gains_file: GAINS_PATH })).payload, "CN-TESTLATER")).toBe("usd_pool_prerequisite_unbooked");
+    // Without the gains file nothing proves the sale unmatched: not a barrier.
+    const unproven = await revaluation.run({ mode: "opening", as_of: "2026-02-10", dry_run: true });
+    expect(unproven.payload.review_reason).toMatchObject({ code: "usd_pool_opening_exists", detail: expect.stringContaining("capital_gains_file") });
+    const reopen = await revaluation.book({ mode: "opening", as_of: "2026-02-10", capital_gains_file: GAINS_PATH });
+    expect(reopen.dry.payload.note).toContain("OR-TESTSELL1 (pool_sell_gains_unmatched)");
+    expect(reopen.exec.payload.status).toBe("opening_stored");
+    expect(openings(store.records)).toEqual(["2025-12-31", "2026-02-10"]);
+    const { dry } = await trades.book({ capital_gains_file: GAINS_PATH });
+    expect(resultFor(dry.payload, "CN-TESTLATER")).toMatchObject({ status: "would_create", pool: { kind: "conversion_out" } });
+    expect(trades.created.map(journal => journal.document_number)).toEqual(["LY:CN-TESTLATER"]);
   });
 
   it("a re-opening not after every pool record is refused", async () => {

@@ -2,9 +2,9 @@
   "profile": "standard",
   "measurement": {
     "toolCount": 128,
-    "toolsListBytes": 154872,
+    "toolsListBytes": 155213,
     "descriptionsBytes": 24265,
-    "inputSchemasBytes": 99791,
+    "inputSchemasBytes": 100132,
     "largestTool": {
       "name": "import_wise_transactions",
       "bytes": 5734
@@ -5347,6 +5347,14 @@
           "broker_dimension_id": {
             "description": "Dimension ID for broker account (accounts_dimensions_id)",
             "type": "number"
+          },
+          "capital_gains_file": {
+            "description": "opening only: CapitalGainsStatement CSV path, to prove that a USD sale kept in USD has no matching capital-gains row (a re-opening past it).",
+            "type": "string"
+          },
+          "capital_gains_file_ref": {
+            "description": "opening only: opaque capital-gains file reference; exclusive with capital_gains_file.",
+            "type": "string"
           },
           "dry_run": {
             "description": "Preview without writing (default true)",
