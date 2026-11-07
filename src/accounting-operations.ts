@@ -114,12 +114,12 @@ class AccountingOperationsImpl implements AccountingOperations {
     // Resolve + revalidate the scanned folder path (realpath, allowed-roots,
     // is-directory) exactly as the receipt tool adapter does for a raw folder_path.
     const resolvedFolderPath = await validateReceiptFolderPath(input.folderPath);
-    // Fail closed if the active company identity read fails transiently — the
-    // #22 self-match guard depends on it, so a weakened guard must not run.
+    // The #22 self-match guard needs the active company identity. If the read
+    // still fails (after loadOwnCompanyIdentity's own retry), runBatch keeps the
+    // guard at full strength per item, as receipt_batch does: existing suppliers
+    // proceed only while our registry code derives from our VAT, else every item
+    // is held as own_company_identity_unavailable. Dry run only: nothing is written.
     const identity = await loadOwnCompanyIdentity(this.api);
-    if (identity.status === "retryable_error") {
-      throw new Error(`Receipt batch dry run could not load the active company identity: ${identity.reason}`);
-    }
     return this.receipts.runBatch({
       resolvedFolderPath,
       accountsDimensionsId: input.accountsDimensionsId,
@@ -136,7 +136,9 @@ class AccountingOperationsImpl implements AccountingOperations {
       // slots per folder per scan and eventually deny the approval path.
       // Approval handles come from an explicit receipt_batch dry run.
       mintPlanHandles: false,
-      ...(identity.invoiceCompanyName !== undefined ? { ownCompanyName: identity.invoiceCompanyName } : {}),
+      ...(identity.status === "available"
+        ? identity.invoiceCompanyName !== undefined ? { ownCompanyName: identity.invoiceCompanyName } : {}
+        : { ownCompanyNameUnavailable: true }),
     });
   }
 

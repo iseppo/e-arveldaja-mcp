@@ -11,6 +11,8 @@ import { sha256Hex } from "../tools/receipt-inbox-files.js";
 import { renderReceiptBatchCompact } from "./presenter.js";
 import { EMTA_KMKR_ORIGIN } from "../emta-kmkr.js";
 import { registerReceiptInboxTools } from "../tools/receipt-inbox.js";
+import { createAccountingOperations } from "../accounting-operations.js";
+import { runAccountingInboxDryRunPipeline, type AutopilotPreparedInboxData } from "../tools/accounting-inbox-autopilot-service.js";
 import { HttpError } from "../http-client.js";
 import { parseToolPayload } from "../__fixtures__/mcp-response.js";
 import type { ReceiptBatchFullPayload } from "./presenter.js";
@@ -784,7 +786,7 @@ describe("receipt_batch when the own-company identity read fails (identity revie
       parsed(path.endsWith("1.pdf") ? PRINT_RECEIPT : EXISTING_RECEIPT)) as never);
     const { api, rec } = makeApi(clients);
     (api as unknown as { readonly: Record<string, unknown> }).readonly.getInvoiceInfo = getInvoiceInfo;
-    return { run: receiptBatchHandler(api), rec };
+    return { run: receiptBatchHandler(api), rec, api };
   }
 
   it("(a) the first read fails, the fresh retry succeeds: an ordinary batch", async () => {
@@ -849,5 +851,53 @@ describe("receipt_batch when the own-company identity read fails (identity revie
     expect(rec.invoicesCreate).not.toHaveBeenCalled();
     expect(rec.clientsCreate).not.toHaveBeenCalled();
     expect(rec.confirm).not.toHaveBeenCalled();
+  });
+
+  describe("accounting-inbox receipt dry run", () => {
+    async function inboxDryRun(getInvoiceInfo: ReturnType<typeof vi.fn>, clients: Array<Record<string, unknown>>) {
+      const { api, rec } = setupBatch(clients, getInvoiceInfo);
+      const prepared: AutopilotPreparedInboxData = {
+        workspacePath: "/tmp/inbox",
+        scan: { max_depth: 2, scanned_directories: 1, scanned_candidate_files: 2, truncated: false },
+        camtFiles: [], wiseFiles: [], receiptFolders: [], defaults: {},
+        steps: [{
+          step: 1, tool: "process_receipt_batch", purpose: "Preview receipts", recommended: true,
+          suggested_args: { folder_path: FOLDER, accounts_dimensions_id: 100, execute: false },
+          missing_inputs: [], reason: "Receipts found",
+        }],
+        questions: [], liveApiDefaultsAvailable: true,
+      };
+      const result = await runAccountingInboxDryRunPipeline({
+        prepared,
+        operations: createAccountingOperations(api, createTestRuntimeSafetyContext()),
+      });
+      const followUps = [...result.needs_one_decision, ...result.needs_accountant_review].filter(f => f.source === "process_receipt_batch");
+      return { result, followUps, rec };
+    }
+
+    it("(a) invoice_info fails twice, own VAT client known: the existing supplier previews, the new one is held with the reason", async () => {
+      const getInvoiceInfo = vi.fn().mockRejectedValue(unavailable());
+      const { result, followUps, rec } = await inboxDryRun(getInvoiceInfo, [OWN_VAT_CLIENT, EXISTING_CLIENT]);
+      expect(getInvoiceInfo).toHaveBeenCalledTimes(2);
+      const step = result.executed_steps.find(s => s.tool === "process_receipt_batch");
+      expect(step?.summary).toContain("leave 1 in review");
+      expect(followUps).toHaveLength(1);
+      expect(followUps[0]!.summary).toContain("was left for review in the dry run");
+      expect(followUps[0]!.summary).toContain("own company's name could not be read");
+      expect(followUps[0]!.recommendation).toContain("own company's name could not be read");
+      expect(rec.invoicesCreate).not.toHaveBeenCalled();
+      expect(rec.clientsCreate).not.toHaveBeenCalled();
+    });
+
+    it("(b) invoice_info fails twice, no own VAT match: every receipt is held, nothing throws", async () => {
+      const getInvoiceInfo = vi.fn().mockRejectedValue(unavailable());
+      const { result, followUps, rec } = await inboxDryRun(getInvoiceInfo, [EXISTING_CLIENT]);
+      const step = result.executed_steps.find(s => s.tool === "process_receipt_batch");
+      expect(step?.summary).toContain("leave 2 in review");
+      expect(followUps).toHaveLength(2);
+      for (const followUp of followUps) expect(followUp.summary).toContain("own company's name could not be read");
+      expect(rec.invoicesCreate).not.toHaveBeenCalled();
+      expect(rec.clientsCreate).not.toHaveBeenCalled();
+    });
   });
 });
