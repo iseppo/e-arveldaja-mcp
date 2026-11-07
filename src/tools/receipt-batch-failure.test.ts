@@ -865,7 +865,7 @@ describe("process_receipt_batch rollback handling", () => {
     });
   });
 
-  it("preserves supplier-history VAT metadata when OCR misses invoice VAT totals", async () => {
+  it("preserves supplier-history reverse charge in its canonical shape when OCR misses invoice VAT totals", async () => {
     mockReceiptFolder();
 
     vi.mocked(parseDocument).mockResolvedValue({
@@ -927,7 +927,10 @@ describe("process_receipt_batch rollback handling", () => {
 
     expect(api.purchaseInvoices.createAndSetTotals).toHaveBeenCalledTimes(1);
     expect(api.purchaseInvoices.createAndSetTotals.mock.calls[0]![0].items[0]).toMatchObject({
-      vat_rate_dropdown: "24",
+      vat_rate_dropdown: "0",
+      vat_accounts_id: null,
+      vat_accounts_dimensions_id: null,
+      cl_vat_articles_id: null,
       reversed_vat_id: 1,
     });
   });

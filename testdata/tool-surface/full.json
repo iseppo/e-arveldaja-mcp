@@ -2,9 +2,9 @@
   "profile": "full",
   "measurement": {
     "toolCount": 148,
-    "toolsListBytes": 189652,
+    "toolsListBytes": 189781,
     "descriptionsBytes": 29954,
-    "inputSchemasBytes": 123968,
+    "inputSchemasBytes": 124097,
     "largestTool": {
       "name": "import_wise_transactions",
       "bytes": 5734
@@ -3770,7 +3770,7 @@
                 "type": "string"
               }
             ],
-            "description": "Items [{custom_title, cl_purchase_articles_id, purchase_accounts_id, purchase_accounts_dimensions_id?, total_net_price, vat_rate_dropdown?, amount?, vat_accounts_id?, vat_accounts_dimensions_id?, cl_vat_articles_id?, reversed_vat_id?}]. purchase_accounts_dimensions_id is REQUIRED when the expense account has dimensions; same for vat_accounts_dimensions_id on dimensioned VAT accounts. A VAT-registered company's items carrying VAT need vat_rate_dropdown, else refused before create (purchase_totals_mismatch). Non-VAT EUR invoices may post VAT to the same cost account/dimension with article 11 and one document rate."
+            "description": "Items [{custom_title, cl_purchase_articles_id, purchase_accounts_id, purchase_accounts_dimensions_id?, total_net_price, vat_rate_dropdown?, amount?, vat_accounts_id?, vat_accounts_dimensions_id?, cl_vat_articles_id?, reversed_vat_id?}]. purchase_accounts_dimensions_id is REQUIRED when the expense account has dimensions; same for vat_accounts_dimensions_id on dimensioned VAT accounts. A VAT-registered company's items carrying VAT need vat_rate_dropdown, else refused before create (purchase_totals_mismatch). Reverse-charge rows use vat_rate_dropdown 0, null VAT account/dimension/article, and reversed_vat_id carrying the assessed rate. Non-VAT EUR invoices may post VAT to the same cost account/dimension with article 11 and one document rate."
           },
           "journal_date": {
             "description": "Turnover/booking date (YYYY-MM-DD)",

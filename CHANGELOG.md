@@ -10,6 +10,8 @@
 
 ### Fixed
 
+- **Reverse-charge purchases now stay reverse charge when they are booked automatically.** Before, a receipt could be sent as an ordinary VAT purchase, causing e-arveldaja to drop its reverse-charge setting and leave the created draft held for review. Details: receipt batches and the shared purchase VAT defaults (also used by classification and document/PDF creation) write `vat_rate_dropdown: "0"`, null VAT account/dimension/article and the preserved `reversed_vat_id`; a legacy 9% rate maps options 1→2 and 7→8. Ordinary VAT defaults are unchanged, and a supplier-charged VAT amount on a reverse-charge suggestion still requires review.
+
 - **Receipt batches now confirm the invoice even when a possible bank payment needs a separate review.** Before, an ordinary card-payment match below the automatic-link threshold could leave a newly created invoice as an unconfirmed draft. Details: `receipt_batch` applies approved-bank drift checks only to candidates eligible for automatic linking (confidence at least 90, excluding cross-currency base-only matches). Other candidates remain unlinked, with their transaction ID and confidence reported for reconciliation; existing automatic-link safeguards remain in place.
 
 - **Booking suggestions no longer show an old service period from the supplier's previous invoice.** Details: supplier-history suggestions reuse a dated line title only when its date and month tokens are present in the current document; otherwise they use a neutral article title. Titles without period tokens remain reusable. Receipt-batch and classification-created invoices already use the current description; that behavior and guided document reading's `item_title` flow are unchanged.
