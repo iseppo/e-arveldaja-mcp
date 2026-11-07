@@ -56,33 +56,15 @@ function makeApi() {
   };
 }
 
-async function run(extractedFields: any, suggestionItem: Record<string, unknown>, mode: "create" | "dry_run" = "create", snap: any = snapshot(), source = "keyword_match") {
+async function run(extractedFields: any, suggestionItem: Record<string, unknown>, mode: "create" | "dry_run" = "create", snap: any = snapshot()) {
   const { api, createAndSetTotals } = makeApi();
   const result = await createAndMaybeMatchPurchaseInvoice(
     api, context, snap, extractedFields, supplierResolution,
-    { source, item: { cl_purchase_articles_id: 1, purchase_accounts_id: 5230, custom_title: "x", amount: 1, ...suggestionItem } } as any,
+    { source: "keyword_match", item: { cl_purchase_articles_id: 1, purchase_accounts_id: 5230, custom_title: "x", amount: 1, ...suggestionItem } } as any,
     [], mode, false, new Set(),
   );
   return { result, createAndSetTotals, api };
 }
-
-describe("receipt batch titles retain useful supplier history (F2)", () => {
-  it("uses the history title for a generated description", async () => {
-    const { createAndSetTotals } = await run(
-      extracted({ description: "TELIA", description_source: "generated" }),
-      { custom_title: "Mobile service" }, "create", snapshot(), "supplier_history",
-    );
-    expect(createAndSetTotals.mock.calls[0]![0].items[0].custom_title).toBe("Mobile service");
-  });
-
-  it.each(["document", undefined])("preserves a %s description with supplier history", async source => {
-    const { createAndSetTotals } = await run(
-      extracted({ description: "Reviewed service description", description_source: source }),
-      { custom_title: "Old history title" }, "create", snapshot(), "supplier_history",
-    );
-    expect(createAndSetTotals.mock.calls[0]![0].items[0].custom_title).toBe("Reviewed service description");
-  });
-});
 
 describe("receipt inbox booking — notes never carry the source filename (finding 12)", () => {
   it("creates the invoice with notes that do not contain the file name", async () => {

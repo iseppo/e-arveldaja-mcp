@@ -334,14 +334,12 @@ export async function createAndMaybeMatchPurchaseInvoice(
   }
 
   // P2 E1b: the single point where the booked line is built, after supplier
-  // resolution or creation. A generated description uses a supplier-history
-  // title when available, otherwise the bound client's name: an existing client,
-  // or one just created under its registry-verified name (E1). A document or
+  // resolution or creation. A generated description (possibly a logo word such
+  // as "PRINT") is replaced by the bound client's name: an existing client, or
+  // one just created under its registry-verified name (E1). A document or
   // operator description, and the extracted supplier_name, are never changed.
   const description = extracted.description_source === "generated" && supplier?.name
-    ? bookingSuggestion.source === "supplier_history" && bookingSuggestion.item.custom_title
-      ? bookingSuggestion.item.custom_title
-      : `Expense from ${supplier.name}`
+    ? `Expense from ${supplier.name}`
     : extracted.description ?? `Expense from ${supplierName}`;
   const prepared = prepareReceiptInvoiceItems(
     context,
