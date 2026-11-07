@@ -2,12 +2,12 @@
   "profile": "full",
   "measurement": {
     "toolCount": 148,
-    "toolsListBytes": 189411,
-    "descriptionsBytes": 29820,
-    "inputSchemasBytes": 123861,
+    "toolsListBytes": 189919,
+    "descriptionsBytes": 30221,
+    "inputSchemasBytes": 123968,
     "largestTool": {
       "name": "import_wise_transactions",
-      "bytes": 5627
+      "bytes": 5734
     },
     "serverInstructionsBytes": 1045,
     "promptMetadataBytes": 11696,
@@ -5374,7 +5374,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Classify unconfirmed bank transactions that do not match any sale or purchase invoice. Read-only analysis with suggested booking defaults.",
+      "description": "Classify unconfirmed bank transactions that do not match any sale or purchase invoice. Read-only analysis with suggested booking defaults. History-based account distributions require a valid, enabled account allowed for the row's direction; otherwise the group stays review-only.",
       "execution": {
         "taskSupport": "forbidden"
       },
@@ -5412,7 +5412,7 @@
         "openWorldHint": false,
         "readOnlyHint": false
       },
-      "description": "Apply the output of classify_unmatched_transactions. DRY RUN by default. Only expense-like categories are auto-booked as purchase invoices; review-only categories are reported back.",
+      "description": "Apply the output of classify_unmatched_transactions. DRY RUN by default. Expense-like categories create purchase invoices; account_distribution groups confirm bank rows only to accounts allowed for their direction. Execute rechecks chart permissions against the reviewed plan. Review-only categories are reported back.",
       "execution": {
         "taskSupport": "forbidden"
       },
@@ -5469,7 +5469,7 @@
         "openWorldHint": false,
         "readOnlyHint": false
       },
-      "description": "Merged unmatched-bank classification. classify groups; dry_run_apply previews; execute_apply requires approval.",
+      "description": "Merged unmatched-bank classification. classify groups; dry_run_apply previews; execute_apply requires approval. History-based account distributions require an enabled account allowed for the bank row's direction, rechecked at execute.",
       "execution": {
         "taskSupport": "forbidden"
       },
@@ -6025,7 +6025,7 @@
             "type": "array"
           },
           "not_own_transfer_ids": {
-            "description": "Owner-confirmed only: exact transfer Wise IDs that are payments to or from a third party, not own transfers: imported as ordinary unconfirmed rows without an ownership review. Must not overlap confirm_own_transfer_ids; a row whose own-account evidence says otherwise is held (not_own_transfer_conflicts_evidence).",
+            "description": "Owner-confirmed only: exact transfer Wise IDs that are payments to or from a third party, not own transfers: imported as ordinary unconfirmed rows without an ownership review. When no candidate own-account evidence exists on any bank, no counterpart bank dimension is needed. Must not overlap confirm_own_transfer_ids; a row with strong or uncertain own-account evidence stays held (not_own_transfer_conflicts_evidence).",
             "items": {
               "minLength": 1,
               "type": "string"

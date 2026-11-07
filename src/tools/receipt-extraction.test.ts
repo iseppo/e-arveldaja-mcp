@@ -2126,6 +2126,38 @@ describe("suggestBookingInternal — allSettled tolerance (Codex review #5)", ()
   });
 });
 
+describe("supplier-history booking titles belong to the current document (L2)", () => {
+  it.each([
+    ["old English service period", "Claude Max plan - 5x (Sep 20–Oct 20, 2026)", "Max plan - 5x\nOct 20–Nov 20, 2026", "Software"],
+    ["old Estonian month", "Google Cloudi tasu - september 2026", "Periood 1. okt – 31. okt 2026", "Software"],
+    ["old numeric period", "Hosting 01.09.2026–30.09.2026", "Hosting 01.10.2026–31.10.2026", "Software"],
+    ["old year", "Subscription 2025", "Subscription 2026", "Software"],
+    ["missing day", "Hosting Oct 19–Nov 20, 2026", "Hosting Oct 20–Nov 20, 2026", "Software"],
+    ["a substring is not the printed day", "Hosting Oct 20, 2026", "Hosting Oct 2020, 2026", "Software"],
+    ["current English period", "Claude Max plan - 5x (Oct 20–Nov 20, 2026)", "Max plan - 5x\nOct 20–Nov 20, 2026", "Claude Max plan - 5x (Oct 20–Nov 20, 2026)"],
+    ["current Estonian month and its abbreviation", "Google Cloudi tasu - oktoober 2026", "Periood 1. okt – 31. okt 2026", "Google Cloudi tasu - oktoober 2026"],
+    ["current numeric date", "Hosting 01.10.2026", "Service 1.10.2026", "Hosting 01.10.2026"],
+    ["timeless title", "Claude Max plan - 5x", "Max plan - 5x", "Claude Max plan - 5x"],
+    ["month substring in a word is timeless", "Maybe cloud service", "Cloud service", "Maybe cloud service"],
+    ["month names are whole words", "Hosting May", "Maybe hosting", "Software"],
+  ])("handles %s", async (_case, previousTitle, documentText, expectedTitle) => {
+    const api = { purchaseInvoices: { get: async () => ({
+      id: 2,
+      items: [{ custom_title: previousTitle, cl_purchase_articles_id: 10, purchase_accounts_id: 4920 }],
+    }) } };
+    const context = {
+      purchaseInvoices: [{ id: 2, clients_id: 7, status: "CONFIRMED" }],
+      purchaseArticlesWithVat: [{ id: 10, name_est: "Software", name_eng: "Software", accounts_id: 4920 }],
+      accounts: [makeAccount({ id: 4920, name_est: "Software expense" })],
+    };
+
+    const result = await suggestBookingInternal(api, context, 7, "Current service", documentText);
+
+    expect(result?.source).toBe("supplier_history");
+    expect(result?.item).toMatchObject({ custom_title: expectedTitle, cl_purchase_articles_id: 10, purchase_accounts_id: 4920 });
+  });
+});
+
 // ---------------------------------------------------------------------------
 // computeMinOcrConfidence — small-sample robust minimum (Codex review #6)
 // ---------------------------------------------------------------------------

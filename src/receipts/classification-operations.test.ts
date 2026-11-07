@@ -1206,8 +1206,9 @@ describe("classification operations — ledger context (F6)", () => {
     { id: 391, accounts_id: 1010, is_deleted: false },
   ];
   const LOAN_ACCOUNTS = [
-    { id: 2110, name_est: "Laenud", account_type_est: "Kohustused" },
+    { id: 2110, name_est: "Laenud", account_type_est: "Kohustused", is_valid: true, transaction_in_bindable: true, transaction_out_bindable: true },
     { id: 1410, name_est: "Laenunõuded", account_type_est: "Varad" },
+    { id: 1020, name_est: "Arvelduskontod", account_type_est: "Varad", is_valid: true, transaction_in_bindable: true, transaction_out_bindable: true },
   ];
 
   /** A PROJECT row with a genuine, checksum-valid CAMT marker. */
@@ -1521,7 +1522,10 @@ describe("classification operations — ledger context (F6)", () => {
     // A person without legal form; earlier payments were all confirmed to the
     // cash account 1010 / dimension 391 under client 77, with no invoice.
     const PERSON_IBAN = "EE947700771000826270";
-    const KASSA_ACCOUNTS = [...LOAN_ACCOUNTS, { id: 1010, name_est: "Sularaha kassas", account_type_est: "Varad" }];
+    const KASSA_ACCOUNTS = [...LOAN_ACCOUNTS, {
+      id: 1010, name_est: "Sularaha kassas", account_type_est: "Varad",
+      is_valid: true, is_disabled: false, transaction_in_bindable: true, transaction_out_bindable: true,
+    }];
     // History books only under a live client (review 2026-11-04 MAJOR 2).
     const liveClient = (id: number, name: string) => ({ id, name, is_deleted: false, is_active: true, deactivated_date: null });
     const HISTORY_CLIENTS = [liveClient(77, "Mari Maasikas"), liveClient(88, "Maakler AS")];
@@ -1542,6 +1546,74 @@ describe("classification operations — ledger context (F6)", () => {
       { ...camtRow({ id: 61, amount: 19, date: "2026-10-19", direction: "DBIT", name: "Mari Maasikas", iban: PERSON_IBAN, description: "Kassasse" }), clients_id: 77 },
       { ...camtRow({ id: 62, amount: 25, date: "2026-10-20", direction: "DBIT", name: "Mari Maasikas", iban: PERSON_IBAN, description: "Kassasse" }), clients_id: null },
     ];
+
+    it.each([
+      ["user permission is not enabled", { is_valid: true, transaction_out_bindable: false, transaction_out_user_bindable: true, transaction_out_user_bindable_set: false }],
+      ["only incoming is allowed", { is_valid: true, transaction_in_bindable: true, transaction_out_bindable: false }],
+      ["user permission cannot be configured", { is_valid: true, transaction_out_user_bindable: false, transaction_out_user_bindable_set: true }],
+      ["disabled account", { is_valid: true, is_disabled: true, transaction_out_bindable: true }],
+      ["invalid account", { is_valid: false, transaction_out_bindable: true }],
+      ["missing flags", {}],
+    ])("B3: holds non-bindable history (%s) in analysis and forced apply", async (_label, flags) => {
+      const history = kassaHistory([[1410, 901], [1410, 901]]);
+      const { api, operations } = historyOperations({
+        rows: [...payments(), ...history.transactions], journals: history.journals, allowWrites: true,
+        accounts: [{ id: 1410, name_est: "Laenunõuded", ...flags }],
+      });
+      const group = (await analyze(operations)).groups[0]!;
+      expect(group.apply_mode).toBe("review_only");
+      expect(group.suggested_booking.suggested_distribution).toBeUndefined();
+      expect(group.suggested_booking.reason).toContain("cannot be used on an outgoing bank row in e-arveldaja");
+      expect(group.suggested_booking.reason).toContain("enable it in the chart settings");
+      expect(group.review_guidance?.recommendation).toContain("cannot be used on an outgoing bank row in e-arveldaja");
+      const classificationsJson = { groups: [{ ...group, apply_mode: "account_distribution" }] };
+      const dry = await operations.applyClassifications({ classificationsJson });
+      if (!dry.ok) throw new Error("dry run failed");
+      expect(dry.value.results[0]!.status).toBe("skipped");
+      expect(dry.value.results[0]!.notes.join(" ")).toContain("cannot be used on an outgoing bank row in e-arveldaja");
+      const executed = await operations.applyClassifications({ classificationsJson, execute: true, planHandle: dry.value.planHandle });
+      expect(executed.ok).toBe(true);
+      expect(api.transactions.confirm).not.toHaveBeenCalled();
+      expect(api.transactions.update).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ["built-in incoming permission", { transaction_in_bindable: true }, "account_distribution"],
+      ["enabled user incoming permission", { transaction_in_user_bindable: true, transaction_in_user_bindable_set: true }, "account_distribution"],
+      ["outgoing permission only", { transaction_out_bindable: true }, "review_only"],
+    ])("B3: incoming history uses %s", async (_label, flags, expectedMode) => {
+      const history = historyRows("Mari Maasikas", "D", [1410, 901], ["2026-05-01", "2026-06-01"], 950);
+      history.transactions.forEach(row => Object.assign(row, { clients_id: 77, bank_account_no: PERSON_IBAN }));
+      const row = { ...camtRow({ id: 61, amount: 19, date: "2026-10-19", direction: "CRDT", name: "Mari Maasikas", iban: PERSON_IBAN }), clients_id: 77 };
+      const { operations } = historyOperations({
+        rows: [row, ...history.transactions], journals: history.journals,
+        accounts: [{ id: 1410, name_est: "Laenunõuded", is_valid: true, ...flags }],
+      });
+      expect((await analyze(operations)).groups[0]!.apply_mode).toBe(expectedMode);
+    });
+
+    it("B3: allows explicitly enabled user-bindable history, then drifts if the chart permission is removed", async () => {
+      const history = kassaHistory([[1410, 901], [1410, 901]]);
+      const account = {
+        id: 1410, name_est: "Laenunõuded", is_valid: true, transaction_out_bindable: false,
+        transaction_out_user_bindable: true, transaction_out_user_bindable_set: true,
+      };
+      const { api, operations } = historyOperations({
+        rows: [...payments(), ...history.transactions], journals: history.journals, allowWrites: true, accounts: [account],
+      });
+      const group = (await analyze(operations)).groups[0]!;
+      expect(group.apply_mode).toBe("account_distribution");
+      const classificationsJson = { groups: [group] };
+      const dry = await operations.applyClassifications({ classificationsJson });
+      if (!dry.ok) throw new Error("dry run failed");
+      expect(dry.value.results[0]!.status).toBe("dry_run_preview");
+      account.transaction_out_user_bindable_set = false;
+      const executed = await operations.applyClassifications({ classificationsJson, execute: true, planHandle: dry.value.planHandle });
+      expect(executed).toMatchObject({ ok: false, error: { code: "plan_drift" } });
+      expect(api.readonly.getAccounts).toHaveBeenLastCalledWith({ fresh: true });
+      expect(api.transactions.confirm).not.toHaveBeenCalled();
+      expect(api.transactions.update).not.toHaveBeenCalled();
+    });
 
     it("proposes the account and dimension with its evidence and books it after one reviewed plan", async () => {
       const history = kassaHistory([[1010, 391], [1010, 391]]);

@@ -2,12 +2,12 @@
   "profile": "custom",
   "measurement": {
     "toolCount": 85,
-    "toolsListBytes": 97455,
-    "descriptionsBytes": 13951,
-    "inputSchemasBytes": 63104,
+    "toolsListBytes": 97685,
+    "descriptionsBytes": 14074,
+    "inputSchemasBytes": 63211,
     "largestTool": {
       "name": "import_wise_transactions",
-      "bytes": 5627
+      "bytes": 5734
     },
     "serverInstructionsBytes": 1077,
     "promptMetadataBytes": 8266,
@@ -3230,7 +3230,7 @@
         "openWorldHint": false,
         "readOnlyHint": false
       },
-      "description": "Merged unmatched-bank classification. classify groups; dry_run_apply previews; execute_apply requires approval.",
+      "description": "Merged unmatched-bank classification. classify groups; dry_run_apply previews; execute_apply requires approval. History-based account distributions require an enabled account allowed for the bank row's direction, rechecked at execute.",
       "execution": {
         "taskSupport": "forbidden"
       },
@@ -3437,7 +3437,7 @@
             "type": "array"
           },
           "not_own_transfer_ids": {
-            "description": "Owner-confirmed only: exact transfer Wise IDs that are payments to or from a third party, not own transfers: imported as ordinary unconfirmed rows without an ownership review. Must not overlap confirm_own_transfer_ids; a row whose own-account evidence says otherwise is held (not_own_transfer_conflicts_evidence).",
+            "description": "Owner-confirmed only: exact transfer Wise IDs that are payments to or from a third party, not own transfers: imported as ordinary unconfirmed rows without an ownership review. When no candidate own-account evidence exists on any bank, no counterpart bank dimension is needed. Must not overlap confirm_own_transfer_ids; a row with strong or uncertain own-account evidence stays held (not_own_transfer_conflicts_evidence).",
             "items": {
               "minLength": 1,
               "type": "string"
