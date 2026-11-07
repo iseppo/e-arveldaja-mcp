@@ -5112,39 +5112,58 @@ const PERMANENT_BARRIER_ROLES: ReadonlyMap<string, FxReviewCode> = new Map([
 ]);
 const LOGGED_POOL_ROLES: ReadonlySet<string> = new Set(["distribution_in", "sell_in", "buy_relief", "conversion_out"]);
 
+/** The days a capital-gains file covers: its file-name period, else the span of its row dates; null when neither. */
+function capitalGainsCoverage(rows: readonly CapitalGainsRow[], fileName: string | undefined): { from: string; to: string } | null {
+  const period = statementPeriodFromFileName(fileName);
+  if (period) return period;
+  const days = rows.map(row => parseLightyearDate(row.date).slice(0, 10)).filter(isStrictDate).sort();
+  return days.length > 0 ? { from: days[0]!, to: days[days.length - 1]! } : null;
+}
+
 /**
  * The earliest permanent barrier ordered after `after` and before `until` (owner decision 2026-11-07):
  * an unsupported or ambiguously paired row, a second holding pool inflow and outflow, an unlogged pool row
- * without an exact source digest, or an unlogged USD sale kept in USD that the supplied capital-gains rows
- * do not match (without `gainsRows` such a sale is never a barrier: nothing proves it unmatched).
+ * without an exact source digest or already booked by hand outside the pool log, a sweep booked as a journal,
+ * or an unlogged USD sale kept in USD that the supplied capital-gains file covers but does not match.
+ * Without a gains file, or with one that does not cover the sale's day, such a sale is not proven
+ * unmatched (`unproven` says why when nothing else blocks).
  */
 function firstPoolBarrier(
   rows: AccountStatementRow[],
-  gainsRows: CapitalGainsRow[] | null,
+  gains: { rows: CapitalGainsRow[]; coverage: { from: string; to: string } | null } | null,
   committedRefs: ReadonlySet<string>,
+  bookedRefs: ReadonlySet<string>,
   after: PoolOrder,
   until: PoolOrder,
-): PoolBarrier | null {
+): { barrier: PoolBarrier | null; unproven: string | null } {
   const fundingTickers = KNOWN_CASH_EQUIVALENT_TICKERS;
   const trades = extractTrades(rows, { fundingTickers });
   const statement = statementPoolEvents(rows, trades, extractDistributions(rows, tradeReservedConversionRefsWithFunding(rows, fundingTickers)), fundingTickers);
-  const gainsMap = gainsRows === null ? null : matchSellsToCapitalGains(trades.trades.filter(t => t.type === "Sell"), gainsRows);
+  const gainsMap = gains === null ? null : matchSellsToCapitalGains(trades.trades.filter(t => t.type === "Sell"), gains.rows);
   const inInterval = (order: PoolOrder) => compareOrder(order, after) > 0 && compareOrder(order, until) < 0;
   const found: PoolBarrier[] = [];
+  let unproven: string | null = null;
   for (const event of statement.events) {
     if (event.ts === null || !inInterval(eventOrder(event.ref, event.ts))) continue;
     const digest = poolSourceDigest(statement.rows, event.ref);
     let code = PERMANENT_BARRIER_ROLES.get(event.role);
+    if (code === undefined && event.role === "sweep" && bookedRefs.has(event.ref)) code = "usd_pool_sweep_booked";
     if (code === undefined && LOGGED_POOL_ROLES.has(event.role) && !committedRefs.has(event.ref)) {
       if (digest === null) code = "usd_pool_source_unbound";
-      else if (event.role === "sell_in" && gainsMap !== null && !gainsMap.has(event.ref)) code = "pool_sell_gains_unmatched";
+      else if (bookedRefs.has(event.ref)) code = "usd_pool_prerequisite_unbooked";
+      else if (event.role === "sell_in" && !gainsMap?.has(event.ref)) {
+        const day = new Date(event.ts * 1000).toISOString().slice(0, 10);
+        if (gains === null) unproven ??= "a USD sale kept in USD counts only with capital_gains_file";
+        else if (gains.coverage === null || day < gains.coverage.from || day > gains.coverage.to) unproven ??= `capital_gains_file does not cover the sale of ${day}`;
+        else code = "pool_sell_gains_unmatched";
+      }
     }
     if (code !== undefined) found.push({ code, ref: event.ref, ts: event.ts, source_digest: digest });
   }
   const mixed = checkMixedSeconds(statement.events, after);
   if (mixed !== null && inInterval(eventOrder("", mixed))) found.push({ code: "usd_pool_ambiguous_order", ref: String(mixed), ts: mixed, source_digest: null });
   found.sort((a, b) => compareOrder(eventOrder(a.ref, a.ts), eventOrder(b.ref, b.ts)));
-  return found[0] ?? null;
+  return { barrier: found[0] ?? null, unproven };
 }
 
 /**
@@ -6229,7 +6248,15 @@ export function registerLightyearTools(
       const evaluate = async (bindings: readonly unknown[], frozen: FrozenFxOutcomes | undefined, inLock: boolean) => {
         const snapshot = await readCsvSnapshot(statementSource, FILE_REFERENCE_OPERATIONS.lightyearStatement, runtimeSafetyContext, bindings[0]);
         const rows = parseAccountStatement(snapshot.text());
-        const gainsSnapshot = gainsSource ? await readCsvSnapshot(gainsSource, FILE_REFERENCE_OPERATIONS.lightyearGains, runtimeSafetyContext, bindings[1]) : null;
+        let gainsSnapshot: FileInputSnapshot | null = null;
+        if (gainsSource) {
+          try {
+            gainsSnapshot = await readCsvSnapshot(gainsSource, FILE_REFERENCE_OPERATIONS.lightyearGains, runtimeSafetyContext, bindings[1]);
+          } catch (error) {
+            if (bindings.length > 1 && error instanceof FileInputSnapshotError) return { error: sourceReReadDrift(error, "The reviewed Lightyear capital-gains statement") } as const;
+            throw error;
+          }
+        }
         const gainsRows = gainsSnapshot ? parseCapitalGains(gainsSnapshot.text()) : null;
         const keyResolution = resolveLightyearPoolKey(api, snapshot, file_path, lightyear_account, broker_account, broker_dimension_id);
         if (!keyResolution.ok) return { error: invalid(keyResolution.error) } as const;
@@ -6257,8 +6284,19 @@ export function registerLightyearTools(
           // between the current opening and the end of the new opening's day.
           let barrier: PoolBarrier | null = null;
           if (view.opening) {
-            barrier = firstPoolBarrier(rows, gainsRows, new Set(view.events.map(event => event.ref)), checkpointOrder("opening", view.opening.as_of), reopening);
-            if (barrier === null) return review("usd_pool_opening_exists", gainsRows === null ? "not_blocked (a USD sale kept in USD counts only with capital_gains_file)" : "not_blocked");
+            let liveJournals: Journal[];
+            try {
+              api.journals.invalidateListCache();
+              liveJournals = await api.journals.listAll();
+            } catch {
+              return review("usd_pool_validation_unavailable");
+            }
+            const liveNumbers = new Set(liveJournals.filter(j => j.is_deleted !== true).map(j => j.document_number));
+            const bookedRefs = new Set(rows.map(row => row.reference).filter(ref => liveNumbers.has(`LY:${ref}`) || liveNumbers.has(ref)));
+            const gains = gainsRows === null ? null : { rows: gainsRows, coverage: capitalGainsCoverage(gainsRows, gainsSnapshot?.canonicalPath() ?? capital_gains_file) };
+            const found = firstPoolBarrier(rows, gains, new Set(view.events.map(event => event.ref)), bookedRefs, checkpointOrder("opening", view.opening.as_of), reopening);
+            barrier = found.barrier;
+            if (barrier === null) return review("usd_pool_opening_exists", found.unproven === null ? "not_blocked" : `not_blocked (${found.unproven})`);
           }
           if (period !== null && period.to < as_of) return review("usd_pool_statement_gap");
           const replay = replayUsdOpening(openingReplayRows(rows), asOfTs, KNOWN_CASH_EQUIVALENT_TICKERS);
@@ -6426,7 +6464,7 @@ export function registerLightyearTools(
           note: evaluation.kind === "opening"
             ? "This is the ECB valuation of the replayed USD at as_of (the replay assumes the statement starts from an empty USD position), not the books' historical carrying value. Approving stores it as the pool's opening checkpoint; set dry_run=false with the plan_handle only after the owner approves."
               + (evaluation.supersedes !== null
-                ? ` It replaces the opening of ${evaluation.supersedes}, past the blocking row ${evaluation.barrier!.ref} (${evaluation.barrier!.code}): USD pool rows dated on or before as_of that are not booked yet are no longer booked by these tools (book them by hand first), and the carrying value restarts at target_eur.`
+                ? ` It replaces the opening of ${evaluation.supersedes}, past the blocking row ${wrapUntrustedOcr(evaluation.barrier!.ref)} (${evaluation.barrier!.code}): USD pool rows dated on or before as_of that are not booked yet are no longer booked by these tools (book them by hand first), and the carrying value restarts at target_eur.`
                 : "")
             : "Set dry_run=false and pass the plan_handle from this reviewed dry run. The plan handle is not approval — review the plan first.",
         })) }] };

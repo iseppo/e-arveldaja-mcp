@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { resolveFileInput } from "../file-validation.js";
 import { readFileCapped } from "../bounded-read.js";
 import { lightyearStatementCsv } from "../__fixtures__/lightyear-rows.js";
-import { poolOpening, setupPoolTool } from "../__fixtures__/lightyear-pool-harness.js";
+import { poolDistribution, poolOpening, setupPoolTool } from "../__fixtures__/lightyear-pool-harness.js";
 import { memoryUsdPoolStore } from "../__fixtures__/usd-pool-store.js";
 import type { UsdPoolCheckpoint, UsdPoolEvent } from "../lightyear/usd-pool.js";
 import type { Journal } from "../types/api.js";
@@ -60,15 +60,17 @@ const SELL = ["10/02/2026 10:00:00", "OR-TESTSELL1", "AMD", "US0079031078", "Sel
 const UNRELATED_GAINS = [["2026-02-10 10:00:00", "NVDA", "NVDA", "US67066G1040", "United States", "equity", "0", "1", "80.00", "90.00", "10.00"]];
 
 let statementRows: string[][] = [];
+let gainsRows: string[][] = [];
 
 describe("USD pool barrier: re-opening after a row the pool cannot book (Fable M2)", () => {
   beforeEach(() => {
     statementRows = [...BLOCKING, ...LATER];
+    gainsRows = UNRELATED_GAINS;
     mockedResolveFileInput.mockReset();
     mockedResolveFileInput.mockImplementation(async (input: string) => ({ path: input }));
     mockedReadFileCapped.mockReset();
     mockedReadFileCapped.mockImplementation(async (path: string) => Buffer.from(
-      path === GAINS_PATH ? `${GAINS_HEADER}\n${UNRELATED_GAINS.map(row => row.map(value => `"${value}"`).join(",")).join("\n")}\n` : lightyearStatementCsv(statementRows),
+      path === GAINS_PATH ? `${GAINS_HEADER}\n${gainsRows.map(row => row.map(value => `"${value}"`).join(",")).join("\n")}\n` : lightyearStatementCsv(statementRows),
       "utf8",
     ));
   });
@@ -95,7 +97,8 @@ describe("USD pool barrier: re-opening after a row the pool cannot book (Fable M
     const { store, trades, revaluation } = tools();
     const reopen = await revaluation.book({ mode: "opening", as_of: "2026-02-10" });
     expect(reopen.dry.payload).toMatchObject({ status: "would_store_opening", usd_amount: 200 });
-    expect(reopen.dry.payload.note).toContain("It replaces the opening of 2025-12-31, past the blocking row CN-TESTBLOCK (usd_pool_unsupported_event)");
+    expect(reopen.dry.payload.note).toContain("It replaces the opening of 2025-12-31, past the blocking row <<UNTRUSTED_OCR_START:");
+    expect(reopen.dry.payload.note).toMatch(/CN-TESTBLOCK\n?<<UNTRUSTED_OCR_END:[0-9a-f]+>> \(usd_pool_unsupported_event\)/);
     expect(reopen.exec.payload.status).toBe("opening_stored");
     expect(openings(store.records)).toEqual(["2025-12-31", "2026-02-10"]);
 
@@ -152,7 +155,7 @@ describe("USD pool barrier: re-opening after a row the pool cannot book (Fable M
     const unproven = await revaluation.run({ mode: "opening", as_of: "2026-02-10", dry_run: true });
     expect(unproven.payload.review_reason).toMatchObject({ code: "usd_pool_opening_exists", detail: expect.stringContaining("capital_gains_file") });
     const reopen = await revaluation.book({ mode: "opening", as_of: "2026-02-10", capital_gains_file: GAINS_PATH });
-    expect(reopen.dry.payload.note).toContain("OR-TESTSELL1 (pool_sell_gains_unmatched)");
+    expect(reopen.dry.payload.note).toMatch(/OR-TESTSELL1\n?<<UNTRUSTED_OCR_END:[0-9a-f]+>> \(pool_sell_gains_unmatched\)/);
     expect(reopen.exec.payload.status).toBe("opening_stored");
     expect(openings(store.records)).toEqual(["2025-12-31", "2026-02-10"]);
     const { dry } = await trades.book({ capital_gains_file: GAINS_PATH });
@@ -166,8 +169,92 @@ describe("USD pool barrier: re-opening after a row the pool cannot book (Fable M
     await trades.book();
     // The conversion of 2026-03-20 is now logged: a re-opening before it would replay past a logged event.
     const refused = await revaluation.run({ mode: "opening", as_of: "2026-03-19", dry_run: true });
-    expect(refused.payload).toMatchObject({ status: "review", review_reason: { code: "usd_pool_opening_exists" } });
+    expect(refused.payload).toMatchObject({ status: "review", review_reason: { code: "usd_pool_opening_exists", detail: "record_after" } });
     expect(refused.payload.plan_handle).toBeUndefined();
     expect(openings(store.records)).toEqual(["2025-12-31", "2026-02-10"]);
+  });
+
+  it("a later revaluation validates from the new opening (the blocked row no longer counts)", async () => {
+    const { revaluation } = tools();
+    const before = await revaluation.run({ mode: "revalue", as_of: "2026-02-28", expected_usd_holding: 200, dry_run: true });
+    expect(before.payload.review_reason?.code).toBe("usd_pool_unsupported_event");
+    await revaluation.book({ mode: "opening", as_of: "2026-02-10" });
+    const after = await revaluation.run({ mode: "revalue", as_of: "2026-02-28", expected_usd_holding: 200, dry_run: true });
+    expect(after.payload).toMatchObject({ status: "would_record_checkpoint", usd_amount: 200 });
+    expect(after.payload.plan_handle).toBeDefined();
+  });
+
+  it("capital_gains_file is refused with mode \"revalue\"", async () => {
+    const { revaluation } = tools();
+    const { result } = await revaluation.run({ mode: "revalue", as_of: "2026-02-28", expected_usd_holding: 200, capital_gains_file: GAINS_PATH, dry_run: true });
+    expect(result.isError).toBe(true);
+    expect(result.content[0]!.text).toContain("capital_gains_file is used only with mode");
+  });
+
+  it("execute is plan_drift when the capital-gains file is swapped after the dry run", async () => {
+    statementRows = [SELL, ...LATER];
+    const { store, revaluation } = tools();
+    const dry = await revaluation.run({ mode: "opening", as_of: "2026-02-10", capital_gains_file: GAINS_PATH, dry_run: true });
+    expect(dry.payload.status).toBe("would_store_opening");
+    gainsRows = [...UNRELATED_GAINS, ["2026-02-11 10:00:00", "NVDA", "NVDA", "US67066G1040", "United States", "equity", "0", "1", "70.00", "90.00", "20.00"]];
+    const exec = await revaluation.run({ mode: "opening", as_of: "2026-02-10", capital_gains_file: GAINS_PATH, dry_run: false, plan_handle: dry.payload.plan_handle });
+    expect(exec.result.isError).toBe(true);
+    expect(exec.result.content[0]!.text).toContain("plan_drift");
+    expect(exec.result.content[0]!.text).toContain("Lightyear capital-gains statement");
+    expect(openings(store.records)).toEqual(["2025-12-31"]);
+  });
+
+  it("execute is plan_drift when a pool record is committed after the dry run", async () => {
+    const { store, revaluation } = tools();
+    const dry = await revaluation.run({ mode: "opening", as_of: "2026-02-10", dry_run: true });
+    expect(dry.payload.status).toBe("would_store_opening");
+    store.upsert([poolDistribution("DD-TESTMAR01", "2026-03-01T10:00:00Z", 100, 89, 901)]);
+    const exec = await revaluation.run({ mode: "opening", as_of: "2026-02-10", dry_run: false, plan_handle: dry.payload.plan_handle });
+    expect(exec.result.isError).toBe(true);
+    expect(exec.result.content[0]!.text).toContain("plan_drift");
+    expect(openings(store.records)).toEqual(["2025-12-31"]);
+  });
+
+  it("a gains file that does not cover the sale's day proves nothing: not_blocked with that reason", async () => {
+    statementRows = [SELL, ...LATER];
+    gainsRows = [["2026-05-01 10:00:00", "NVDA", "NVDA", "US67066G1040", "United States", "equity", "0", "1", "80.00", "90.00", "10.00"]];
+    const { revaluation } = tools();
+    const refused = await revaluation.run({ mode: "opening", as_of: "2026-02-10", capital_gains_file: GAINS_PATH, dry_run: true });
+    expect(refused.payload.review_reason).toMatchObject({ code: "usd_pool_opening_exists", detail: "not_blocked (capital_gains_file does not cover the sale of 2026-02-10)" });
+    expect(refused.payload.plan_handle).toBeUndefined();
+  });
+
+  it("a pool row booked by hand outside the pool log is a re-openable barrier (no gains file needed)", async () => {
+    statementRows = [SELL, ...LATER];
+    const handBookedSale: Journal = {
+      id: 802, document_number: "LY:OR-TESTSELL1", effective_date: "2026-02-10", registered: true, is_deleted: false,
+      postings: [{ accounts_id: 1120, type: "D", amount: 90 }, { accounts_id: 1550, type: "C", amount: 90 }],
+    };
+    const store = memoryUsdPoolStore([poolOpening(0, 0, "1")]);
+    const trades = setupPoolTool<LightyearTradesPayload>("book_lightyear_trades", TRADE_ACCOUNTS, { store, journals: [handBookedSale] });
+    const revaluation = setupPoolTool<LightyearFxRevaluationPayload>("book_lightyear_fx_revaluation", { broker_account: 1120 }, { store, journals: [handBookedSale] });
+    const blocked = await trades.run({ dry_run: true });
+    expect(reviewCode(blocked.payload, "CN-TESTLATER")).toBe("usd_pool_prerequisite_unbooked");
+    const warning = (blocked.payload.warnings ?? []).find(text => text.includes("CN-TESTLATER"))!;
+    expect(warning).toContain("it can no longer be logged");
+    const reopen = await revaluation.book({ mode: "opening", as_of: "2026-02-10" });
+    expect(reopen.dry.payload.note).toMatch(/OR-TESTSELL1\n?<<UNTRUSTED_OCR_END:[0-9a-f]+>> \(usd_pool_prerequisite_unbooked\)/);
+    expect(reopen.exec.payload.status).toBe("opening_stored");
+    const { dry } = await trades.book();
+    expect(resultFor(dry.payload, "CN-TESTLATER")).toMatchObject({ status: "would_create", pool: { kind: "conversion_out" } });
+  });
+
+  it("an ambiguously paired group is a re-openable barrier", async () => {
+    // Two same-second USD buys and two same-second EUR→USD conversions of the same amount: no unique pairing.
+    const conv = (ref: string): string[][] => [
+      ["10/02/2026 10:00:00", ref, "", "", "Conversion", "0", "EUR", "0", "-90.00", "1.111111", "0", "-90.00", "0"],
+      ["10/02/2026 10:00:00", ref, "", "", "Conversion", "0", "USD", "0", "100.00", "0.9", "0", "100.00", "0"],
+    ];
+    const buyRow = (ref: string): string[] => ["10/02/2026 10:00:00", ref, "NVDA", "US67066G1040", "Buy", "1", "USD", "100", "100.00", "0", "0", "100.00", "0"];
+    statementRows = [...conv("CN-TESTAMB1"), ...conv("CN-TESTAMB2"), buyRow("OR-TESTAMB1"), buyRow("OR-TESTAMB2"), ...LATER];
+    const { revaluation } = tools();
+    const dry = await revaluation.run({ mode: "opening", as_of: "2026-02-10", dry_run: true });
+    expect(dry.payload.status).toBe("would_store_opening");
+    expect(dry.payload.note).toContain("(usd_pool_pairing_ambiguous)");
   });
 });

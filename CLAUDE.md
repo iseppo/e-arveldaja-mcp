@@ -616,8 +616,10 @@ broker target for the same Lightyear account is `usd_pool_target_mismatch`. Reco
 owner-approved opening checkpoint (`book_lightyear_fx_revaluation` `mode: "opening"`, replayed
 from the statement and valued at the ECB rate; a later opening is accepted only while the pool is blocked — a
 permanent barrier (`firstPoolBarrier`: `usd_pool_unsupported_event`, `usd_pool_pairing_ambiguous`,
-`usd_pool_ambiguous_order`, `usd_pool_source_unbound`, or `pool_sell_gains_unmatched` proven by an optional
-`capital_gains_file`) between the current opening and the end of the new opening's day, owner decision 2026-11-07 —
+`usd_pool_ambiguous_order`, `usd_pool_source_unbound`, a pool row booked by hand outside the pool log
+(`usd_pool_prerequisite_unbooked`, live `LY:<ref>` or bare-ref journal) or a booked sweep (`usd_pool_sweep_booked`),
+or `pool_sell_gains_unmatched` proven by an optional `capital_gains_file` that covers the sale's day — file-name
+period, else its row-date span; otherwise `not_blocked` with the reason) between the current opening and the end of the new opening's day, owner decision 2026-11-07 —
 and when it orders after every record of the pool (committed events, intents, checkpoints); otherwise
 `usd_pool_opening_exists` (detail `not_blocked` / `record_after`). The barrier (code, ref, ts, source digest) is bound
 in the plan fingerprint. It then supersedes the earlier one: `poolRecordsFor` takes the latest opening, so replay,
@@ -667,8 +669,8 @@ Statement roles (`src/lightyear/pool-statement.ts`): every USD row gets exactly 
 booked, checked at price 1.00 / fee 0 / gross = quantity), `distribution_in`, `sell_in`, `buy_relief`,
 `conversion_out`, `unsupported` (EUR→USD conversion with no trade, USD deposit/withdrawal),
 `pairing_ambiguous` or `unplaceable` (no valid timestamp: blocks the whole pool for that statement).
-An `unsupported` / `pairing_ambiguous` row, an ambiguous second, a `usd_pool_source_unbound` row and an unmatched
-pool sell refuse every later pool command, and a hand-booked `LY:<ref>` journal does not clear them (a pool EUR
+An `unsupported` / `pairing_ambiguous` row, an ambiguous second, a `usd_pool_source_unbound` row, an unmatched
+pool sell, a pool row booked outside the pool log and a booked sweep refuse every later pool command, and a hand-booked `LY:<ref>` journal does not clear them (a pool EUR
 effect is not provable from the journal: a EUR→USD conversion nets to ~0 inside the broker account; no
 manual-event route, owner decision). The owner's way out is to book the row by hand and re-open dated on or after
 its day (Fable M2; for an unmatched sell first the matching capital-gains file); the review messages say so. Rows
