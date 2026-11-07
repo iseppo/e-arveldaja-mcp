@@ -1069,6 +1069,8 @@ export function renderInterAccountCompact(input: InterAccountCompactInput): Reco
   warnings.push(...cappedWarnings("inter_account_error", m.errors.map(row => ({
     code: row.code ?? "inter_account_error",
     message: row.reason,
+    ...(row.account_number !== undefined ? { account_number: row.account_number } : {}),
+    ...(row.upstream_detail !== undefined ? { upstream_detail: row.upstream_detail } : {}),
   })), errorHint));
   for (const message of m.warnings ?? []) {
     warnings.push({ code: "company_name_without_legal_form", message });
@@ -1076,6 +1078,16 @@ export function renderInterAccountCompact(input: InterAccountCompactInput): Reco
 
   const executionStopped = !dryRun && input.executionReport?.stop_reason != null;
   const blockers: CompactReviewItem[] = [];
+  for (const row of m.errors) {
+    if (row.code === "account_not_bank_bindable") blockers.push({
+      item_id: row.transaction_ids.join(","),
+      code: row.code,
+      message: row.reason,
+      severity: "blocker",
+      ...(row.account_number !== undefined ? { account_number: row.account_number } : {}),
+      ...(row.upstream_detail !== undefined ? { upstream_detail: row.upstream_detail } : {}),
+    });
+  }
   if (executionStopped) {
     const stop = input.executionReport?.stop_reason as { command_id?: unknown; category?: unknown } | undefined;
     blockers.push({

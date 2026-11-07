@@ -321,6 +321,7 @@ export interface WiseSkippedEntry {
   wise_id: string;
   reason: string;
   kind: WiseSkipKind;
+  review_reason?: import("../banking/account-binding-refusal.js").AccountBindingRefusal;
   /** The ledger record the reason names (a transaction for already_imported,
    * else a journal): skipped_details groups the reason with it templated out. */
   record_id?: number;

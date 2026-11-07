@@ -2,6 +2,8 @@ export interface CompactWarning {
   readonly code: string;
   readonly message: string;
   readonly item_id?: string;
+  readonly account_number?: string;
+  readonly upstream_detail?: string;
 }
 
 export interface CompactReviewItem {
@@ -9,6 +11,8 @@ export interface CompactReviewItem {
   readonly code: string;
   readonly message: string;
   readonly severity: "warning" | "blocker";
+  readonly account_number?: string;
+  readonly upstream_detail?: string;
 }
 
 /**

@@ -14,6 +14,8 @@ import { toolMetadataText } from "../__fixtures__/tool-metadata.js";
 import { buildCamtDescriptionWithMetadata, isTrustedCamtDescriptionMetadata } from "../camt/duplicate-identity.js";
 import { getComparableBaseInvoiceAmount } from "../banking/reconciliation/invoice-index.js";
 import { runWithToolProfile } from "../tool-profile.js";
+import { HttpError } from "../http-client.js";
+import { wrapUntrustedOcr } from "../mcp-json.js";
 
 /**
  * Re-sign a fixture's CAMT marker with a real checksum. Reconciliation excludes
@@ -1523,6 +1525,24 @@ describe("reconcile_inter_account_transfers", () => {
     { id: 1, account_name_est: "LHV", account_no: "EE123456789012345678", iban_code: "EE123456789012345678", accounts_dimensions_id: 100 },
     { id: 2, account_name_est: "SEB", account_no: "EE987654321098765432", iban_code: "EE987654321098765432", accounts_dimensions_id: 200 },
   ];
+
+  it("keeps the refused account and sandboxed upstream detail when account confirmation fails", async () => {
+    const { handler, api } = setupInterAccountTool({
+      transactions: [
+        { id: 1, status: "PROJECT", is_deleted: false, type: "C", amount: 500, date: "2026-03-20", accounts_dimensions_id: 100, bank_account_no: "EE987654321098765432", description: "Ülekanne SEB kontole" },
+        camtSigned({ id: 2, status: "PROJECT", is_deleted: false, type: "D", amount: 500, date: "2026-03-20", accounts_dimensions_id: 200, bank_account_no: "EE123456789012345678", description: "[e-arveldaja-mcp:camt dir=CRDT sig=abc123abc123abcd]" }),
+      ], bankAccounts,
+    });
+    const detail = wrapUntrustedOcr("The account 1020 has not been allowed to be reconciled ([1010])!");
+    api.transactions.confirm.mockRejectedValue(new HttpError("HTTP 409", 409, "PATCH", "/transactions/1/register", { upstream_detail: detail }));
+    const payload = parseToolPayload<ReconInterAccountPayload>((await executeInterAccount(handler)).content[0]!.text);
+    expect(payload.errors).toEqual(expect.arrayContaining([expect.objectContaining({
+      code: "account_not_bank_bindable", account_number: "1020", upstream_detail: detail,
+      reason: expect.stringContaining("enable it in the chart settings"),
+    })]));
+    expect(api.transactions.confirm).toHaveBeenCalledTimes(1);
+    expect(api.transactions.delete).not.toHaveBeenCalled();
+  });
 
   it("matches a C↔D pair with same amount, same date, and counterparty IBAN matching own account", async () => {
     const { handler } = setupInterAccountTool({

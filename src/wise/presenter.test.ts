@@ -4,6 +4,7 @@ import { mcpPayloadBytes, RESPONSE_BUDGETS } from "../response-budget.js";
 import { roundMoney } from "../money.js";
 import type { WiseAlreadyJournalizedAssertion, WiseCreatedEntry, WiseImportCommand, WiseRow, WiseSkippedEntry } from "./types.js";
 import { parseToolPayload } from "../__fixtures__/mcp-response.js";
+import { wrapUntrustedOcr } from "../mcp-json.js";
 
 // B2: the guided compact Wise response must stay approximately CONSTANT in size
 // as the clean-row count grows, and always fit under the batch response budget.
@@ -33,6 +34,19 @@ function cleanRow(index: number): WiseRow {
     note: "",
   };
 }
+
+it("keeps bank-account refusal guidance and upstream detail in guided execution blockers", () => {
+  const data = makeData(1, "EXECUTED", 1);
+  const detail = wrapUntrustedOcr("The account 8412 has not been allowed to be reconciled ([8411, 8413])!")!;
+  data.skipped[0]!.review_reason = {
+    code: "account_not_bank_bindable", account_number: "8412", upstream_detail: detail,
+    next_action: "Account 8412 cannot be used on a bank row in e-arveldaja — enable it in the chart settings, choose an allowed account, or book a separate journal.",
+  };
+  expect(renderWiseImportCompact({ data }).summary.blockers).toEqual(expect.arrayContaining([expect.objectContaining({
+    code: "account_not_bank_bindable", account_number: "8412", upstream_detail: detail,
+    message: expect.stringContaining("enable it in the chart settings"),
+  })]));
+});
 
 function cleanCreated(index: number): WiseCreatedEntry {
   const row = cleanRow(index);

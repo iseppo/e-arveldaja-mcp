@@ -28,6 +28,7 @@ import { reportProgress } from "../progress.js";
 import { clearRuntimeCaches } from "../cache-control.js";
 import { isNonVoidTransaction } from "../transaction-status.js";
 import { createBankTransaction } from "../bank-transaction-create.js";
+import { accountBindingRefusal } from "../banking/account-binding-refusal.js";
 import { isMutationIndeterminate } from "../mutation-outcome.js";
 import { BookingGuard } from "../booking-guard.js";
 import { wrapUntrustedOcr } from "../mcp-json.js";
@@ -1057,6 +1058,7 @@ async function runWiseImport(
               wise_id: command.wise_id,
               reason: `Fee confirmation failed: ${errorMessage}`,
               kind: "error",
+              ...(accountBindingRefusal(error) ? { review_reason: accountBindingRefusal(error) } : {}),
             });
             created.push({
               ...createdEntryFor(command, apiId, `created (confirm failed: ${wrapUntrustedOcr(errorMessage)})`),
@@ -1166,6 +1168,7 @@ async function runWiseImport(
               wise_id: command.wise_id,
               reason: `Inter-account confirmation failed: ${errorMessage}`,
               kind: "error",
+              ...(accountBindingRefusal(error) ? { review_reason: accountBindingRefusal(error) } : {}),
             });
             interAccountResults.push({
               api_id: apiId,

@@ -11,6 +11,7 @@ import { snapshotBankTransaction, compareBankTransactionMaterial, snapshotLinked
 import { withPurchaseInvoiceLock, scanPurchaseIntakeDuplicates } from "../documents/purchase-invoice-lock.js";
 import { draftFingerprint, draftReadbackMismatches } from "../documents/purchase-draft-verification.js";
 import { MutationIndeterminateError } from "../mutation-outcome.js";
+import { accountBindingRefusal, type AccountBindingRefusal } from "../banking/account-binding-refusal.js";
 import { reportProgress } from "../progress.js";
 import { logAudit } from "../audit-log.js";
 import { isProjectTransaction } from "../transaction-status.js";
@@ -200,6 +201,7 @@ export interface ApplyClassificationGroupResult {
   created_invoice_ids?: number[];
   linked_transaction_ids?: number[];
   partial_mutations?: PartialClassificationMutation[];
+  review_reasons?: Array<AccountBindingRefusal & { transaction_id: number }>;
 }
 
 export interface ApplyClassificationsResult {
@@ -838,6 +840,7 @@ class ClassificationOperationsImpl implements ClassificationOperations {
     const api = this.api;
     const { group, transactionIds, freshTransactions, notes, dryRun, ledgerBlocks, historyDistributions } = input;
     const linkedTransactionIds: number[] = [];
+    const reviewReasons: NonNullable<ApplyClassificationGroupResult["review_reasons"]> = [];
     let previewCount = 0;
     let failedCount = 0;
     for (const transaction of freshTransactions) {
@@ -920,6 +923,8 @@ class ClassificationOperationsImpl implements ClassificationOperations {
         linkedTransactionIds.push(id);
       } catch (error) {
         failedCount += 1;
+        const refusal = accountBindingRefusal(error);
+        if (refusal) reviewReasons.push({ ...refusal, transaction_id: id });
         const ambiguous = isAmbiguousPostCreateFailure(error);
         const clientNote = clientWritten ? ` Its client was set to ${distribution.clients_id} before the failure.` : "";
         const message = error instanceof Error ? error.message : String(error);
@@ -940,6 +945,7 @@ class ClassificationOperationsImpl implements ClassificationOperations {
       notes,
       transactions: transactionIds,
       direct_confirmation: true,
+      ...(reviewReasons.length ? { review_reasons: reviewReasons } : {}),
       ...(dryRun ? {} : { linked_transaction_ids: linkedTransactionIds }),
     };
   }

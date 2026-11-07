@@ -4,6 +4,7 @@ import type { Transaction, TransactionDistribution, PurchaseInvoice, SaleInvoice
 import type { CreateBankTransactionPayload, UpdateBankTransactionRequest } from "../types/mutations.js";
 import { classifyMutationFailure, isMutationIndeterminate, MutationIndeterminateError } from "../mutation-outcome.js";
 import { BaseResource, cache } from "./base-resource.js";
+import { accountBindingRefusal, AccountNotBankBindableError } from "../banking/account-binding-refusal.js";
 import {
   compareBankTransactionMaterial, changedLinkedInvoiceFields, TransactionMaterialDriftError,
   type BankTransactionMaterialSnapshot, type ExpectedLinkedInvoices, type InvoiceTable,
@@ -449,6 +450,8 @@ export class TransactionsApi extends BaseResource<Transaction> {
           );
         }
       }
+      const refusal = body.some(row => row.related_table === "accounts") ? accountBindingRefusal(error) : undefined;
+      if (refusal && error instanceof HttpError) throw new AccountNotBankBindableError(error, refusal);
       throw error;
     }
   }

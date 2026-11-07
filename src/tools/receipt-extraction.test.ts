@@ -2128,18 +2128,19 @@ describe("suggestBookingInternal — allSettled tolerance (Codex review #5)", ()
 
 describe("supplier-history booking titles belong to the current document (L2)", () => {
   it.each([
-    ["old English service period", "Claude Max plan - 5x (Sep 20–Oct 20, 2026)", "Max plan - 5x\nOct 20–Nov 20, 2026", "Software"],
-    ["old Estonian month", "Google Cloudi tasu - september 2026", "Periood 1. okt – 31. okt 2026", "Software"],
-    ["old numeric period", "Hosting 01.09.2026–30.09.2026", "Hosting 01.10.2026–31.10.2026", "Software"],
-    ["old year", "Subscription 2025", "Subscription 2026", "Software"],
-    ["missing day", "Hosting Oct 19–Nov 20, 2026", "Hosting Oct 20–Nov 20, 2026", "Software"],
-    ["a substring is not the printed day", "Hosting Oct 20, 2026", "Hosting Oct 2020, 2026", "Software"],
+    ["old English service period", "Claude Max plan - 5x (Sep 20–Oct 20, 2026)", "Max plan - 5x\nOct 20–Nov 20, 2026", "Claude Max plan - 5x"],
+    ["old Estonian month", "Google Cloudi tasu - september 2026", "Periood 1. okt – 31. okt 2026", "Google Cloudi tasu"],
+    ["old numeric period", "Hosting 01.09.2026–30.09.2026", "Hosting 01.10.2026–31.10.2026", "Hosting"],
+    ["old year", "Subscription 2025", "Subscription 2026", "Subscription"],
+    ["missing day", "Hosting Oct 19–Nov 20, 2026", "Hosting Oct 20–Nov 20, 2026", "Hosting"],
+    ["a substring is not the printed day", "Hosting Oct 20, 2026", "Hosting Oct 2020, 2026", "Hosting"],
     ["current English period", "Claude Max plan - 5x (Oct 20–Nov 20, 2026)", "Max plan - 5x\nOct 20–Nov 20, 2026", "Claude Max plan - 5x (Oct 20–Nov 20, 2026)"],
     ["current Estonian month and its abbreviation", "Google Cloudi tasu - oktoober 2026", "Periood 1. okt – 31. okt 2026", "Google Cloudi tasu - oktoober 2026"],
     ["current numeric date", "Hosting 01.10.2026", "Service 1.10.2026", "Hosting 01.10.2026"],
     ["timeless title", "Claude Max plan - 5x", "Max plan - 5x", "Claude Max plan - 5x"],
     ["month substring in a word is timeless", "Maybe cloud service", "Cloud service", "Maybe cloud service"],
-    ["month names are whole words", "Hosting May", "Maybe hosting", "Software"],
+    ["month names are whole words", "Hosting May", "Maybe hosting", "Hosting"],
+    ["period only", "(Sep 20–Oct 20, 2026)", "Nov 2026", "Software"],
   ])("handles %s", async (_case, previousTitle, documentText, expectedTitle) => {
     const api = { purchaseInvoices: { get: async () => ({
       id: 2,
@@ -2155,6 +2156,29 @@ describe("supplier-history booking titles belong to the current document (L2)", 
 
     expect(result?.source).toBe("supplier_history");
     expect(result?.item).toMatchObject({ custom_title: expectedTitle, cl_purchase_articles_id: 10, purchase_accounts_id: 4920 });
+  });
+});
+
+describe("generated receipt descriptions omit repeated supplier word runs (F2)", () => {
+  it.each([
+    ["Google Google Cloud EMEA Limited", "Google Cloud EMEA Limited"],
+    ["Google Cloud Google Cloud EMEA Limited", "Google Cloud EMEA Limited"],
+    ["GOOGLE Google Cloud EMEA Limited", "Google Cloud EMEA Limited"],
+  ])("deduplicates %s", (line, expected) => {
+    const result = extractReceiptFieldsFromText([
+      line, "Supplier: Google Cloud EMEA Limited", "Invoice no: G-123",
+      "Invoice date: 2026-10-31", "Total 100.00 EUR",
+    ].join("\n"), "invoice.pdf");
+    expect(result.description_source).toBe("generated");
+    expect(result.description).toBe(expected);
+  });
+
+  it("keeps repeated words that are not a supplier word run", () => {
+    const result = extractReceiptFieldsFromText([
+      "Very very useful service", "Supplier: Google Cloud EMEA Limited", "Invoice no: G-123",
+      "Invoice date: 2026-10-31", "Total 100.00 EUR",
+    ].join("\n"), "invoice.pdf");
+    expect(result.description).toBe("Very very useful service");
   });
 });
 
@@ -2369,10 +2393,30 @@ describe("extractDates unlabelled fallback is flagged, never re-picked (corpus #
       due_date: "2026-07-31",
       invoice_date_unlabelled: true,
     });
-    // The Google shape: the label survives, its value is lost to dots.
-    const google = extractDates("Arve kuupäev     ....................\nKokkuvõte - 1. juuli 2026 - 31. juuli 2026");
-    expect(google.invoice_date).toBe("2026-07-01");
-    expect(google.invoice_date_unlabelled).toBe(true);
+  });
+
+  it.each([
+    "Arve kuupäev     ....................",
+    "Invoice date ....................",
+    "Kuupäev    . . . . . . . .",
+    "Issue date    ....................    Total EUR    10.00",
+  ])("does not guess a period date when the invoice date value is lost: %s", (lostDateRow) => {
+    const text = `Näidis OÜ\nArve nr INV-1\n${lostDateRow}\nKokkuvõte - 1. oktoober 2026 - 31. oktoober 2026\nKokku 10.00 EUR`;
+    expect(extractDates(text).invoice_date).toBeUndefined();
+    expect(extractDates(text).invoice_date_unlabelled).toBeUndefined();
+    const fields = extractReceiptFieldsFromText(text, "x.pdf");
+    expect(fields.invoice_date).toBeUndefined();
+    expect(fields.invoice_date_unlabelled).toBeUndefined();
+  });
+
+  it("keeps the first-date fallback when an unrelated value was lost", () => {
+    const dates = extractDates("Allkiri    ....................\nKokkuvõte - 1. oktoober 2026 - 31. oktoober 2026");
+    expect(dates.invoice_date).toBe("2026-10-01");
+    expect(dates.invoice_date_unlabelled).toBe(true);
+  });
+
+  it("keeps a labelled date when a different leader value was lost", () => {
+    expect(extractDates("Arve kuupäev ....................\nInvoice date 31.10.2026").invoice_date).toBe("2026-10-31");
   });
 
   it("does not flag a labelled invoice or due date, nor a page with no date", () => {

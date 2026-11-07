@@ -13,6 +13,7 @@ import { decodeInvoiceStatusCritical } from "../../api/critical-codecs.js";
 import { logAudit } from "../../audit-log.js";
 import { reportProgress } from "../../progress.js";
 import { MutationIndeterminateError } from "../../mutation-outcome.js";
+import { accountBindingRefusal } from "../account-binding-refusal.js";
 import {
   LinkedInvoiceClientMismatchError,
   LinkedInvoiceClientsAmbiguousError,
@@ -2041,6 +2042,12 @@ export async function executeInterAccount(
           });
           return { outcome: "completed", known_objects: [{ entity_type: "transaction", entity_id: action.confirmedTxId, outcome: "confirmed" }] };
         } catch (err) {
+          const refusal = accountBindingRefusal(err);
+          if (refusal) {
+            match.errors.push({ transaction_ids: [action.confirmedTxId], code: refusal.code,
+              account_number: refusal.account_number, upstream_detail: refusal.upstream_detail, reason: refusal.next_action });
+            return { outcome: "failed", error_code: refusal.code, mutation_occurred: false };
+          }
           if (err instanceof TransactionMaterialDriftError) return {outcome: "failed", error_code: err.category, mutation_occurred: err.mutation_occurred, known_objects: err.known_objects};
           if (err instanceof MutationIndeterminateError) return { outcome: "indeterminate", error_code: "mutation_outcome_unknown" };
           return { outcome: "failed", error_code: confirmRefusalErrorCode(err), mutation_occurred: false };

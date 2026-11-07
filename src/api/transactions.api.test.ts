@@ -8,6 +8,7 @@ import { cache } from "./base-resource.js";
 import type { HttpClient } from "../http-client.js";
 import { HttpError } from "../http-client.js";
 import { MutationIndeterminateError } from "../mutation-outcome.js";
+import { wrapUntrustedOcr } from "../mcp-json.js";
 
 vi.mock("../logger.js", () => ({ log: vi.fn() }));
 vi.mock("../progress.js", () => ({ reportProgress: vi.fn().mockResolvedValue(undefined) }));
@@ -49,6 +50,29 @@ function makeClient(options: {
 
 describe("TransactionsApi.confirm", () => {
   beforeEach(() => cache.invalidate());
+
+  it("explains a bank-account refusal without retrying or changing the distribution", async () => {
+    const detail = wrapUntrustedOcr("The account 1410 has not been allowed to be reconciled ([1010, 1020])!");
+    const { client, patchCalls } = makeClient({
+      getById: () => ({ id: 1, status: "PROJECT", clients_id: 7 }),
+      patchHandler: () => { throw new HttpError("HTTP 409", 409, "PATCH", "/transactions/1/register", { upstream_detail: detail }); },
+    });
+    const distribution = [{ related_table: "accounts" as const, related_id: 1410, amount: 25 }];
+    await expect(new TransactionsApi(client).confirm(1, distribution)).rejects.toMatchObject({
+      code: "account_not_bank_bindable", account_number: "1410", upstream_detail: detail,
+      next_action: expect.stringContaining("enable it in the chart settings"),
+    });
+    expect(patchCalls).toEqual([{ path: "/transactions/1/register", body: distribution }]);
+  });
+
+  it("preserves other register failures and invoice-only confirmations", async () => {
+    const error = new HttpError("HTTP 409", 409, "PATCH", "/transactions/1/register", {
+      upstream_detail: wrapUntrustedOcr("The account 1410 has not been allowed to be reconciled ([1010])!"),
+    });
+    const { client } = makeClient({ getById: () => ({ id: 1, clients_id: null }), patchHandler: () => { throw error; } });
+    await expect(new TransactionsApi(client).confirm(1, [{ related_table: "purchase_invoices", related_id: 8, amount: 25 }], { autoFixClientsId: false }))
+      .rejects.toBe(error);
+  });
 
   it("registers without auto-fix when clients_id is already set", async () => {
     const { client, patchCalls } = makeClient({

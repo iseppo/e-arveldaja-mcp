@@ -278,7 +278,7 @@ const baseRun = {
 
 describe("receipt batch checks history title periods against the document text (L2)", () => {
   it.each([
-    ["previous period", "Hosting Sep 20–Oct 20, 2026", "Software"],
+    ["previous period", "Hosting Sep 20–Oct 20, 2026", "Hosting"],
     ["current period", "Hosting Oct 20–Nov 20, 2026", "Hosting Oct 20–Nov 20, 2026"],
   ])("previews and creates a title for the %s", async (_case, historyTitle, expectedTitle) => {
     const actual = await vi.importActual<typeof import("../tools/receipt-extraction.js")>("../tools/receipt-extraction.js");

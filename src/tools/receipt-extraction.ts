@@ -28,6 +28,7 @@ import { vatRatesInForceOn } from "../estonian-tax-rules.js";
 import type { Account, PurchaseInvoiceItem, Transaction } from "../types/api.js";
 import { normalizeVatRate } from "./purchase-vat-defaults.js";
 import { bankTransactionDirection } from "../bank-transaction-direction.js";
+import { COLUMN_MARK, LEADER_RUN_RE, lineCells, lostValueLeaders } from "../document-reading-tokens.js";
 
 // ---------------------------------------------------------------------------
 // Regex constants
@@ -1092,7 +1093,30 @@ function extractDescription(text: string, supplierName?: string): string {
     !/(arve|invoice|receipt|kviitung|kokku|total|summa|vat|käibemaks|date|kuupäev)/i.test(line)
   );
 
-  return descriptive ?? (supplierName ? `Expense from ${supplierName}` : "Receipt expense");
+  return descriptive !== undefined
+    ? omitRepeatedSupplierWords(descriptive, supplierName)
+    : supplierName ? `Expense from ${supplierName}` : "Receipt expense";
+}
+
+/** A logo and legal name can repeat the same supplier words on one OCR line. */
+function omitRepeatedSupplierWords(description: string, supplierName?: string): string {
+  const supplierWords = supplierName?.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
+  const words = [...description.matchAll(/[\p{L}\p{N}]+/gu)];
+  for (let start = 0; start < words.length; start++) {
+    for (let length = 1; start + 2 * length <= words.length; length++) {
+      const run = words.slice(start, start + length).map(word => word[0].toLowerCase());
+      const repeats = run.every((word, offset) => word === words[start + length + offset]![0].toLowerCase());
+      const belongsToSupplier = supplierWords.some((_, index) =>
+        run.every((word, offset) => word === supplierWords[index + offset]));
+      if (repeats && belongsToSupplier) {
+        return omitRepeatedSupplierWords(
+          description.slice(0, words[start]!.index) + description.slice(words[start + length]!.index),
+          supplierName,
+        );
+      }
+    }
+  }
+  return description;
 }
 
 function parseVatRateDropdown(vatRateDropdown?: string): number | undefined {
@@ -3778,12 +3802,25 @@ export function extractDates(text: string): { invoice_date?: string; due_date?: 
     .map(match => normalizeDate(match[1] ?? ""))
     .filter((value): value is string => value !== undefined);
 
+  // The first date elsewhere on the page cannot replace an invoice-date
+  // value lost under a leader. Reuse the checker's lost-cell definition;
+  // unrelated leader cells (for example a signature) keep the fallback.
+  const lostInvoiceDate = text.split("\n").some((raw, index) => {
+    const line = { id: String(index), text: raw.trim().replace(/\s{2,}/g, COLUMN_MARK) };
+    const cells = lineCells(line.text);
+    return lostValueLeaders([line]).some((hit) => {
+      const own = cells[hit.cell]!.text.replace(LEADER_RUN_RE, " ").trim();
+      const label = own || cells[hit.cell - 1]?.text.trim() || "";
+      return /^(?:invoice\s*date|arve\s*kuupäev|arve\s*kpv|issue\s*date|date\s*of\s*issue|date\s*issued|väljastamise\s*kuupäev|koostamise\s*kuupäev|kuupäev|date)\s*[:\s-]*$/iu.test(label);
+    });
+  });
+
   // No label bound these dates: an unlabelled value is not proof, so the
   // receipt is held (the dates themselves are kept).
   return {
-    invoice_date: rawDates[0],
+    invoice_date: lostInvoiceDate ? undefined : rawDates[0],
     due_date: rawDates[1],
-    ...(rawDates[0] !== undefined ? { invoice_date_unlabelled: true as const } : {}),
+    ...(!lostInvoiceDate && rawDates[0] !== undefined ? { invoice_date_unlabelled: true as const } : {}),
   };
 }
 
@@ -4855,6 +4892,15 @@ function historyTitlePeriodTokens(text: string): string[] {
   return [...months, ...numbers];
 }
 
+function withoutHistoryTitlePeriod(title: string): string | undefined {
+  const remainder = title
+    .replace(/[\p{L}\p{N}]+/gu, token => historyTitlePeriodTokens(token).length > 0 ? "" : token)
+    .replace(/\([\s.,:;/–—-]*\)|\[[\s.,:;/–—-]*\]/gu, "")
+    .replace(/\s+/gu, " ")
+    .replace(/^[\s.,:;/–—-]+|[\s.,:;/–—-]+$/gu, "");
+  return /[\p{L}\p{N}]/u.test(remainder) ? remainder : undefined;
+}
+
 async function suggestBookingInternalImpl(
   api: { purchaseInvoices: { get(id: number): Promise<{ id?: number; number?: string; liability_accounts_id?: number; items?: PurchaseInvoiceItem[] }> } },
   context: {
@@ -4909,7 +4955,7 @@ async function suggestBookingInternalImpl(
     const historyTitle = matchedItem.custom_title || description;
     const title = historyTitlePeriodTokens(historyTitle).every(token => printedPeriodTokens.has(token))
       ? historyTitle
-      : suggestedArticle?.name_est || suggestedArticle?.name_eng || description;
+      : withoutHistoryTitlePeriod(historyTitle) || suggestedArticle?.name_est || suggestedArticle?.name_eng || description;
 
     return withHistoryNote({
       source: "supplier_history",

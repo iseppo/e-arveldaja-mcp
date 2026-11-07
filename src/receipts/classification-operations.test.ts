@@ -1547,6 +1547,27 @@ describe("classification operations — ledger context (F6)", () => {
       { ...camtRow({ id: 62, amount: 25, date: "2026-10-20", direction: "DBIT", name: "Mari Maasikas", iban: PERSON_IBAN, description: "Kassasse" }), clients_id: null },
     ];
 
+    it("carries an upstream bank-account refusal into full and guided apply review", async () => {
+      const history = kassaHistory([[1010, 391], [1010, 391]]);
+      const { api, operations } = historyOperations({
+        rows: [payments()[0]!, ...history.transactions], journals: history.journals, accounts: KASSA_ACCOUNTS, allowWrites: true,
+      });
+      const classificationsJson = { groups: [(await analyze(operations)).groups[0]!] };
+      const dry = await operations.applyClassifications({ classificationsJson });
+      if (!dry.ok) throw new Error("dry run failed");
+      const detail = wrapUntrustedOcr("The account 1010 has not been allowed to be reconciled ([1020])!");
+      api.transactions.confirm.mockRejectedValue(new HttpError("HTTP 409", 409, "PATCH", "/transactions/61/register", { upstream_detail: detail }));
+      const executed = await operations.applyClassifications({ classificationsJson, execute: true, planHandle: dry.value.planHandle });
+      if (!executed.ok) throw new Error("execute failed");
+      expect(executed.value.results[0]).toMatchObject({ review_reasons: [{
+        code: "account_not_bank_bindable", account_number: "1010", upstream_detail: detail, transaction_id: 61,
+      }] });
+      const compact = renderApplyClassificationsCompact({ result: executed.value, classificationsJson });
+      expect(compact.summary.blockers).toEqual(expect.arrayContaining([expect.objectContaining({ code: "account_not_bank_bindable", message: expect.stringContaining("enable it in the chart settings") })]));
+      expect(api.transactions.confirm).toHaveBeenCalledTimes(1);
+      expect(api.transactions.update).not.toHaveBeenCalled();
+    });
+
     it.each([
       ["user permission is not enabled", { is_valid: true, transaction_out_bindable: false, transaction_out_user_bindable: true, transaction_out_user_bindable_set: false }],
       ["only incoming is allowed", { is_valid: true, transaction_in_bindable: true, transaction_out_bindable: false }],

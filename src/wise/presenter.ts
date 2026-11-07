@@ -833,6 +833,17 @@ export function renderWiseImportCompact(input: WiseCompactInput): WiseImportComp
   // Execution errors (indeterminate / failed commands) surface as blockers —
   // never hidden.
   const blockers: CompactReviewItem[] = [];
+  for (const entry of executionErrors) {
+    const refusal = entry.review_reason;
+    if (refusal) blockers.push({
+      item_id: entry.wise_id,
+      code: refusal.code,
+      message: refusal.next_action,
+      severity: "blocker",
+      account_number: refusal.account_number,
+      upstream_detail: refusal.upstream_detail,
+    });
+  }
   if (!dryRun && executionErrors.length > 0) {
     blockers.push({
       item_id: "wise-import",
