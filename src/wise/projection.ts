@@ -403,7 +403,7 @@ const WISE_INTER_ACCOUNT_ROUTE =
 const WISE_TRANSFER_CROSS_CURRENCY_REASON =
   `Wise transfer is not a same-currency EUR movement, so its booked amount is not the base EUR the counterpart bank account records. The row is imported unconfirmed; ${WISE_INTER_ACCOUNT_ROUTE}.`;
 const WISE_JOURNAL_HOLD_RELEASE =
-  "Use acknowledged_journal_holds [{ wise_id, journal_ids: <required_acknowledgement_ids> }] only when the owner confirms every one of those journals is a different movement: the row is then created and confirmed as a new transaction.";
+  "Use acknowledged_journal_holds [{ wise_id, journal_ids: <required_acknowledgement_ids> }] only when the owner confirms every one of those journals is a different movement: the row is then created as a new transaction under its reviewed treatment (an own-account transfer is confirmed against its counterpart account; a third-party payment in not_own_transfer_ids stays PROJECT for later reconciliation).";
 const WISE_TRANSFER_JOURNAL_AMBIGUOUS_REASON =
   `A same-amount journal on the Wise account within one day of this Wise transfer cannot be told apart from this transfer (ambiguous or differently labelled). The row and its fee are not imported. First check whether a candidate journal IS this transfer (likely when date and amount agree): then re-run with journalized_transfer_ids [{ wise_id, journal_id }] to record it as already journalized (validated; the journal needs a document number). ${WISE_JOURNAL_HOLD_RELEASE}`;
 const WISE_TRANSFER_JOURNAL_INCONSISTENT_REASON =
