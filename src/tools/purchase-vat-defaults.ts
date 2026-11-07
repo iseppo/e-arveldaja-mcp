@@ -409,6 +409,22 @@ export function applyPurchaseVatDefaults(
     return merged;
   }
 
+  if (merged.reversed_vat_id !== undefined && merged.reversed_vat_id !== null) {
+    // RIK stores reverse charge as a zero-rate row with no ordinary input-VAT
+    // account/article. The reverse option itself carries the assessed rate.
+    // Migrate the legacy reduced-rate shape without changing its service/goods
+    // family; already canonical options (including 2/8) remain untouched.
+    if (parseVatRateDropdown(merged.vat_rate_dropdown) === 9) {
+      if (merged.reversed_vat_id === 1) merged.reversed_vat_id = 2;
+      else if (merged.reversed_vat_id === 7) merged.reversed_vat_id = 8;
+    }
+    merged.vat_rate_dropdown = "0";
+    merged.vat_accounts_id = null;
+    merged.vat_accounts_dimensions_id = null;
+    merged.cl_vat_articles_id = null;
+    return merged;
+  }
+
   const vatRateDropdown = normalizeVatRate(merged.vat_rate_dropdown);
   const defaults = findArticleDefaults(purchaseArticles, merged, vatRateDropdown);
 

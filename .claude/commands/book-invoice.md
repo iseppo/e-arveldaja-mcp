@@ -194,6 +194,7 @@ Capability condition for `standard`: inspect the connected MCP server's advertis
 - Estonian reverse-charge rules cover several distinct cases, including EU B2B services with place of supply in Estonia, non-EU services with place of supply in Estonia, intra-community acquisitions of goods, and certain domestic construction/scrap schemes.
 - Reuse a confirmed prior VAT treatment from `suggest_booking` when it clearly fits the same supplier and same kind of transaction.
 - Only carry over `reversed_vat_id: 1` from a past confirmed invoice when the current invoice is the same kind of transaction.
+- Reverse-charge rows use `vat_rate_dropdown: "0"`, `vat_accounts_id: null`, `vat_accounts_dimensions_id: null` and `cl_vat_articles_id: null`; `reversed_vat_id` itself carries the self-assessed rate. Keep the reviewed reverse-charge option (including service/goods choice); a legacy 9% history rate maps option 1 to 2 or 7 to 8. Do not put 24% or 9% in the row's dropdown for reverse charge.
 - If the VAT treatment is unclear from the document and prior confirmed history, stop and ask the user instead of guessing.
 
 ## Step 9: Derive the remaining invoice fields

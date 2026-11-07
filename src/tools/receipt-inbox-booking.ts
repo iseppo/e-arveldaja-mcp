@@ -78,7 +78,11 @@ function buildSyntheticItem(
       ...suggestion.item,
       total_net_price: amount,
       custom_title: description,
-      vat_rate_dropdown: vatRateDropdown ?? suggestion.item.vat_rate_dropdown ?? "-",
+      // Keep a legacy reverse-charge history rate until the shared defaults
+      // map its reduced rate to the reverse option and write the canonical 0.
+      vat_rate_dropdown: suggestion.item.reversed_vat_id != null
+        ? suggestion.item.vat_rate_dropdown
+        : vatRateDropdown ?? suggestion.item.vat_rate_dropdown ?? "-",
     },
     isVatRegistered,
   );
@@ -115,27 +119,25 @@ export function resolveReceiptVatRateDropdown(
   }
   if (extracted.total_vat === 0) {
     if (!isReverseCharge) return { rate: "-" };
-    // Reverse charge: the supplier charges no VAT but the buyer self-assesses
-    // at the real rate — "-" would drop the self-assessment.
-    // The history rate is kept only when it is a reduced rate in force on the
-    // invoice date; a history standard rate (20/22 from before a rate change)
-    // is replaced by the standard rate in force on the invoice date.
+    // RIK's reverse option carries the self-assessed rate; the row dropdown is
+    // always 0. Validate legacy history rates before the shared VAT defaults
+    // map a supported reduced rate to its reverse option.
     if (standardRate === null) {
       return { review: "Reverse-charge receipt has no valid invoice date to derive the self-assessed VAT rate." };
     }
     const historyRate = numericVatRate(suggestionItem.vat_rate_dropdown);
     if (historyRate === undefined || historyRate <= 0
       || STANDARD_VAT_RATE_TIMELINE.some(period => period.rate === historyRate)) {
-      return { rate: String(standardRate) };
+      return { rate: "0" };
     }
     const reverseChargeDate = extracted.invoice_date ?? "";
-    if (REDUCED_VAT_RATES.some(reduced => reduced.rate === historyRate
+    if (historyRate === 9 && REDUCED_VAT_RATES.some(reduced => reduced.rate === historyRate
       && (reduced.from === null || reverseChargeDate >= reduced.from))) {
-      return { rate: String(historyRate) };
+      return { rate: "0" };
     }
     return {
-      review: `Reverse-charge receipt: the supplier's history VAT rate ${historyRate}% is neither the standard rate ` +
-        `${standardRate}% nor a reduced rate in force on the invoice date; confirm the self-assessed rate.`,
+      review: `Reverse-charge receipt: the supplier's history VAT rate ${historyRate}% has no supported reverse-charge option ` +
+        `mapping in force on the invoice date (standard ${standardRate}%); confirm the self-assessed rate.`,
     };
   }
   const candidates = vatRatesInForceOn(extracted.invoice_date).filter(rate => rate > 0);

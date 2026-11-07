@@ -119,9 +119,11 @@ describe("receipt inbox booking — VAT rate from extracted totals and date (fin
     expect(resolveReceiptVatRateDropdown({ total_vat: 22, invoice_date: "2025-03-10" }, 100, {}).rate).toBe("22");
   });
 
-  it("reverse charge with total_vat 0 keeps the history rate instead of '-'", async () => {
+  it("reverse charge with total_vat 0 writes the canonical zero-rate row", async () => {
     const { createAndSetTotals } = await run(extracted({ total_vat: 0, total_gross: 100 }), { vat_rate_dropdown: "24", reversed_vat_id: 1 });
-    expect(createAndSetTotals.mock.calls[0]![0].items[0].vat_rate_dropdown).toBe("24");
+    expect(createAndSetTotals.mock.calls[0]![0].items[0]).toMatchObject({
+      vat_rate_dropdown: "0", vat_accounts_id: null, cl_vat_articles_id: null, reversed_vat_id: 1,
+    });
   });
 
   it("reverse charge on a receipt where the supplier charged VAT is held for review, never booked with both", async () => {
@@ -132,27 +134,36 @@ describe("receipt inbox booking — VAT rate from extracted totals and date (fin
     expect(createAndSetTotals).not.toHaveBeenCalled();
   });
 
-  it("reverse charge with total_vat 0 and no numeric history rate uses the standard rate on the invoice date", () => {
-    expect(resolveReceiptVatRateDropdown({ total_vat: 0, invoice_date: "2025-03-10" }, 100, { vat_rate_dropdown: "-", reversed_vat_id: 1 }).rate).toBe("22");
+  it("reverse charge with total_vat 0 and no numeric history rate uses the zero-rate representation", () => {
+    expect(resolveReceiptVatRateDropdown({ total_vat: 0, invoice_date: "2025-03-10" }, 100, { vat_rate_dropdown: "-", reversed_vat_id: 1 }).rate).toBe("0");
     expect(resolveReceiptVatRateDropdown({ total_vat: 0, invoice_date: "2025-03-10" }, 100, { vat_rate_dropdown: "-" }).rate).toBe("-");
   });
 
-  it("reverse charge replaces a stale history standard rate with the standard rate on the invoice date", () => {
+  it("reverse charge replaces a history standard rate with zero (the option carries the assessed rate)", () => {
     expect(resolveReceiptVatRateDropdown({ total_vat: 0, invoice_date: "2026-03-10" }, 100, { vat_rate_dropdown: "22", reversed_vat_id: 1 }))
-      .toEqual({ rate: "24" });
+      .toEqual({ rate: "0" });
     expect(resolveReceiptVatRateDropdown({ total_vat: 0, invoice_date: "2026-03-10" }, 100, { vat_rate_dropdown: "20", reversed_vat_id: 1 }))
-      .toEqual({ rate: "24" });
+      .toEqual({ rate: "0" });
     expect(resolveReceiptVatRateDropdown({ total_vat: 0, invoice_date: "2024-06-10" }, 100, { vat_rate_dropdown: "24", reversed_vat_id: 1 }))
-      .toEqual({ rate: "22" });
+      .toEqual({ rate: "0" });
   });
 
-  it("reverse charge keeps a history reduced rate in force on the invoice date, else routes to review", () => {
+  it("reverse charge uses zero for a valid history reduced rate, else routes to review", () => {
     expect(resolveReceiptVatRateDropdown({ total_vat: 0, invoice_date: "2026-03-10" }, 100, { vat_rate_dropdown: "9", reversed_vat_id: 1 }))
-      .toEqual({ rate: "9" });
+      .toEqual({ rate: "0" });
     expect(resolveReceiptVatRateDropdown({ total_vat: 0, invoice_date: "2024-06-10" }, 100, { vat_rate_dropdown: "13", reversed_vat_id: 1 }).review)
       .toMatch(/13%/);
     expect(resolveReceiptVatRateDropdown({ total_vat: 0, invoice_date: "2026-03-10" }, 100, { vat_rate_dropdown: "5", reversed_vat_id: 1 }).review)
       .toMatch(/5%/);
+    expect(resolveReceiptVatRateDropdown({ total_vat: 0, invoice_date: "2026-03-10" }, 100, { vat_rate_dropdown: "13", reversed_vat_id: 1 }).review)
+      .toMatch(/13%/);
+  });
+
+  it.each([["9", 1, 2], ["9", 7, 8], ["9%", 1, 2], ["9,0%", 7, 8]] as const)("maps history rate %s / option %s to %s while writing zero-rate VAT", async (rate, option, expectedOption) => {
+    const { createAndSetTotals } = await run(extracted({ total_vat: 0, total_gross: 100 }), { vat_rate_dropdown: rate, reversed_vat_id: option });
+    expect(createAndSetTotals.mock.calls[0]![0].items[0]).toMatchObject({
+      vat_rate_dropdown: "0", vat_accounts_id: null, cl_vat_articles_id: null, reversed_vat_id: expectedOption,
+    });
   });
 });
 

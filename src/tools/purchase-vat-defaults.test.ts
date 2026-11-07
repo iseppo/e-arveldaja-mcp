@@ -278,6 +278,33 @@ describe("non-VAT company: no reverse charge", () => {
   });
 });
 
+describe("reverse-charge purchase row representation (RC1)", () => {
+  it.each([
+    ["0", 1, 1], ["24", 1, 1], ["22", 7, 7], ["9", 1, 2], ["9", 7, 8], ["9%", 1, 2], ["9,0%", 7, 8], ["0", 2, 2], ["0", 8, 8],
+  ] as const)("canonicalizes history rate %s / option %s to option %s without ordinary VAT defaults", (rate, option, expectedOption) => {
+    const item: PurchaseInvoiceItem = {
+      custom_title: "Cloud service", total_net_price: 90, cl_purchase_articles_id: 45,
+      purchase_accounts_id: 5230, vat_rate_dropdown: rate, reversed_vat_id: option,
+      vat_accounts_id: 1510, vat_accounts_dimensions_id: 42, cl_vat_articles_id: 1,
+    };
+    const before = structuredClone(item);
+    const result = applyPurchaseVatDefaults([], item, true);
+    expect(result).toMatchObject({
+      vat_rate_dropdown: "0", vat_accounts_id: null, vat_accounts_dimensions_id: null,
+      cl_vat_articles_id: null, reversed_vat_id: expectedOption, total_net_price: 90,
+    });
+    expect(item).toEqual(before);
+  });
+
+  it("keeps a canonical history row clear of matching article defaults", () => {
+    const articles = [{ id: 45, vat_accounts_id: 1510, cl_vat_articles_id: 1 }] as Parameters<typeof applyPurchaseVatDefaults>[0];
+    expect(applyPurchaseVatDefaults(articles, {
+      custom_title: "Cloud service", cl_purchase_articles_id: 45, vat_rate_dropdown: "0",
+      vat_accounts_id: null, cl_vat_articles_id: null, reversed_vat_id: 1,
+    }, true)).toMatchObject({ vat_rate_dropdown: "0", vat_accounts_id: null, cl_vat_articles_id: null, reversed_vat_id: 1 });
+  });
+});
+
 describe("reverseChargeRegisterRefusal", () => {
   const rc = { custom_title: "Cloud", total_net_price: 100, vat_rate_dropdown: "24", vat_amount: 24, reversed_vat_id: 1 } as PurchaseInvoiceItem;
   const ordinary = { custom_title: "Other", total_net_price: 100, vat_rate_dropdown: "24", vat_amount: 24 } as PurchaseInvoiceItem;

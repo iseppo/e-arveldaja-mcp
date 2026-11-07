@@ -5142,11 +5142,11 @@ describe("accounting_inbox dry_run: receipt review items are compact", () => {
     }), EXPOSE_GRANULAR);
     const handler = getRegisteredToolHandler(server, "accounting_inbox");
     const result = await runWithToolProfile(profile, () => handler({ mode: "dry_run", workspace_path: workspace, receipt_matching_dimension_id: 101 }));
-    return { text: result.content[0]!.text, payload: parseMcpResponse(result.content[0]!.text) as any };
+    return { text: result.content[0]!.text, payload: parseMcpResponse(result.content[0]!.text) as any, workspace };
   }
 
   it.each(["standard", "guided"] as const)("%s: review items carry no OCR text and stay within a size budget", async (profile) => {
-    const { text, payload } = await receiptInboxDryRun(profile, 20);
+    const { text, payload, workspace } = await receiptInboxDryRun(profile, 20);
     const reviews = (payload.autopilot.needs_accountant_review as any[]).filter(item => item.source === "process_receipt_batch");
     expect(reviews).toHaveLength(20);
     for (const review of reviews) {
@@ -5165,7 +5165,10 @@ describe("accounting_inbox dry_run: receipt review items are compact", () => {
     expect(text).not.toContain("all_vat_candidates");
     // Without the projection each item also carried ~5 KB of OCR text plus
     // candidates, and workflow.needs_review repeated every item in full.
-    expect(Buffer.byteLength(text, "utf8")).toBeLessThan(profile === "guided" ? 150_000 : 180_000);
+    // The checkout/temp parent path is repeated in the payload; measure a
+    // fixed fixture prefix so a long worktree TMPDIR does not change the budget.
+    const budgetText = text.replaceAll(workspace, "/workspace");
+    expect(Buffer.byteLength(budgetText, "utf8")).toBeLessThan(profile === "guided" ? 150_000 : 180_000);
     if (profile === "standard") {
       // workflow.needs_review references the autopilot items instead of repeating them.
       const workflowReviews = (payload.workflow.needs_review as any[]).filter(item => item.source === "process_receipt_batch");
