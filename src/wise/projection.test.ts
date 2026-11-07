@@ -1179,7 +1179,9 @@ describe("Wise-side journal evidence and the transfer hold pass (WP1b)", () => {
       // Mapping first; acknowledgement only for a different movement.
       const reason = onlyReview(output).reason;
       expect(reason.indexOf("journalized_transfer_ids")).toBeLessThan(reason.indexOf("acknowledged_journal_holds"));
-      expect(reason).toContain("only when the owner confirms every one of those journals is a different movement: the row is then created and confirmed as a new transaction");
+      expect(reason).toContain("only when the owner confirms every one of those journals is a different movement: the row is then created as a new transaction under its reviewed treatment");
+      expect(reason).toContain("a third-party payment in not_own_transfer_ids stays PROJECT for later reconciliation");
+      expect(reason).not.toContain("created and confirmed as a new transaction");
     });
 
     it("a stored untagged lookalike of a transfer is a hard hold", () => {

@@ -1166,8 +1166,9 @@ describe("registerPrompts", () => {
     expect(camt).toContain("use `cleanup_camt_possible_duplicate`");
     expect(camt).toContain("fall back to `update_transaction` plus `delete_transaction` only when the cleanup tool is not available on this surface");
     // A re-import does not repair a wrongly booked row; journal reviews are not duplicates.
+    expect(camt).toContain("Re-importing alone does not fix a proved error");
+    expect(wise).toContain("Re-importing alone does not fix it");
     for (const surface of [camt, wise]) {
-      expect(surface).toContain("Re-importing alone does not fix it");
       expect(surface).not.toContain("fixes it.");
     }
     expect(camt).toContain("they are NOT possible duplicates");

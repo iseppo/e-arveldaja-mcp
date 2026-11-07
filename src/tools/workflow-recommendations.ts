@@ -164,6 +164,7 @@ const WORKFLOWS: WorkflowGuide[] = [
     when_to_use: ["purchase invoice PDF", "supplier invoice", "book one invoice", "attach source document"],
     required_inputs: ["absolute invoice PDF/image path"],
     primary_tools: [
+      "limited_vat",
       "get_vat_info",
       "extract_pdf_invoice",
       "validate_invoice_data",
@@ -180,14 +181,20 @@ const WORKFLOWS: WorkflowGuide[] = [
     },
     next_actions: [
       {
+        tool: "limited_vat",
+        args: { mode: "status" },
+        why: "Resolve none/limited/full VAT status before deciding VAT treatment; only full permits ordinary input-VAT deduction. Resolve unknown status before approval.",
+      },
+      {
         tool: "get_vat_info",
         args: {},
-        why: "Check current VAT-registration status before deciding VAT treatment.",
+        why: "Read the raw VAT number; get_vat_info alone cannot distinguish full from limited registration. Establish none/limited/full from current owner or EMTA evidence before approving VAT treatment; none/limited do not allow ordinary input-VAT deduction.",
+        unless_tool: "limited_vat",
       },
       {
         tool: "extract_pdf_invoice",
         args: { file_path: "<absolute invoice PDF/image path>" },
-        why: "Extract the document after VAT status is known so the user can review source-derived fields before booking.",
+        why: "Extract the document for review; resolve unknown VAT status before approving VAT treatment.",
       },
       {
         tool: "process_accounting_document",

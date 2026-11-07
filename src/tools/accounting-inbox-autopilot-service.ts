@@ -392,6 +392,7 @@ function invokeAutopilotOperation(
 
 /** Per-code follow-up for a Wise transfer review row. */
 function wiseReviewRecommendation(review: WiseImportPreview["ownershipReviews"][number]): string {
+  const resumedTreatment = "An acknowledgement restores the reviewed treatment: ordinary third-party payments stay PROJECT for later reconciliation; only eligible own-account transfers receive inter-account confirmation.";
   switch (review.code) {
     case "wise_transfer_ownership_unverified":
       return "Not a blocker: on approval the transfer is imported as an unconfirmed ordinary bank row. Only if the owner confirms it is a real own transfer (both accounts belong to the company), rerun the Wise dry run with this wise_id in confirm_own_transfer_ids before execute=true.";
@@ -400,14 +401,14 @@ function wiseReviewRecommendation(review: WiseImportPreview["ownershipReviews"][
     case "wise_untagged_ledger_match":
       return `Compare the row with stored transaction(s) ${(review.ledger_transaction_ids ?? []).join(", ") || "named in the reason"}. A card or payment row is still imported (advisory only): if they are the same movement, delete one of them after the owner approves. A transfer row is held (not imported): if the stored row is this transfer nothing more is needed, otherwise book the transfer with the owner.`;
     case "wise_transfer_journal_ambiguous":
-      return `Show the owner candidate journal(s) ${(review.candidate_journal_ids ?? []).join(", ")}. Only if the owner picks the one that books exactly this transfer, rerun the Wise dry run with journalized_transfer_ids [{ wise_id, journal_id }] (a new preview and digest). Only if the owner confirms every journal ${(review.required_acknowledgement_ids ?? review.candidate_journal_ids ?? []).join(", ")} is a different movement, rerun with acknowledged_journal_holds listing all of them (this creates and confirms a new transaction). The row is held (not imported) meanwhile.`;
+      return `Show the owner candidate journal(s) ${(review.candidate_journal_ids ?? []).join(", ")}. Only if the owner picks the one that books exactly this transfer, rerun the Wise dry run with journalized_transfer_ids [{ wise_id, journal_id }] (a new preview and digest). Only if the owner confirms every journal ${(review.required_acknowledgement_ids ?? review.candidate_journal_ids ?? []).join(", ")} is a different movement, rerun with acknowledged_journal_holds listing all of them. ${resumedTreatment} The row is held (not imported) meanwhile.`;
     case "wise_transfer_journal_existing_elsewhere":
-      return `Journal(s) ${(review.required_acknowledgement_ids ?? review.candidate_journal_ids ?? []).join(", ")} already move this amount on the Wise account, so the row is held (not imported). Show them to the owner: if one books this transfer, nothing more is needed (or rerun with journalized_transfer_ids); only if the owner confirms each is a different movement, rerun with acknowledged_journal_holds listing all of them (this creates and confirms a new transaction).`;
+      return `Journal(s) ${(review.required_acknowledgement_ids ?? review.candidate_journal_ids ?? []).join(", ")} already move this amount on the Wise account, so the row is held (not imported). Show them to the owner: if one books this transfer, nothing more is needed (or rerun with journalized_transfer_ids); only if the owner confirms each is a different movement, rerun with acknowledged_journal_holds listing all of them. ${resumedTreatment}`;
     case "wise_exact_label_possible_double_booking":
       return `Journal ${review.journal_id ?? "(see the reason)"} carries this Wise ID and books the movement, but ${[
         ...(review.candidate_journal_ids ?? []).length > 0 ? [`journal(s) ${review.candidate_journal_ids!.join(", ")}`] : [],
         ...(review.ledger_transaction_ids ?? []).length > 0 ? [`stored transaction(s) ${review.ledger_transaction_ids!.join(", ")}`] : [],
-      ].join(" and ")} also move this amount on the Wise account, so the row is held (not imported). Show them to the owner: if one is a second booking of this movement, remove it after approval and rerun the Wise dry run; only if the owner confirms each of required_acknowledgement_ids is a different movement, rerun with acknowledged_journal_holds [{ wise_id, journal_ids }] listing all of them.`;
+      ].join(" and ")} also move this amount on the Wise account, so the row is held (not imported). Show them to the owner: if one is a second booking of this movement, remove it after approval and rerun the Wise dry run; only if the owner confirms each of required_acknowledgement_ids is a different movement, rerun with acknowledged_journal_holds [{ wise_id, journal_ids }] listing all of them. This acknowledgement does not create another main transaction; the exact-label journal already books it.`;
     case "wise_transfer_journal_inconsistent":
       return `Journal(s) ${(review.candidate_journal_ids ?? []).join(", ")} carry this Wise ID but do not book this amount and direction. Correct or remove the labelled journal with the owner's approval, then rerun the Wise dry run; the row is held (not imported) meanwhile.`;
     case "wise_transfer_mapping_rejected":
@@ -538,8 +539,10 @@ function summarizeAutopilotToolResult(
               tool,
               `CAMT row ${row.date} ${row.amount} was not created: ${!journalReview
                 ? "a previous release imported its statement entry only in part"
-                : row.review_code === "camt_duplicate_journal_conflict" || row.review_code === "camt_journal_direction_conflict"
+                : row.review_code === "camt_duplicate_journal_conflict"
                   ? `an existing confirmed transaction is booked wrongly (wrong direction or amount) and needs correction (${row.review_code})`
+                  : row.review_code === "camt_journal_direction_conflict"
+                    ? `an existing confirmed transaction has an opposite-direction journal; prove movement identity before proposing correction (${row.review_code})`
                   : `an existing journal may already book it (${row.review_code})`}.`,
               {
                 recommendation: `${row.review_note ?? row.reason}${acknowledgeable

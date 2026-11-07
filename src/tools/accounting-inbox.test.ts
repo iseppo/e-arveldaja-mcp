@@ -13,6 +13,7 @@ import { FILE_REFERENCE_OPERATIONS } from "../file-reference-store.js";
 import { GUIDED_TOOL_NAMES, runWithToolProfile } from "../tool-profile.js";
 import * as toolProfileModule from "../tool-profile.js";
 import { registerCamtImportTools } from "./camt-import.js";
+import type { CamtReviewAcknowledgementPayload } from "./camt-review-acknowledgement-action.js";
 import { registerWiseImportTools } from "./wise-import.js";
 import { registerProcessBankInputTool } from "../guided/process-bank-input.js";
 import { parseDocument } from "../document-parser.js";
@@ -5219,7 +5220,6 @@ describe("accounting_inbox: public CAMT journal-review acknowledgement round tri
     needs_accountant_review: InboxReview[];
     executed_steps: Array<{ tool: string; preview?: Record<string, unknown>; suggested_args: { file_ref: string } }>;
   } };
-  type AckPayload = { status: string; plan_handle?: string; error_code?: string };
   let rulesDir: string | undefined;
   afterEach(async () => {
     delete process.env.EARVELDAJA_RULES_DIR;
@@ -5228,7 +5228,7 @@ describe("accounting_inbox: public CAMT journal-review acknowledgement round tri
     rulesDir = undefined;
   });
 
-  it("the public inbox resolver_input, passed unchanged, prepares, executes and quiets the next preview", async () => {
+  it.each(["standard", "guided", "guided-sales"] as const)("%s: the public inbox resolver_input, passed unchanged, prepares, executes and quiets the next preview", async (profile) => {
     rulesDir = await mkdtemp(join(tmpdir(), "inbox-camt-ack-"));
     process.env.EARVELDAJA_RULES_DIR = rulesDir;
     resetRetainedCamtStatements();
@@ -5244,7 +5244,7 @@ describe("accounting_inbox: public CAMT journal-review acknowledgement round tri
         { accounts_id: 1020, accounts_dimensions_id: 101, type: "C", amount: 10, base_amount: 10, cl_currencies_id: "EUR", is_deleted: false },
       ],
     };
-    const context = createTestRuntimeSafetyContext();
+    const context = createTestRuntimeSafetyContext({ scope: { profile } });
     const server = createMockToolServer();
     const api = createAccountingWorkflowApi({
       transactionRows: [],
@@ -5259,18 +5259,28 @@ describe("accounting_inbox: public CAMT journal-review acknowledgement round tri
     const inbox = getRegisteredToolHandler(server, "accounting_inbox");
     const workflow = getRegisteredToolHandler(server, "continue_accounting_workflow");
     const camt = getRegisteredToolHandler(server, "process_camt053");
-    const dryRun = async () => (await inbox({ mode: "dry_run", workspace_path: workspace })).content[0]!.text;
+    const dryRun = async () => (await runWithToolProfile(profile, () => inbox({ mode: "dry_run", workspace_path: workspace }))).content[0]!.text;
 
     const first = parseToolPayload<InboxDryRunPayload>(await dryRun());
     const review = first.autopilot.needs_accountant_review.find(item => item.resolver_input?.review_type === "camt_journal_review");
     expect(review).toBeDefined();
     const reviewItem = review!.resolver_input!;
+    expect(reviewItem).toMatchObject({
+      review_type: "camt_journal_review",
+      item: { acknowledgement: {
+        accounts_dimensions_id: 101,
+        journal_ids: [901],
+        statement_digest: expect.stringMatching(/^[0-9a-f]{64}$/),
+        movement_identity: expect.stringMatching(/^[0-9a-f]{64}$/),
+      } },
+    });
 
-    const prepared = parseToolPayload<AckPayload>((await workflow({ action: "prepare_action", review_item_json: reviewItem })).content[0]!.text);
+    const prepared = parseToolPayload<CamtReviewAcknowledgementPayload>((await runWithToolProfile(profile, () => workflow({ action: "prepare_action", review_item_json: reviewItem }))).content[0]!.text);
     expect(prepared.status).toBe("ready_for_approval");
-    const executed = parseToolPayload<AckPayload>((await workflow({
+    if (prepared.status !== "ready_for_approval") throw new Error(`Expected acknowledgement plan, got ${prepared.status}`);
+    const executed = parseToolPayload<CamtReviewAcknowledgementPayload>((await runWithToolProfile(profile, () => workflow({
       action: "execute_review_action", review_item_json: reviewItem, plan_handle: prepared.plan_handle,
-    })).content[0]!.text);
+    }))).content[0]!.text);
     expect(executed.status).toBe("acknowledged");
 
     // Another inbox preview no longer raises the review; the statement's own preview reports it acknowledged.
@@ -5278,10 +5288,12 @@ describe("accounting_inbox: public CAMT journal-review acknowledgement round tri
     expect(second.autopilot.needs_accountant_review.some(item => item.resolver_input?.review_type === "camt_journal_review")).toBe(false);
     const importStep = second.autopilot.executed_steps.find(step => step.tool === "import_camt053")!;
     expect(importStep.preview).toMatchObject({ skipped_count: 1, journal_review_count: 0 });
-    const preview = (await camt({ mode: "dry_run", file_ref: importStep.suggested_args.file_ref, accounts_dimensions_id: 101 })).content[0]!.text;
-    expect(preview).toContain("skip_code: camt_review_acknowledged");
-    expect(preview).toContain("acknowledged_review_count: 1");
-    expect(preview).toContain("journal_review_count: 0");
-    expect(preview).not.toContain("code: camt_journal_review");
+    if (profile === "standard") {
+      const preview = (await camt({ mode: "dry_run", file_ref: importStep.suggested_args.file_ref, accounts_dimensions_id: 101 })).content[0]!.text;
+      expect(preview).toContain("skip_code: camt_review_acknowledged");
+      expect(preview).toContain("acknowledged_review_count: 1");
+      expect(preview).toContain("journal_review_count: 0");
+      expect(preview).not.toContain("code: camt_journal_review");
+    }
   });
 });

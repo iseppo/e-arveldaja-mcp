@@ -1,6 +1,6 @@
 {
   "by_code": {
-    "ANY": 1520,
+    "ANY": 1519,
     "UNTYPED_PAYLOAD": 178
   },
   "errors": {
@@ -277,7 +277,7 @@
       "ANY": 29
     },
     "src/tools/workflow-recommendations.test.ts": {
-      "ANY": 25
+      "ANY": 24
     },
     "src/transaction-status.test.ts": {
       "ANY": 2
@@ -298,6 +298,6 @@
       "ANY": 9
     }
   },
-  "total": 1698,
+  "total": 1697,
   "version": 1
 }

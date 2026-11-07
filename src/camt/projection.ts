@@ -110,17 +110,20 @@ function journalCoverageSkip(entry: ParsedCamtEntry, coverage: Exclude<CamtJourn
     return { ...base, reason: `Already booked by journal ${ids}` };
   }
   if (coverage.code === "camt_journal_direction_conflict") {
-    // Not "may already book it": the stored row's journal books the opposite
-    // direction, so the ledger is wrong now and needs correcting.
+    // The opposite bank net is a suspect only: date/amount do not prove that
+    // the transaction represents this statement movement.
     return {
       ...base,
-      reason: "An existing confirmed transaction's journal books this movement in the opposite direction; needs correction",
+      reason: "An existing confirmed transaction's journal has the opposite bank direction; movement identity needs review",
       review_code: coverage.code,
       movement_identity: camtMovementIdentity(entry),
-      review_note: `The ${entry.amount} ${entry.currency} ${entry.direction} row on ${entry.date} matches a confirmed transaction whose registration ` +
-        `journal${coverage.journal_ids.length === 1 ? "" : "s"} ${ids} book${coverage.journal_ids.length === 1 ? "s" : ""} it in the opposite direction ` +
-        `(${coverage.code}): that row is booked wrongly. It was not created; correct the existing transaction: invalidate it, ` +
-        "delete it and re-import this statement entry (re-confirming the old row can book the wrong direction again), after the owner approves.",
+      review_note: `The ${entry.amount} ${entry.currency} ${entry.direction} row on ${entry.date} has the same date and amount as a confirmed transaction whose registration ` +
+        `journal${coverage.journal_ids.length === 1 ? "" : "s"} ${ids} has the opposite bank direction (${coverage.code}). ` +
+        "This does not prove that it is the same statement movement or that the existing booking is wrong. It was not created. " +
+        "Compare the statement reference and counterparty with the transaction and journal. Only if the same movement is proved " +
+        "and its booking is wrong, propose invalidating, deleting and re-importing that row after the owner approves " +
+        "(re-confirming the old row can book the wrong direction again). If it is a different valid movement, preserve the existing transaction " +
+        "and offer inline creation of the missing statement row after the owner approves. If identity remains uncertain, keep the row for review.",
     };
   }
   return {

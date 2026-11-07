@@ -535,11 +535,25 @@ describe("a row e-arveldaja's own bank import created (camt_native_import_match)
       review_code: "camt_journal_direction_conflict", journal_ids: [9400], movement_identity: expect.stringMatching(/^[0-9a-f]{64}$/),
     });
     expect(projection.skipped[0]!.skip_code).toBeUndefined();
-    // The stored row is booked wrongly: the note asks for a correction, not
-    // "create it if not booked yet".
-    expect(projection.skipped[0]!.review_note).toContain("booked wrongly");
-    expect(projection.skipped[0]!.review_note).toContain("invalidate it, delete it and re-import");
-    expect(projection.skipped[0]!.review_note).not.toContain("create the transaction manually");
+    expect(projection.skipped[0]!.review_note).toContain("does not prove that it is the same statement movement");
+    expect(projection.skipped[0]!.review_note).toContain("Only if the same movement is proved");
+    expect(projection.skipped[0]!.review_note).toContain("after the owner approves");
+  });
+
+  it("a distinct incoming payment of the same date and amount stays a suspect, with preservation and inline creation guidance", async () => {
+    const projection = await project(
+      [native({ bank_account_name: "Different Customer OÜ", bank_account_no: "EE382200221020145685" })],
+      [registration("D", 42.5)],
+    );
+    expect(projection.descriptors).toHaveLength(0);
+    expect(projection.skipped[0]).toMatchObject({
+      review_code: "camt_journal_direction_conflict", journal_ids: [9400],
+      reason: "An existing confirmed transaction's journal has the opposite bank direction; movement identity needs review",
+    });
+    expect(projection.skipped[0]!.review_note).toContain("Compare the statement reference and counterparty");
+    expect(projection.skipped[0]!.review_note).toContain("preserve the existing transaction");
+    expect(projection.skipped[0]!.review_note).toContain("offer inline creation of the missing statement row after the owner approves");
+    expect(projection.skipped[0]!.review_note).not.toContain("that row is booked wrongly");
   });
 
   it.each([

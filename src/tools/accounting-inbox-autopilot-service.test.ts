@@ -281,7 +281,7 @@ describe("runAccountingInboxDryRunPipeline", () => {
     expect(prepareInterAccount).not.toHaveBeenCalled();
   });
 
-  it("tells a wrongly booked CAMT row apart from one an existing journal may already book", async () => {
+  it("distinguishes proved CAMT booking conflicts from unproved opposite-direction journal suspects", async () => {
     const prepareCamtImport = vi.fn().mockResolvedValue(ok({
       projection: { skipped: ["camt_duplicate_journal_conflict", "camt_journal_direction_conflict", "camt_journal_posting_review"].map((code, index) => ({
         date: "2026-06-20", amount: 10 + index, duplicate_transaction_ids: [], reason: "review", journal_ids: [500 + index],
@@ -301,7 +301,7 @@ describe("runAccountingInboxDryRunPipeline", () => {
     });
     expect(result.needs_accountant_review.map(item => item.summary)).toEqual([
       "CAMT row 2026-06-20 10 was not created: an existing confirmed transaction is booked wrongly (wrong direction or amount) and needs correction (camt_duplicate_journal_conflict).",
-      "CAMT row 2026-06-20 11 was not created: an existing confirmed transaction is booked wrongly (wrong direction or amount) and needs correction (camt_journal_direction_conflict).",
+      "CAMT row 2026-06-20 11 was not created: an existing confirmed transaction has an opposite-direction journal; prove movement identity before proposing correction (camt_journal_direction_conflict).",
       "CAMT row 2026-06-20 12 was not created: an existing journal may already book it (camt_journal_posting_review).",
     ]);
   });
@@ -317,6 +317,7 @@ describe("runAccountingInboxDryRunPipeline", () => {
         review("wise_transfer_journal_ambiguous", { candidate_journal_ids: [71, 72] }),
         review("wise_transfer_mapping_rejected", { journal_id: 73 }),
         review("wise_transfer_journal_existing_elsewhere", { candidate_journal_ids: [81, 82], required_acknowledgement_ids: [81, 82] }),
+        review("wise_exact_label_possible_double_booking", { journal_id: 91, candidate_journal_ids: [92], required_acknowledgement_ids: [92] }),
       ],
     }));
     const result = await runAccountingInboxDryRunPipeline({
@@ -337,7 +338,15 @@ describe("runAccountingInboxDryRunPipeline", () => {
     expect(recommendations[1]).toContain("journalized_transfer_ids");
     expect(recommendations[2]).toContain("journal 73 was rejected");
     expect(recommendations[3]).toContain("Journal(s) 81, 82 already move this amount on the Wise account");
-    expect(new Set(recommendations).size).toBe(4);
+    for (const index of [1, 3]) {
+      expect(recommendations[index]).toContain("ordinary third-party payments stay PROJECT for later reconciliation");
+      expect(recommendations[index]).toContain("only eligible own-account transfers receive inter-account confirmation");
+      expect(recommendations[index]).not.toContain("creates and confirms a new transaction");
+    }
+    expect(recommendations[4]).toContain("Journal 91 carries this Wise ID and books the movement");
+    expect(recommendations[4]).toContain("does not create another main transaction");
+    expect(recommendations[4]).not.toContain("restores the reviewed treatment");
+    expect(new Set(recommendations).size).toBe(5);
   });
 
   it("surfaces every held inter-account row with its ids, mirror proposals as report-only, and errors (PA09)", async () => {

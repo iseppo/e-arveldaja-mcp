@@ -258,3 +258,73 @@ describe("astra prompt review 2026-11-04", () => {
     expect(render("month-end-close", "guided")).toContain("The counts are attachment-only");
   });
 });
+
+describe("money prompt review 2026-11-07", () => {
+  it.each(["standard", "full", "guided", "guided-sales"] as const)("requires movement identity before CAMT direction repair on %s", profile => {
+    const body = render("import-camt", profile);
+    expect(body).toContain("same date and amount with opposite bank postings do not prove movement identity");
+    expect(body).toContain("prove that the named transaction is the SAME statement movement before proposing invalidation or deletion");
+    expect(body).toContain("Preserve a transaction that books a different real movement");
+    expect(body).not.toContain("the ledger is wrong until that row is fixed");
+    expect(body).not.toContain("rows need the existing booking fixed");
+  });
+
+  it.each(["standard", "full"] as const)("uses invoice and supplier VAT prefixes for reverse-charge region on %s", profile => {
+    const body = render("book-invoice", profile);
+    expect(body).toContain("An EU member-state VAT prefix (including XI) on EITHER the current invoice OR the supplier record selects EU row 6");
+    expect(body).toContain("`EU…` OSS numbers are non-EU prefixes, not EU member-state VAT numbers");
+    expect(body).toContain("otherwise use a non-EU VAT prefix, then the client's ISO3 country only when neither has a VAT number");
+  });
+
+  it.each(["standard", "full"] as const)("resolves full versus limited VAT status before allowing deduction on %s", profile => {
+    const body = render("book-invoice", profile);
+    expect(body).toContain("Call `limited_vat` with `mode: \"status\"`");
+    expect(body).toContain("Only resolved `full` status permits ordinary input-VAT deduction");
+    expect(body).toContain("Never infer `full` from a VAT number");
+    expect(body).toContain("For `none` or `limited`, use non-deductible treatment");
+  });
+
+  it("keeps the tax-disabled VAT fallback explicit without naming an unavailable status tool", () => {
+    const body = render("book-invoice", "custom", { ...NORMAL_EXPOSURE, enableTaxTools: false });
+    expect(body).not.toContain("limited_vat");
+    expect(body).toContain("`get_vat_info` alone cannot distinguish full from limited registration");
+    expect(body).toContain("If status remains unknown, stop before choosing VAT treatment or asking for booking approval");
+  });
+
+  it.each(["standard", "full", "guided", "guided-sales"] as const)("gets CAMT acknowledgements from a retained inbox scan on %s", profile => {
+    const body = render("import-camt", profile);
+    expect(body).toContain("first scan the statement with `accounting_inbox` in the current server process");
+    expect(body).toContain("complete review item / `resolver_input` containing `acknowledgement`");
+    expect(body).toContain('`mode: "dry_run"`, `workspace_path`: the statement folder, and `bank_account_dimension_id`: the reviewed bank dimension');
+    expect(body).toContain("`autopilot.needs_accountant_review[*].resolver_input`");
+    expect(body).toContain('`review_type: "camt_journal_review"` and `item.acknowledgement`');
+    expect(body).toContain("The default scan and guided workflow `next` do not return that payload");
+    expect(body).not.toContain("next action to retrieve the review");
+    expect(body).toContain("A compact warning or plan exclusion is not that complete item");
+    expect(body).toContain("Acknowledgements require bundle storage");
+    expect(body).toContain("After a server restart, scan again");
+  });
+
+  it.each(["standard", "full", "guided", "guided-sales"] as const)("keeps acknowledged Wise third-party payments as drafts on %s", profile => {
+    const body = render("import-wise", profile);
+    expect(body).toContain("Third-party payments (`not_own_transfer_ids`) remain PROJECT and need later reconciliation");
+    expect(body).toContain("only eligible own-account transfers are confirmed against their reviewed counterpart account");
+    expect(body).not.toContain("the released row is created and confirmed as a new transaction");
+  });
+
+  it.each(["guided", "guided-sales"] as const)("uses compact inter-account execution follow-up fields on %s", profile => {
+    const body = render("reconcile-bank", profile);
+    expect(body).not.toContain("command_partitions");
+    expect(body).not.toContain("stop_reason");
+    expect(body).not.toContain("incoming_action");
+    expect(body).toContain("After inter-account execute, inspect `summary.status`, `summary.blockers` and `summary.warnings`");
+    expect(body).toContain("Follow `summary.details` with `get_operation_result_page`");
+  });
+
+  it("refreshes the Lightyear trade preview after prerequisite bookings before execution", () => {
+    const body = render("lightyear-booking", "standard");
+    expect(body).toContain("After storing a pool opening or booking prerequisite distributions, run a fresh `book_lightyear_trades` dry run");
+    expect(body).toContain("Never execute the earlier trade handle after those prerequisites change");
+    expect(body).toContain("Review the fresh trade plan completely and obtain approval for newly bookable or changed effects");
+  });
+});

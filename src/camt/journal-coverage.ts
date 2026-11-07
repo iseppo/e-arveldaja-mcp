@@ -350,10 +350,10 @@ export function classifyCamtJournalCoverage(
   const [only] = [...covering];
   if (only) return { kind: only[1], journal_ids: [only[0]] };
   if (scanIds.length > 0) return { kind: "review", code: "camt_journal_posting_review", journal_ids: journalIds };
-  // d) The direction-filtered scan misses a CONFIRMED row's registration
-  // journal booked backwards (the old type-"C" bug): same dimension, date and
-  // EUR cents, but the opposite bank net. It may be this movement, so it is a
-  // review, never a create and never a skip.
+  // d) An opposite-net registration journal can indicate the old type-"C"
+  // direction bug, but dimension/date/EUR cents do not establish movement
+  // identity or prove an incorrect booking: it can be a different valid
+  // movement. Hold for review; destructive repair requires separate proof.
   const invertedIds = context.journals.filter((journal) => {
     if (journal.registered !== true || journal.operation_type !== "TRANSACTION" || journal.operations_id == null) return false;
     const transaction = context.sameDimensionTransactions.get(journal.operations_id);

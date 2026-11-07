@@ -73,6 +73,8 @@ When the required accounts are known, call `book_lightyear_distributions` with `
 
 ### Step 6: Execute after approval
 
+After storing a pool opening or booking prerequisite distributions, run a fresh `book_lightyear_trades` dry run. Never execute the earlier trade handle after those prerequisites change: its pool projection is stale and execute refuses `plan_drift`. Review the fresh trade plan completely and obtain approval for newly bookable or changed effects before executing its new `plan_handle`.
+
 After approval, re-run only the approved booking tools with `dry_run: false`. For each approved tool, `dry_run: false` REQUIRES the `plan_handle` from that tool's own reviewed dry run, and you must reuse the SAME reviewed optional arguments alongside it — the same statement path, capital-gains file, accounts, dimensions, and `skip_tickers`. Pass `plan_handle`: the `plan_handle` from the reviewed dry run.
 
 Keep existing approval for unchanged, fully reviewed effects. Newly exposed or changed effects need approval; a refreshed handle alone does not require asking again for actions already approved.
