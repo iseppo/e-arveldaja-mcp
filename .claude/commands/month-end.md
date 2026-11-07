@@ -217,4 +217,6 @@ Capability condition for `year-end`: inspect the connected MCP server's advertis
 
 
 For December (the last month of a calendar fiscal year), offer the year-end close next: `prepare_year_end_close` with `year` and the proposed reserve/transfer options (RIK method; dry run). Show the proposed journals and review items. After explicit owner approval, pass the returned single-use `plan_handle`, the same year/options and `confirm: true` to `execute_year_end_close`. A `plan_drift` refusal requires a fresh preview and approval; created journals remain drafts for separate review and registration.
+
+If the annual report's cash flow lists `cash_flow_account_reviews` (a 24xx debt account), show the owner its `explanation` and journals and ask per account. Short version: **Põhitegevus** — tavaline ärivõlg (grupi-/sidusettevõtte arve, omaniku makstud kulud); võlg tekib arvest või kulust. **Finantseerimine** — laen (ka intressita omanikulaen); raha tuleb ilma arveta ja makstakse tagasi. **Segu** — eralda eri kontodele/dimensioonidele, muidu vali suurem osa ja kirjelda lisas. Then add the rule row from `action` and re-run the report.
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:year-end -->

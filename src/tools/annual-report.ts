@@ -27,7 +27,7 @@ import type { RuntimeSafetyContext } from "../runtime-safety-context.js";
 import type { PlanRecord, StoredExecutionPlan } from "../plan-store.js";
 import { canonicalPlanJson } from "./camt-plan.js";
 import { isOpeningBalanceJournal, loadJournalsWithOpeningBalance } from "../opening-balance-journal.js";
-import { calculateAnnualCashFlow, isCashFlowCashAccount } from "../reporting/annual-cash-flow.js";
+import { calculateAnnualCashFlow, isCashFlowCashAccount, isLiabilityWorkingCapitalAccount } from "../reporting/annual-cash-flow.js";
 import { loadCashFlowEvidence } from "../reporting/cash-flow-evidence.js";
 import {
   isYearEndClosingJournal,
@@ -1099,6 +1099,74 @@ function getRelatedPartyFlags(client: Client): string[] {
   ].filter((flag): flag is string => flag !== null);
 }
 
+/** One unclassified 24xx liability account whose cash movements hold the cash flow for review. */
+export interface CashFlowAccountReview {
+  account_id: number;
+  account_name: string;
+  cash_in: number;
+  cash_out: number;
+  net: number;
+  journal_count: number;
+  journals: Array<{ journal_id: number | null; date: string; amount: number; direction: "in" | "out"; title: string | undefined }>;
+  journals_truncated: boolean;
+  explanation: string;
+  action: string;
+}
+
+const CASH_FLOW_ACCOUNT_REVIEW_JOURNAL_LIMIT = 50;
+const CASH_FLOW_24XX_EXPLANATION =
+  "Põhitegevus: konto peal on tavaline ärivõlg — grupi- või sidusettevõtte arve kauba/teenuse eest, omaniku poolt firma eest " +
+  "makstud kulud (kuluaruanne), muu tegevusega seotud võlg. Tunnus: võlg tekib arvest või kulust, mitte rahast. " +
+  "Finantseerimine: konto peal on laen — omanik, emaettevõte või sidusettevõte kandis firmale raha laenuks või firma maksab " +
+  "laenu tagasi (ka intressita omanikulaen). Tunnus: raha liigub firmasse ilma arveta ja see tuleb tagasi maksta. " +
+  "Segu ühel kontol: eralda laen ja ärivõlg eri kontodele/dimensioonidele; kui ei saa, vali suurem osa ja kirjelda lisas.";
+
+function cashFlowAccountAction(accountId: number): string {
+  return `Lisa raamatupidamisreeglitesse rahavoo kategooria reegel kontole ${accountId}: rida "| ${accountId} | operating |" ` +
+    `(põhitegevus) või "| ${accountId} | financing |" (finantseerimine) tabelisse "account_id | category" — bundle'is fail ` +
+    `annual-report/cash-flow-category.md, ühefailirežiimis accounting-rules.md jaotis "## Cash Flow Category". ` +
+    `Seejärel käivita generate_annual_report_data uuesti.`;
+}
+
+function buildCashFlowAccountReviews(
+  accounts: Account[], journals: Journal[], cashAccountIds: Set<number>, from: string, to: string,
+): CashFlowAccountReview[] {
+  const reviews: CashFlowAccountReview[] = [];
+  for (const account of accounts) {
+    if (account.account_type_est !== "Kohustused" || !inRange(account.id, 2400, 2499) || getCashFlowCategoryRule(account.id)) continue;
+    const rows: CashFlowAccountReview["journals"] = [];
+    let cashIn = 0, cashOut = 0;
+    for (const journal of journals) {
+      if (!journal.registered || journal.is_deleted || journal.operation_type === "INITIAL" ||
+        journal.effective_date < from || journal.effective_date > to) continue;
+      const postings = (journal.postings ?? []).filter((posting) => !posting.is_deleted);
+      if (!postings.some((posting) => cashAccountIds.has(posting.accounts_id))) continue;
+      const own = postings.filter((posting) => posting.accounts_id === account.id);
+      if (!own.length) continue;
+      // Credit to the liability = money in; debit = money out.
+      const amount = roundMoney(own.reduce((sum, posting) => sum + (posting.type === "C" ? 1 : -1) * (posting.base_amount ?? posting.amount), 0));
+      if (amount === 0) continue;
+      if (amount > 0) cashIn += amount; else cashOut -= amount;
+      rows.push({ journal_id: journal.id ?? null, date: journal.effective_date, amount: Math.abs(amount),
+        direction: amount > 0 ? "in" : "out", title: wrapUntrustedOcr(journal.title ?? undefined) });
+    }
+    if (!rows.length) continue;
+    reviews.push({
+      account_id: account.id,
+      account_name: account.name_est,
+      cash_in: roundMoney(cashIn),
+      cash_out: roundMoney(cashOut),
+      net: roundMoney(cashIn - cashOut),
+      journal_count: rows.length,
+      journals: rows.slice(0, CASH_FLOW_ACCOUNT_REVIEW_JOURNAL_LIMIT),
+      journals_truncated: rows.length > CASH_FLOW_ACCOUNT_REVIEW_JOURNAL_LIMIT,
+      explanation: CASH_FLOW_24XX_EXPLANATION,
+      action: cashFlowAccountAction(account.id),
+    });
+  }
+  return reviews;
+}
+
 export async function buildAnnualReportData(api: ApiContext, year: number): Promise<Record<string, unknown>> {
   const { from, to, priorTo } = getYearBounds(year);
 
@@ -1396,6 +1464,13 @@ export async function buildAnnualReportData(api: ApiContext, year: number): Prom
   const closingShortTermLiabilities = sumStatementBalances(yearEndBalances, (balance) =>
     balance.account_type_est === "Kohustused" && (hasPrefix(balance.account_id, "20") || hasPrefix(balance.account_id, "21")),
   );
+  // 22xx customer prepayments, and 24xx payables an explicit rule marks
+  // operating — the same decision the per-journal bridge uses.
+  const isOperatingOtherLiability = (balance: AccountBalance) =>
+    (inRange(balance.account_id, 2200, 2299) || inRange(balance.account_id, 2400, 2499)) &&
+    isLiabilityWorkingCapitalAccount(balance.account_id, balance.account_type_est, getCashFlowCategoryRule);
+  const openingOperatingOtherLiabilities = sumStatementBalances(priorYearEndBalances, isOperatingOtherLiability);
+  const closingOperatingOtherLiabilities = sumStatementBalances(yearEndBalances, isOperatingOtherLiability);
   const openingAccruedLiabilities = sumStatementBalances(priorYearEndBalances, (balance) =>
     balance.account_type_est === "Kohustused" && inRange(balance.account_id, 2600, 2799),
   );
@@ -1410,6 +1485,7 @@ export async function buildAnnualReportData(api: ApiContext, year: number): Prom
   const taxLiabilitiesAdjustment = roundMoney(closingTaxLiabilities - openingTaxLiabilities);
   const otherReceivablesAdjustment = roundMoney(openingOtherReceivables - closingOtherReceivables);
   const accruedLiabilitiesAdjustment = roundMoney(closingAccruedLiabilities - openingAccruedLiabilities);
+  const operatingOtherLiabilitiesAdjustment = roundMoney(closingOperatingOtherLiabilities - openingOperatingOtherLiabilities);
   const shortTermInvestmentsAdjustment = roundMoney(openingShortTermInvestments - closingShortTermInvestments);
   const shortTermLiabilitiesAdjustment = roundMoney(closingShortTermLiabilities - openingShortTermLiabilities);
   const baseCashFromOperatingActivities = roundMoney(
@@ -1421,7 +1497,8 @@ export async function buildAnnualReportData(api: ApiContext, year: number): Prom
     payablesAdjustment +
     taxLiabilitiesAdjustment +
     otherReceivablesAdjustment +
-    accruedLiabilitiesAdjustment,
+    accruedLiabilitiesAdjustment +
+    operatingOtherLiabilitiesAdjustment,
   );
 
   const cashFlowEvidence = await loadCashFlowEvidence(api, allJournals, cashAccountIds, from, to);
@@ -1431,6 +1508,7 @@ export async function buildAnnualReportData(api: ApiContext, year: number): Prom
     currentYearProfitAccount: currentYearProfitAccountId,
     categoryRule: getCashFlowCategoryRule, evidence: cashFlowEvidence,
   });
+  const cashFlowAccountReviews = buildCashFlowAccountReviews(accounts, allJournals, cashAccountIds, from, to);
   const netCashFromOperatingActivities = cashFlow.operating_bridge.adjusted_total;
   const netCashFromInvestingActivities = cashFlow.investing.net;
   const netCashFromFinancingActivities = cashFlow.financing.net;
@@ -1445,6 +1523,10 @@ export async function buildAnnualReportData(api: ApiContext, year: number): Prom
   const cashFlowReconciliationDifference = roundMoney(cashChange - statementCashChange);
   if (cashFlow.status === "requires_review") {
     warnings.push("Cash-flow attribution requires review: unresolved source evidence, currency valuation or an indirect operating bridge difference remains. A zero net reconciliation does not establish complete classification.");
+  }
+  if (cashFlowAccountReviews.length) {
+    warnings.push(`Cash-flow category undecided for ${cashFlowAccountReviews.map((review) => review.account_id).join(", ")}: ` +
+      "choose operating or financing per account (see cash_flow_statement.cash_flow_account_reviews).");
   }
   if (Math.abs(cashFlow.operating_bridge.difference) >= 0.01) {
     warnings.push(`Indirect operating cash differs from the independently classified direct operating cash by ${cashFlow.operating_bridge.difference} EUR; no balancing adjustment was made.`);
@@ -1598,6 +1680,7 @@ export async function buildAnnualReportData(api: ApiContext, year: number): Prom
         source_row_count: cashFlow.operating_bridge.source_rows.length,
         source_rows_truncated: cashFlow.operating_bridge.source_rows.length > 500,
       },
+      cash_flow_account_reviews: cashFlowAccountReviews,
       unresolved_cash: { ...cashFlow.unresolved_cash, items: cashFlow.unresolved_cash.items.slice(0, 500), truncated: cashFlow.unresolved_cash.items.length > 500 },
       cash_movements: { count: cashFlow.cash_movements.length, items: cashFlow.cash_movements.slice(0, 500), truncated: cashFlow.cash_movements.length > 500 },
       evidence_coverage: cashFlow.evidence_coverage,
@@ -1614,6 +1697,9 @@ export async function buildAnnualReportData(api: ApiContext, year: number): Prom
         change_in_payables: payablesAdjustment,
         change_in_tax_liabilities: taxLiabilitiesAdjustment,
         change_in_accrued_liabilities: accruedLiabilitiesAdjustment,
+        // "Äritegevusega seotud kohustuste ja ettemaksete muutus": 22xx customer
+        // prepayments plus 24xx payables with an explicit operating rule.
+        change_in_customer_prepayments_and_other_operating_liabilities: operatingOtherLiabilitiesAdjustment,
         non_cash_adjustments: cashFlow.operating_bridge.non_cash_adjustments,
         non_operating_adjustments: cashFlow.operating_bridge.non_operating_adjustments,
         unresolved_bridge_exclusions: cashFlow.operating_bridge.unresolved_exclusions,

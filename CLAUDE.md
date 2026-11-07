@@ -110,6 +110,13 @@ purpose even when the invoice was booked after payment or historical invoice
 capacity is unavailable; classification does not certify the invoice's open
 balance. Invoice-capacity safeguards still apply to capital and mixed sources.
 An unrelated customer's clearing cannot veto a proved operating payment.
+Liability working capital is 22xx (customer prepayments), 23xx and 25xx–27xx.
+24xx (group/related/other payables) is trade debt or a loan by nature: it is
+`unclassified` unless a `cash_flow_category` rule says `operating` (then it also
+enters both bridges) or `financing`; `isLiabilityWorkingCapitalAccount` is the
+single decision both bridges use. A rule-less 24xx account with cash movements
+gets a `cash_flow_account_reviews` entry (Estonian when-to-choose guidance and
+the rule row to add).
 Exact invoice plus direct operating-account distributions are supported when
 their signed amounts and account/dimension slices cover the registered cash
 movement completely. Realized FX within an operating payment follows that

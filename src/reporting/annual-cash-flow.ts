@@ -30,6 +30,15 @@ const postingIsValued = (p:Posting,j:Journal) => (p.type==="D"||p.type==="C") &&
   !(p.base_amount!=null&&p.amount!==0&&Math.sign(p.amount)!==Math.sign(p.base_amount)) &&
   !((p.cl_currencies_id??j.cl_currencies_id??"EUR")!=="EUR"&&p.base_amount==null);
 export function isCashFlowCashAccount(account: Account): boolean { return account.account_type_est === "Varad" && String(account.id).startsWith("10"); }
+/** Liability working capital shared by the per-journal and the balance-sheet bridge.
+ * 22xx customer prepayments are operating; 24xx group/related/other payables
+ * enter only with an explicit "operating" account rule (else review/financing). */
+export function isLiabilityWorkingCapitalAccount(accountId: number, accountType: string | undefined,
+  categoryRule?: (accountId: number) => "operating" | "investing" | "financing" | undefined): boolean {
+  if (accountType !== "Kohustused") return false;
+  if (range(accountId,2200,2399) || range(accountId,2500,2799)) return true;
+  return range(accountId,2400,2499) && categoryRule?.(accountId) === "operating";
+}
 
 export function calculateAnnualCashFlow(input: Input) {
   const chart = new Map(input.accounts.map(a => [a.id,a]));
@@ -54,6 +63,9 @@ export function calculateAnnualCashFlow(input: Input) {
     // A result-only disposal account does not prove where the sold principal
     // was booked. Only a principal bundle or an explicit policy can classify it.
     if ([3820,7100,7110,8330,8335].includes(id)) return "unclassified";
+    // 24xx group/related/other payables can be trade debt or a loan: only an
+    // explicit account rule decides (the bridge follows the same rule).
+    if (a.account_type_est === "Kohustused" && range(id,2400,2499)) return "unclassified";
     if (id === cit) return "operating";
     if (id === dividend || a.account_type_est === "Omakapital") return "financing";
     if (a.account_type_est === "Varad" && (id === 1410 || range(id,1100,1199) || range(id,1700,1999) || a.is_fixed_asset)) return "investing";
@@ -67,7 +79,7 @@ export function calculateAnnualCashFlow(input: Input) {
     const a=chart.get(p.accounts_id), n=signed(p), id=p.accounts_id;
     const pl = a && (a.account_type_est==="Tulud" || a.account_type_est==="Kulud") && id !== (input.calculatedResultAccount??9000) && !isYearEndClosingJournal(j,year,currentYearProfit);
     const assetWC = a?.account_type_est==="Varad" && range(id,1200,1699);
-    const liabilityWC = a?.account_type_est==="Kohustused" && (range(id,2300,2399)||range(id,2500,2799));
+    const liabilityWC = isLiabilityWorkingCapitalAccount(id,a?.account_type_est,input.categoryRule);
     return { posting_id:p.id??null,posting_index:j.postings.indexOf(p),account_id:id,profit:pl?-n:0,
       depreciation:pl && a?.account_type_est==="Kulud" && range(id,7000,7099)?n:0,
       working_capital:assetWC||liabilityWC?-n:0 };
