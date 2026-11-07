@@ -1019,7 +1019,7 @@ describe("process_receipt_batch rollback handling", () => {
     // gated.
     expect(payload.results[0]!.booking_suggestion.reverse_charge_reason)
       .toBe("foreign_supplier_default");
-    expect(payload.results[0]!.booking_suggestion.item.reversed_vat_id).toBe(1);
+    expect(payload.results[0]!.booking_suggestion.item.reversed_vat_id).toBe(7);
   });
 
   it("threads parser OCR quality metadata into receipt confidence signals", async () => {

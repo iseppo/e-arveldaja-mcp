@@ -5165,7 +5165,8 @@ describe("accounting_inbox dry_run: receipt review items are compact", () => {
     expect(text).not.toContain("all_vat_candidates");
     // Without the projection each item also carried ~5 KB of OCR text plus
     // candidates, and workflow.needs_review repeated every item in full.
-    expect(Buffer.byteLength(text, "utf8")).toBeLessThan(profile === "guided" ? 150_000 : 180_000);
+    // Exclude the machine-dependent temporary-directory prefix from the size budget.
+    expect(Buffer.byteLength(text.replaceAll(tmpdir(), "/tmp"), "utf8")).toBeLessThan(profile === "guided" ? 150_000 : 180_000);
     if (profile === "standard") {
       // workflow.needs_review references the autopilot items instead of repeating them.
       const workflowReviews = (payload.workflow.needs_review as any[]).filter(item => item.source === "process_receipt_batch");

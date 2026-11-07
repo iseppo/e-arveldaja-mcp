@@ -8,7 +8,7 @@ import { parseDocument } from "../document-parser.js";
 import { logAudit } from "../audit-log.js";
 import { createTestRuntimeSafetyContext } from "../__fixtures__/runtime-safety.js";
 import { MutationIndeterminateError } from "../mutation-outcome.js";
-import { bookingDrift, createReadingDocumentOperations, deferredBookingDrift, draftReadbackMismatches, historyTitleNotPrinted, itemTitleHasDate, READING_CONFIRM_DOMAIN, READING_PLAN_DOMAIN, titleWordsMatch } from "./reading-operations.js";
+import { bookingDrift, createReadingDocumentOperations, deferredBookingDrift, draftReadbackMismatches, historyTitleNotPrinted, itemTitleHasDate, READING_CONFIRM_DOMAIN, READING_PLAN_DOMAIN, resolveItemsSource, titleWordsMatch } from "./reading-operations.js";
 import { WRONG_COMPANY_SIGNALS } from "./operations.js";
 import type { BlankLeaderProof, LostValueSeam } from "./lost-value-ocr.js";
 import { fakeSeam, LOST_DOTS, lostValueLines, lostValueParse, ocrRow, PLAIN_PDF, type LostRow } from "../__fixtures__/document-reading/lost-value.js";
@@ -70,6 +70,16 @@ function world(lostValueSeam?: LostValueSeam, proveBlank: BlankLeaderProof = asy
 }
 
 type World = ReturnType<typeof world>;
+
+it("R7: reading keeps caller booking fields and remaps only a non-EU history template", async () => {
+  const w = world();
+  w.api.clients.get.mockResolvedValue({ id: SUPPLIER_ID, cl_code_country: "USA", invoice_vat_no: null });
+  w.details[HISTORY_INVOICE.id] = { ...HISTORY_DETAIL, items: [{ ...HISTORY_DETAIL.items[0]!, reversed_vat_id: 1 }] };
+  const suggested = await resolveItemsSource(w.api, SUPPLIER_ID, undefined);
+  expect(suggested).toMatchObject({ template: { reversed_vat_id: 7, vat_rate_dropdown: "24" } });
+  const supplied = [{ ...HISTORY_DETAIL.items[0]!, reversed_vat_id: 1 }];
+  expect(await resolveItemsSource(w.api, SUPPLIER_ID, { items: supplied })).toEqual({ items: supplied });
+});
 
 async function verified(w: World, file: { path: string; sha256: string }, input: ReadingCaseInput = {}, lines = BASE_LINES) {
   const { reading, proof } = readingFor(packetFor(file.sha256, lines), input);

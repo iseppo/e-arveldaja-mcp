@@ -1017,7 +1017,7 @@ async function processSingleReceipt(
             }),
           }
         : {}),
-      notes: created.notes,
+      notes: [...notes, ...created.notes],
       error: created.error,
     };
   } catch (error) {
