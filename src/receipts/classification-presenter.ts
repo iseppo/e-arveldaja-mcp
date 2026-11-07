@@ -429,6 +429,16 @@ export function renderApplyClassificationsCompact(
   // invoice with an incomplete downstream mutation) and processing failures.
   const blockers: CompactReviewItem[] = [];
   for (const group of results) {
+    for (const refusal of group.review_reasons ?? []) {
+      blockers.push({
+        item_id: String(refusal.transaction_id),
+        code: refusal.code,
+        message: refusal.next_action,
+        severity: "blocker",
+        account_number: refusal.account_number,
+        upstream_detail: refusal.upstream_detail,
+      });
+    }
     for (const partial of group.partial_mutations ?? []) {
       blockers.push({
         item_id: `invoice-${partial.created_invoice_id}`,

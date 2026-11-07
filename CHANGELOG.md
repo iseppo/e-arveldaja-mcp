@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **A refused bank booking now explains how to choose a usable account.** Details: account-distribution confirmations report `account_not_bank_bindable` with the refused account number and guidance to enable bank reconciliation in the chart settings, choose an allowed account or book a separate journal. The original refusal remains sandboxed in `upstream_detail`; no alternative account is tried.
+- **Automatically generated invoice titles avoid repeated supplier names and keep useful wording from earlier invoices.** Details: generated descriptions remove repeated supplier word runs; supplier-history titles retain their wording after stale period tokens are removed, including in receipt batches. Empty or punctuation-only remainders keep the existing fallback; document and operator descriptions are unchanged.
+- **An unreadable invoice date is left for review instead of being guessed from the billing period.** Details: a lost invoice-date value behind a dot leader suppresses the unlabelled first-date fallback. Documents without a lost date value keep the existing fallback, and blank-leader proof checks are unchanged.
+
 ## [0.40.0] - 2026-11-07
 
 ### Added

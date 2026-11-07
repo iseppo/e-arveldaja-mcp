@@ -312,7 +312,9 @@ export interface CrossCurrencyRow {
 
 export interface InterAccountErrorRow {
   journal_id?: number;
-  transaction_ids: number[]; code?: OneSidedEurAmountErrorCode; reason: string;
+  transaction_ids: number[]; code?: OneSidedEurAmountErrorCode | "account_not_bank_bindable"; reason: string;
+  account_number?: string;
+  upstream_detail?: string;
 }
 
 /** Intended confirm/delete/client-update actions collected during matching. */

@@ -37,7 +37,7 @@ export class HttpError extends Error {
     why: string;
   }>;
   /** `"auth_cooldown"`: refused locally by the per-server consecutive-401 brake, nothing sent. */
-  readonly code?: "auth_cooldown";
+  readonly code?: "auth_cooldown" | "account_not_bank_bindable";
   readonly cooldown_seconds_remaining?: number;
   /** On `auth_cooldown`: distinct connections to this server whose 401s tripped the brake. */
   readonly distinct_connections_401?: number;

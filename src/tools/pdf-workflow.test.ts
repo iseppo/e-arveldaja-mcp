@@ -2395,10 +2395,15 @@ describe("P2 E3: a foreign-currency marker on an EUR reading is a preview warnin
 describe("P2 E2: a value lost under a dot leader is a preview warning", () => {
   it("extract_pdf_invoice warns text_layer_value_lost", async () => {
     mockedResolveFileInput.mockResolvedValue({ path: createTempInvoiceFile("leader.pdf", "%PDF-1.4") });
-    mockedParseDocument.mockResolvedValue(parseOfLines(LEADER_CELL_LINES));
+    mockedParseDocument.mockResolvedValue(parseOfLines([
+      ...LEADER_CELL_LINES,
+      "Kokkuvõte - 1. oktoober 2026 - 31. oktoober 2026",
+    ]));
     const { handler } = setupPdfWorkflowTool("extract_pdf_invoice", { clients: { listAll: vi.fn().mockResolvedValue([]) } });
     const payload = parseToolPayload<ExtractPdfInvoicePayload>((await handler({ file_path: "/tmp/leader.pdf" })).content[0]!.text);
     expect(payload.extracted.warnings!.some((w: string) => w.startsWith("text_layer_value_lost:"))).toBe(true);
     expect(payload.llm_fallback.confidence_signals).toContain("text_layer_value_lost");
+    expect(payload.extracted.invoice_date).toBeUndefined();
+    expect(payload.llm_fallback.confidence_signals).not.toContain("invoice_date_unlabelled");
   });
 });

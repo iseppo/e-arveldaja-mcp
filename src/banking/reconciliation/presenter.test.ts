@@ -10,6 +10,7 @@ import { renderDuplicatePostingSuspects } from "../../bank-posting-duplicate-gua
 import { mcpPayloadBytes, RESPONSE_BUDGETS } from "../../response-budget.js";
 import { runWithToolProfile } from "../../tool-profile.js";
 import { roundMoney } from "../../money.js";
+import { wrapUntrustedOcr } from "../../mcp-json.js";
 import { reconInvoiceConfirmCommandId } from "../../tools/bank-reconciliation-plan.js";
 import type { PlanExecutionReport } from "../../plan-execution.js";
 import type {
@@ -575,6 +576,19 @@ describe("renderExactMatchPayload", () => {
 });
 
 describe("renderInterAccountCompact", () => {
+  it("never hides an account refusal behind capped pre-existing match errors", () => {
+    const detail = wrapUntrustedOcr("The account 1020 has not been allowed to be reconciled ([1010])!")!;
+    const match = makeInterAccount(1, { errors: [
+      ...Array.from({ length: 4 }, (_, index) => ({ transaction_ids: [index + 10], reason: "Existing match error" })),
+      { transaction_ids: [1], code: "account_not_bank_bindable", account_number: "1020", upstream_detail: detail,
+        reason: "Account 1020 cannot be used on a bank row in e-arveldaja — enable it in the chart settings, choose an allowed account, or book a separate journal." },
+    ] });
+    const { summary } = renderInterAccountCompact({ mode: "EXECUTED", match, operationHandle: "op" });
+    expect(summary.blockers).toEqual(expect.arrayContaining([expect.objectContaining({
+      code: "account_not_bank_bindable", account_number: "1020", upstream_detail: detail,
+      message: expect.stringContaining("enable it in the chart settings"),
+    })]));
+  });
   it("stays approximately constant from 100 to 1000 clean pairs", () => {
     const bytes100 = mcpPayloadBytes(renderInterAccountCompact({ mode: "DRY_RUN", match: makeInterAccount(100), planHandle: "P" }));
     const bytes1000 = mcpPayloadBytes(renderInterAccountCompact({ mode: "DRY_RUN", match: makeInterAccount(1000), planHandle: "P" }));
