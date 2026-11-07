@@ -201,6 +201,28 @@ function isPerConnectionBundleStorage(): boolean {
   return storage.dir === resolve(getGlobalConfigDir(), BUNDLE_DIR_NAME, scope);
 }
 
+export interface AccountingRuleScope {
+  rule_scope: "this_company" | "shared";
+  rule_scope_warning?: string;
+}
+
+/**
+ * Where a saved company rule applies: `this_company` for the default
+ * per-connection bundle, `shared` otherwise (EARVELDAJA_RULES_DIR /
+ * EARVELDAJA_RULES_FILE / a kept-in-place root bundle). A shared store on a
+ * server with several connections gets a plain-language warning; the save is
+ * never refused.
+ */
+export function describeAccountingRuleScope(): AccountingRuleScope {
+  if (isPerConnectionBundleStorage()) return { rule_scope: "this_company" };
+  if (getBundleRecordIdentity().connectionCount <= 1) return { rule_scope: "shared" };
+  return {
+    rule_scope: "shared",
+    rule_scope_warning: "This rule now applies to every company this server uses, because they share one rules store. " +
+      "To keep companies separate, give each company its own EARVELDAJA_RULES_DIR (or unset EARVELDAJA_RULES_DIR / EARVELDAJA_RULES_FILE to use the per-company default).",
+  };
+}
+
 /**
  * Decide whether a bundle record stamped with `recordIdentity` belongs to the
  * active connection. A record from another connection is refused. A legacy
@@ -1113,6 +1135,245 @@ export function getLiabilityClassificationRule(accountId: number): LiabilityClas
 
 export function getCashFlowCategoryRule(accountId: number): CashFlowCategoryRule | undefined {
   return loadAccountingRules().annual_report?.cash_flow_category?.[String(accountId)];
+}
+
+export type AnnualReportAccountRuleType = "cash_flow_category" | "liability_classification";
+
+export const ANNUAL_REPORT_ACCOUNT_RULE_VALUES: Readonly<Record<AnnualReportAccountRuleType, readonly string[]>> = Object.freeze({
+  cash_flow_category: cashFlowCategorySchema.options,
+  liability_classification: liabilityClassificationSchema.options,
+});
+
+export interface SaveAnnualReportAccountRuleInput {
+  rule_type: AnnualReportAccountRuleType;
+  account_id: number;
+  /** Required unless `remove` is true. */
+  value?: string;
+  remove?: boolean;
+}
+
+export interface SaveAnnualReportAccountRuleResult {
+  path: string;
+  action: "inserted" | "updated" | "unchanged" | "removed" | "not_found";
+  previous_value?: string;
+  value?: string;
+}
+
+const ANNUAL_REPORT_ACCOUNT_RULE_TABLES: Readonly<Record<AnnualReportAccountRuleType, {
+  section: string; heading: string; column: string; type: string; title: string;
+}>> = {
+  cash_flow_category: {
+    section: "cash_flow_category", heading: "## Cash Flow Category", column: "category",
+    type: "CashFlowCategory", title: "Cash flow statement category overrides",
+  },
+  liability_classification: {
+    section: "liability_classification", heading: "## Liability Classification", column: "classification",
+    type: "LiabilityClassification", title: "Liability maturity classification overrides",
+  },
+};
+
+const MARKDOWN_SECTION_HEADING = /^(#{2,3})\s+(.+?)\s*$/;
+
+function markdownTableCells(line: string): string[] {
+  return line.trim().split("|").map(cell => cell.trim()).filter((_, index, all) => index > 0 && index < all.length - 1);
+}
+
+/**
+ * Edit one account row of the `account_id | <column>` table held in
+ * `lines[start, end)`, reading it exactly as parseMarkdownTable does (every
+ * `|` line in the range; first = header, second = separator). Returns the
+ * value the reader currently resolves (last valid row wins) and the edited
+ * lines, or `changed: false` when nothing needs writing.
+ */
+function editAccountRuleTable(
+  lines: string[], start: number, end: number, column: string, allowed: readonly string[],
+  accountId: string, value: string | undefined,
+): { lines: string[]; previous: string | undefined; hadRow: boolean; changed: boolean } {
+  const pipeIndexes: number[] = [];
+  for (let index = start; index < end; index++) {
+    if (lines[index]!.trim().startsWith("|")) pipeIndexes.push(index);
+  }
+  if (pipeIndexes.length === 1) {
+    throw new Error(`The rules table "account_id | ${column}" is malformed (a header without a separator line); fix it by hand first.`);
+  }
+  if (pipeIndexes.length === 0) {
+    if (value === undefined) return { lines, previous: undefined, hadRow: false, changed: false };
+    let insertAt = end;
+    while (insertAt > start && lines[insertAt - 1]!.trim() === "") insertAt -= 1;
+    const table = ["", `| account_id | ${column} |`, "| --- | --- |", `| ${accountId} | ${value} |`];
+    const out = [...lines.slice(0, insertAt), ...table, ...lines.slice(insertAt)];
+    return { lines: out, previous: undefined, hadRow: false, changed: true };
+  }
+  const headers = markdownTableCells(lines[pipeIndexes[0]!]!).map(normalizeHeader).filter(Boolean);
+  const accountIndex = headers.indexOf("account_id");
+  const valueIndex = headers.indexOf(column);
+  if (accountIndex === -1 || valueIndex === -1) {
+    throw new Error(`The rules table must have "account_id" and "${column}" columns; fix it by hand first.`);
+  }
+  const rowIndexes = pipeIndexes.slice(2);
+  const matching = rowIndexes.filter(index => markdownTableCells(lines[index]!)[accountIndex] === accountId);
+  // `previous` mirrors the reader (last valid row wins); without a valid row it
+  // is the last matching row's raw cell, so replacing a broken row reports it.
+  let previous: string | undefined;
+  let baseCells: string[] | undefined;
+  for (const index of matching) {
+    const rowCells = markdownTableCells(lines[index]!);
+    const cell = rowCells[valueIndex]?.toLowerCase();
+    if (cell && allowed.includes(cell)) {
+      previous = cell;
+      baseCells = rowCells;
+    }
+  }
+  if (matching.length > 0 && previous === undefined) {
+    baseCells = markdownTableCells(lines[matching[matching.length - 1]!]!);
+    previous = baseCells[valueIndex] ?? "";
+  }
+  const hadRow = matching.length > 0;
+  if (value === undefined) {
+    if (!hadRow) return { lines, previous, hadRow, changed: false };
+    const drop = new Set(matching);
+    return { lines: lines.filter((_, index) => !drop.has(index)), previous, hadRow, changed: true };
+  }
+  // The reader lowercases the value, so a case-only difference is already this rule.
+  if (matching.length === 1 && previous === value) return { lines, previous, hadRow, changed: false };
+  // Keep the row's other columns (e.g. a hand-written note); replace only the value cell.
+  const cells = headers.map((_, index) =>
+    index === accountIndex ? accountId : index === valueIndex ? value : (baseCells?.[index] ?? ""));
+  const row = `| ${cells.join(" | ")} |`;
+  const insertAt = matching[0] ?? pipeIndexes[pipeIndexes.length - 1]! + 1;
+  const drop = new Set(matching);
+  const out: string[] = [];
+  for (let index = 0; index <= lines.length; index++) {
+    if (index === insertAt) out.push(row);
+    if (index < lines.length && !drop.has(index)) out.push(lines[index]!);
+  }
+  return { lines: out, previous, hadRow, changed: true };
+}
+
+/** `[start, end)` body range of the LAST `## <section>` (the one the reader keeps), or undefined. */
+function singleFileSectionRange(lines: string[], section: string): { start: number; end: number } | undefined {
+  let heading = -1;
+  lines.forEach((line, index) => {
+    const match = MARKDOWN_SECTION_HEADING.exec(line);
+    if (match && normalizeHeader(match[2]!) === section) heading = index;
+  });
+  if (heading === -1) return undefined;
+  const next = lines.findIndex((line, index) => index > heading && MARKDOWN_SECTION_HEADING.test(line));
+  return { start: heading + 1, end: next === -1 ? lines.length : next };
+}
+
+function writeRuleLines(path: string, lines: string[], eol: string): void {
+  writeFileSync(path, `${lines.join(eol).replace(/(?:\r?\n)+$/, "")}${eol}`, PRIVATE_FILE_OPTIONS);
+}
+
+/**
+ * Save, update or remove one account-level annual-report rule
+ * (`cash_flow_category` / `liability_classification`) in the same table the
+ * readers parse: the bundle concept file `annual-report/<…>.md`, or the
+ * `## Cash Flow Category` / `## Liability Classification` section of the
+ * single-file rules. Prose and the edited row's other columns are preserved;
+ * a removal that finds no rule writes nothing (no migration, no scaffold).
+ */
+export function saveAnnualReportAccountRule(input: SaveAnnualReportAccountRuleInput): SaveAnnualReportAccountRuleResult {
+  const spec = ANNUAL_REPORT_ACCOUNT_RULE_TABLES[input.rule_type];
+  const allowed = ANNUAL_REPORT_ACCOUNT_RULE_VALUES[input.rule_type];
+  if (!Number.isInteger(input.account_id) || input.account_id <= 0) {
+    throw new Error(`account_id must be a positive integer account number (got ${input.account_id}).`);
+  }
+  const value = input.remove === true ? undefined : input.value;
+  if (input.remove !== true && (value === undefined || !allowed.includes(value))) {
+    throw new Error(`${input.rule_type} value must be one of ${allowed.join(", ")}.`);
+  }
+  const accountId = String(input.account_id);
+  type Edit = { previous: string | undefined; hadRow: boolean; changed: boolean };
+  const outcome = (path: string, edit: Edit): SaveAnnualReportAccountRuleResult => {
+    const action: SaveAnnualReportAccountRuleResult["action"] = value === undefined
+      ? (edit.changed ? "removed" : "not_found")
+      : (!edit.changed ? "unchanged" : edit.hadRow ? "updated" : "inserted");
+    return {
+      path, action,
+      ...(edit.previous !== undefined ? { previous_value: edit.previous } : {}),
+      ...(value !== undefined ? { value } : {}),
+    };
+  };
+  const nothing: Edit = { previous: undefined, hadRow: false, changed: false };
+  const readLines = (path: string): { lines: string[]; eol: string } => {
+    const text = readFileSync(path, "utf8");
+    return { lines: text.replace(/^﻿/, "").split(/\r?\n/), eol: text.includes("\r\n") ? "\r\n" : "\n" };
+  };
+
+  const storage = resolveStorage();
+  if (storage.mode === "file") {
+    const path = storage.file;
+    if (!existsSync(path)) {
+      if (value === undefined) return outcome(path, nothing);
+      writeFileSync(path, DEFAULT_RULES_TEMPLATE, PRIVATE_FILE_OPTIONS);
+    }
+    const { lines: original, eol } = readLines(path);
+    let lines = original;
+    let range = singleFileSectionRange(lines, spec.section);
+    if (!range) {
+      if (value === undefined) return outcome(path, nothing);
+      while (lines.length > 0 && lines[lines.length - 1]!.trim() === "") lines = lines.slice(0, -1);
+      lines = [...lines, "", spec.heading];
+      range = { start: lines.length, end: lines.length };
+    }
+    const edit = editAccountRuleTable(lines, range.start, range.end, spec.column, allowed, accountId, value);
+    if (edit.changed) {
+      writeRuleLines(path, edit.lines, eol);
+      resetAccountingRulesCache();
+    }
+    return outcome(path, edit);
+  }
+
+  const rel = join(...(input.rule_type === "cash_flow_category" ? ANNUAL_REPORT_CASHFLOW_FILE : ANNUAL_REPORT_LIABILITY_FILE));
+  const file = resolve(storage.dir, rel);
+  if (value === undefined && !existsSync(file)) {
+    // Nothing to remove unless a not-yet-migrated legacy file still holds the
+    // row: return before ensureBundle so no migration or scaffold happens.
+    let legacyHasRow = false;
+    if (!bundleHasConcepts(storage.dir) && existsSync(storage.legacyFile)) {
+      const { lines } = readLines(storage.legacyFile);
+      const range = singleFileSectionRange(lines, spec.section);
+      legacyHasRow = range !== undefined &&
+        editAccountRuleTable(lines, range.start, range.end, spec.column, allowed, accountId, undefined).hadRow;
+    }
+    if (!legacyHasRow) return outcome(file, nothing);
+  }
+
+  return withBundleLock(storage.dir, () => {
+    ensureBundle(storage.dir, storage.legacyFile);
+    let edit = nothing;
+    if (existsSync(file)) {
+      const { lines, eol } = readLines(file);
+      let bodyStart = 0;
+      if (lines[0]?.trim() === "---") {
+        const close = lines.findIndex((line, index) => index > 0 && line.trim() === "---");
+        bodyStart = close === -1 ? lines.length : close + 1;
+      }
+      const table = editAccountRuleTable(lines, bodyStart, lines.length, spec.column, allowed, accountId, value);
+      edit = table;
+      if (table.changed) {
+        writeRuleLines(file, table.lines.map((line, index) =>
+          index < bodyStart && /^timestamp\s*:/i.test(line) ? `timestamp: ${serializeFrontmatterValue(isoNow())}` : line), eol);
+      }
+    } else if (value !== undefined) {
+      mkdirSync(dirname(file), { recursive: true, mode: PRIVATE_DIR_MODE });
+      writeFileSync(file, buildConcept(
+        [["type", spec.type], ["title", spec.title], ["timestamp", isoNow()]],
+        `# Schema\n\n${buildMarkdownTable(["account_id", spec.column], [[accountId, value]])}`,
+      ), PRIVATE_FILE_OPTIONS);
+      edit = { previous: undefined, hadRow: false, changed: true };
+    }
+    if (edit.changed) {
+      appendBundleLog(storage.dir, [value === undefined
+        ? `removed ${input.rule_type} rule for account ${accountId} from ${rel}`
+        : `${edit.hadRow ? `changed ${edit.previous || "(empty)"} →` : "set"} ${input.rule_type} ${value} for account ${accountId} in ${rel}`]);
+      regenerateBundleIndex(storage.dir);
+      resetAccountingRulesCache();
+    }
+    return outcome(file, edit);
+  });
 }
 
 export function getCurrentYearProfitAccountRule(): number | undefined {

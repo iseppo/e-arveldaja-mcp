@@ -27,7 +27,9 @@ import {
   sandboxReviewFields,
   scanWorkspaceFiles,
   type InboxLightyearFilePayload,
+  type SaveAutoBookingRulePayload,
 } from "./accounting-inbox.js";
+import { initAccountingRulesConnection } from "../accounting-rules.js";
 import { registerReceiptInboxTools } from "./receipt-inbox.js";
 import { registerLightyearTools } from "./lightyear-investments.js";
 import { preflightCamt053Xml } from "../camt/parser.js";
@@ -2127,6 +2129,43 @@ ${entryXml}
       delete process.env.EARVELDAJA_RULES_FILE;
     } else {
       process.env.EARVELDAJA_RULES_FILE = originalRulesFile;
+    }
+  });
+
+  it.each([
+    { name: "per-company default store", storage: "default", connectionCount: 2, scope: "this_company", warned: false },
+    { name: "shared RULES_DIR, several companies", storage: "dir", connectionCount: 2, scope: "shared", warned: true },
+    { name: "shared RULES_FILE, several companies", storage: "file", connectionCount: 2, scope: "shared", warned: true },
+    { name: "shared RULES_DIR, one company", storage: "dir", connectionCount: 1, scope: "shared", warned: false },
+  ])("save_auto_booking_rule reports the rule scope: $name", async ({ storage, connectionCount, scope, warned }) => {
+    const root = await mkdtemp(join(tmpdir(), "earv-auto-rule-scope-"));
+    const saved = {
+      dir: process.env.EARVELDAJA_RULES_DIR, file: process.env.EARVELDAJA_RULES_FILE, config: process.env.EARVELDAJA_CONFIG_DIR,
+    };
+    const restore = (key: string, value: string | undefined) => {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    };
+    delete process.env.EARVELDAJA_RULES_DIR;
+    delete process.env.EARVELDAJA_RULES_FILE;
+    process.env.EARVELDAJA_CONFIG_DIR = join(root, "global");
+    if (storage === "dir") process.env.EARVELDAJA_RULES_DIR = join(root, "accounting-rules");
+    if (storage === "file") process.env.EARVELDAJA_RULES_FILE = join(root, "accounting-rules.md");
+    initAccountingRulesConnection(() => ({ name: "Firma A", stableIdentity: "firma-a", connectionCount }));
+    try {
+      const { handler } = setupAccountingInboxTool({}, "save_auto_booking_rule");
+      const result = await handler({ match: "openai", category: "saas_subscriptions", purchase_accounts_id: 5230 });
+      const payload = parseToolPayload<SaveAutoBookingRulePayload>(result.content[0]!.text);
+      expect(payload).toMatchObject({ saved: true, rule_scope: scope });
+      if (warned) expect(payload.rule_scope_warning).toContain("every company");
+      else expect(payload.rule_scope_warning).toBeUndefined();
+      if (storage === "default") expect(payload.path.startsWith(join(root, "global", "accounting-rules"))).toBe(true);
+    } finally {
+      initAccountingRulesConnection(() => ({ name: "default", stableIdentity: "default" }));
+      restore("EARVELDAJA_RULES_DIR", saved.dir);
+      restore("EARVELDAJA_RULES_FILE", saved.file);
+      restore("EARVELDAJA_CONFIG_DIR", saved.config);
+      await rm(root, { recursive: true, force: true });
     }
   });
 

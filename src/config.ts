@@ -210,7 +210,7 @@ export interface ToolExposureConfig {
   enableReferenceAdmin: boolean;
   /**
    * Register the annual-report / year-end tools (`prepare_year_end_close`,
-   * `generate_annual_report_data`, `execute_year_end_close`). Enabled by
+   * `generate_annual_report_data`, `execute_year_end_close`, `save_annual_report_account_rule`). Enabled by
    * default; set `EARVELDAJA_DISABLE_ANNUAL_REPORT=1` to drop the group for the
    * bulk of the year and re-enable it at closing time.
    */
