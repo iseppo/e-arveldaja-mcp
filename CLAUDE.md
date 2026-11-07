@@ -75,6 +75,15 @@ Set `EARVELDAJA_RULES_DIR` explicitly for a stable per-company path
 companies. Concurrent writes from multiple MCP clients sharing one bundle dir are
 serialized with an `O_EXCL` lock file at `<dir>.lock` (`withBundleLock()`).
 
+Only the default per-connection hashed bundle is private to one company;
+`EARVELDAJA_RULES_DIR`, `EARVELDAJA_RULES_FILE` and a kept-in-place project/global
+root bundle are shared by every connection of the server. The rule-saving tools
+(`save_auto_booking_rule`, `save_annual_report_account_rule`) say so at the point
+of saving: `rule_scope: "this_company" | "shared"` (`describeAccountingRuleScope()`,
+shared = not `isPerConnectionBundleStorage()`), plus a plain-language
+`rule_scope_warning` when the store is shared and the server has more than one
+connection. The save is never refused.
+
 ### Opening balances (algbilanss)
 
 e-arveldaja's REST API exposes "Algbilansi kanded" as `operation_type=INITIAL`.

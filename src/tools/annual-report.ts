@@ -16,7 +16,8 @@ import { isMutationIndeterminate } from "../mutation-outcome.js";
 import { companyLedgerLockScope, withBookingKeyLock } from "../booking-guard.js";
 import {
   ANNUAL_REPORT_ACCOUNT_RULE_VALUES, getCashFlowCategoryRule, getCurrentYearProfitAccountRule, getLiabilityClassificationRule,
-  saveAnnualReportAccountRule, type AnnualReportAccountRuleType, type SaveAnnualReportAccountRuleResult,
+  saveAnnualReportAccountRule, describeAccountingRuleScope,
+  type AccountingRuleScope, type AnnualReportAccountRuleType, type SaveAnnualReportAccountRuleResult,
 } from "../accounting-rules.js";
 import {
   resolveCalculatedResultAccount,
@@ -1827,7 +1828,7 @@ function refuseClosePlan(errorCode: string, message: string) {
 }
 
 /** Payload of save_annual_report_account_rule. */
-export interface SaveAnnualReportAccountRulePayload extends SaveAnnualReportAccountRuleResult {
+export interface SaveAnnualReportAccountRulePayload extends SaveAnnualReportAccountRuleResult, AccountingRuleScope {
   saved: boolean;
   rule_type: AnnualReportAccountRuleType;
   account_id: number;
@@ -1888,13 +1889,15 @@ export function registerAnnualReportTools(server: McpServer, api: ApiContext, ru
       }
       const saved = result.action !== "unchanged" && result.action !== "not_found";
       const note = result.action === "updated"
-        ? `Changed ${rule_type} for account ${account_id}: ${result.previous_value} → ${result.value}.`
+        ? (result.previous_value === result.value
+          ? `Account ${account_id} already had ${rule_type} ${result.value}; its duplicate rule rows were merged into one.`
+          : `Changed ${rule_type} for account ${account_id}: ${result.previous_value || "(empty)"} → ${result.value}.`)
         : result.action === "inserted" ? `Saved ${rule_type} ${result.value} for account ${account_id}.`
         : result.action === "unchanged" ? `Account ${account_id} already has ${rule_type} ${result.value}; nothing was written.`
         : result.action === "removed" ? `Removed the ${rule_type} rule (${result.previous_value ?? "unreadable value"}) for account ${account_id}.`
         : `Account ${account_id} has no ${rule_type} rule; nothing was written.`;
       const payload: SaveAnnualReportAccountRulePayload = {
-        saved, rule_type, account_id, account_name: account?.name_est ?? null, ...result,
+        saved, rule_type, account_id, account_name: account?.name_est ?? null, ...result, ...describeAccountingRuleScope(),
         note: saved ? `${note} Re-run generate_annual_report_data to see the effect.` : note,
       };
       return { content: [{ type: "text", text: toMcpJson(payload) }] };

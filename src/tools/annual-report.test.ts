@@ -14,7 +14,9 @@ import { parseToolPayload } from "../__fixtures__/mcp-response.js";
 import { createTestRuntimeSafetyContext } from "../__fixtures__/runtime-safety.js";
 import type { CashFlowAccountReview, SaveAnnualReportAccountRulePayload, YearEndClosePreview } from "./annual-report.js";
 import { makePosting, makeJournal } from "../__fixtures__/accounting.js";
-import { getCashFlowCategoryRule, getLiabilityClassificationRule, resetAccountingRulesCache } from "../accounting-rules.js";
+import {
+  getCashFlowCategoryRule, getLiabilityClassificationRule, initAccountingRulesConnection, resetAccountingRulesCache,
+} from "../accounting-rules.js";
 import { MutationIndeterminateError } from "../mutation-outcome.js";
 
 // API-only fixture: the values below become normalized rows returned by the mock server.
@@ -2208,8 +2210,25 @@ describe("annual report / year-end close real-chart MINORs", () => {
     afterEach(() => {
       if (ORIGINAL_RULES_DIR === undefined) delete process.env.EARVELDAJA_RULES_DIR;
       else process.env.EARVELDAJA_RULES_DIR = ORIGINAL_RULES_DIR;
+      if (ORIGINAL_RULES_FILE === undefined) delete process.env.EARVELDAJA_RULES_FILE;
+      else process.env.EARVELDAJA_RULES_FILE = ORIGINAL_RULES_FILE;
+      resetAccountingRulesCache();
       rmSync(tmp, { recursive: true, force: true });
     });
+    const useBundle = (): string => {
+      const rulesDir = join(tmp, "accounting-rules");
+      process.env.EARVELDAJA_RULES_DIR = rulesDir;
+      resetAccountingRulesCache();
+      return rulesDir;
+    };
+    const writeCashFlowConcept = (rulesDir: string, table: string): string => {
+      mkdirSync(join(rulesDir, "annual-report"), { recursive: true });
+      writeFileSync(join(rulesDir, "log.md"), "# Log\n");
+      const file = join(rulesDir, "annual-report", "cash-flow-category.md");
+      writeFileSync(file, `---\ntype: CashFlowCategory\ntitle: Cash flow statement category overrides\n---\n\n${table}`);
+      resetAccountingRulesCache();
+      return file;
+    };
 
     const extraAccounts = [liabilityAccount(2430, "Muud lühiajalised võlad")];
     const journals = [
@@ -2284,6 +2303,97 @@ describe("annual report / year-end close real-chart MINORs", () => {
       expect(refused.payload.error_code).toBe(code);
       expect(existsSync(rulesDir)).toBe(false);
       expect(existsSync(join(tmp, "accounting-rules.md"))).toBe(false);
+    });
+
+    it("keeps a row's other columns when changing it, merging duplicates from the last valid row", async () => {
+      const file = writeCashFlowConcept(useBundle(),
+        "| account_id | category | note |\n| --- | --- | --- |\n| 2100 | financing | pangalaen |\n| 2430 | financing | omaniku laen |\n| 2430 | bogus | |\n");
+      const changed = await saveRule({ rule_type: "cash_flow_category", account_id: 2430, value: "operating" });
+      expect(changed.payload).toMatchObject({ saved: true, action: "updated", previous_value: "financing", value: "operating" });
+      const text = readFileSync(file, "utf8");
+      expect(text).toContain("| 2100 | financing | pangalaen |\n| 2430 | operating | omaniku laen |\n");
+      expect(text.match(/\| 2430 \|/g)).toHaveLength(1);
+      expect(getCashFlowCategoryRule(2430)).toBe("operating");
+    });
+
+    it("treats a case-only difference as unchanged and reports an invalid replaced value raw", async () => {
+      const file = writeCashFlowConcept(useBundle(), "| account_id | category |\n| --- | --- |\n| 2430 | Financing |\n| 2440 | loan |\n");
+      const bytes = readFileSync(file, "utf8");
+      const same = await saveRule({ rule_type: "cash_flow_category", account_id: 2430, value: "financing" });
+      expect(same.payload).toMatchObject({ saved: false, action: "unchanged", previous_value: "financing" });
+      expect(readFileSync(file, "utf8")).toBe(bytes);
+
+      const fixedRaw = await setupTool("save_annual_report_account_rule", { journals, extraAccounts: [...extraAccounts, liabilityAccount(2440, "Muud võlad")] })(
+        { rule_type: "cash_flow_category", account_id: 2440, value: "financing" });
+      const fixed = parseToolPayload<SaveAnnualReportAccountRulePayload>(fixedRaw.content[0]!.text);
+      expect(fixed).toMatchObject({ saved: true, action: "updated", previous_value: "loan", value: "financing" });
+      expect(fixed.note).toContain("loan → financing");
+      expect(getCashFlowCategoryRule(2440)).toBe("financing");
+    });
+
+    it("does not migrate a legacy file or scaffold a bundle for a removal that finds nothing", async () => {
+      const legacy = join(tmp, "accounting-rules.md");
+      const legacyText = "# Accounting Rules\n\n## Cash Flow Category\n| account_id | category |\n| --- | --- |\n| 2100 | financing |\n";
+      writeFileSync(legacy, legacyText);
+      const rulesDir = useBundle();
+      const nothingThere = await saveRule({ rule_type: "cash_flow_category", account_id: 2430, remove: true });
+      expect(nothingThere.payload).toMatchObject({ saved: false, action: "not_found" });
+      expect(existsSync(rulesDir)).toBe(false);
+      expect(readFileSync(legacy, "utf8")).toBe(legacyText);
+
+      rmSync(legacy);
+      const empty = await saveRule({ rule_type: "liability_classification", account_id: 2430, remove: true });
+      expect(empty.payload).toMatchObject({ saved: false, action: "not_found" });
+      expect(existsSync(rulesDir)).toBe(false);
+      expect(existsSync(`${rulesDir}.lock`)).toBe(false);
+    });
+
+    it("migrates a legacy file when the removal targets one of its rows", async () => {
+      const legacy = join(tmp, "accounting-rules.md");
+      writeFileSync(legacy, "# Accounting Rules\n\n## Cash Flow Category\n| account_id | category |\n| --- | --- |\n| 2100 | financing |\n| 2430 | operating |\n");
+      const rulesDir = useBundle();
+      const removed = await saveRule({ rule_type: "cash_flow_category", account_id: 2430, remove: true });
+      expect(removed.payload).toMatchObject({ saved: true, action: "removed", previous_value: "operating" });
+      expect(getCashFlowCategoryRule(2430)).toBeUndefined();
+      expect(getCashFlowCategoryRule(2100)).toBe("financing");
+      expect(existsSync(join(rulesDir, "annual-report", "cash-flow-category.md"))).toBe(true);
+    });
+
+    it.each([
+      { name: "per-company default store", storage: "default", connectionCount: 2, scope: "this_company", warned: false },
+      { name: "shared RULES_DIR, several companies", storage: "dir", connectionCount: 2, scope: "shared", warned: true },
+      { name: "shared RULES_FILE, several companies", storage: "file", connectionCount: 3, scope: "shared", warned: true },
+      { name: "shared RULES_DIR, one company", storage: "dir", connectionCount: 1, scope: "shared", warned: false },
+    ])("reports the rule scope: $name", async ({ storage, connectionCount, scope, warned }) => {
+      const originalConfigDir = process.env.EARVELDAJA_CONFIG_DIR;
+      process.env.EARVELDAJA_CONFIG_DIR = join(tmp, "global");
+      if (storage === "dir") process.env.EARVELDAJA_RULES_DIR = join(tmp, "accounting-rules");
+      if (storage === "file") process.env.EARVELDAJA_RULES_FILE = join(tmp, "accounting-rules.md");
+      initAccountingRulesConnection(() => ({ name: "Firma A", stableIdentity: "firma-a", connectionCount }));
+      try {
+        const saved = await saveRule({ rule_type: "cash_flow_category", account_id: 2430, value: "financing" });
+        expect(saved.payload).toMatchObject({ saved: true, rule_scope: scope });
+        if (warned) expect(saved.payload.rule_scope_warning).toContain("every company");
+        else expect(saved.payload.rule_scope_warning).toBeUndefined();
+        if (storage === "default") expect(saved.payload.path.startsWith(join(tmp, "global", "accounting-rules"))).toBe(true);
+        expect(getCashFlowCategoryRule(2430)).toBe("financing");
+      } finally {
+        initAccountingRulesConnection(() => ({ name: "default", stableIdentity: "default" }));
+        if (originalConfigDir === undefined) delete process.env.EARVELDAJA_CONFIG_DIR;
+        else process.env.EARVELDAJA_CONFIG_DIR = originalConfigDir;
+      }
+    });
+
+    it("keeps CRLF line endings in single-file mode", async () => {
+      const rulesPath = join(tmp, "accounting-rules.md");
+      writeFileSync(rulesPath, "# Accounting Rules\r\n\r\nNotes.\r\n\r\n## Cash Flow Category\r\n| account_id | category |\r\n| --- | --- |\r\n| 2100 | financing |\r\n");
+      process.env.EARVELDAJA_RULES_FILE = rulesPath;
+      resetAccountingRulesCache();
+      const saved = await saveRule({ rule_type: "cash_flow_category", account_id: 2430, value: "financing" });
+      expect(saved.payload).toMatchObject({ saved: true, action: "inserted" });
+      const text = readFileSync(rulesPath, "utf8");
+      expect(text).toBe("# Accounting Rules\r\n\r\nNotes.\r\n\r\n## Cash Flow Category\r\n| account_id | category |\r\n| --- | --- |\r\n| 2100 | financing |\r\n| 2430 | financing |\r\n");
+      expect(getCashFlowCategoryRule(2430)).toBe("financing");
     });
 
     it("round-trips a liability classification into the balance sheet and keeps hand-written prose", async () => {

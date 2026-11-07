@@ -41,7 +41,19 @@ import {
   hasAnyAutoBookingRuleActionField,
   normalizeAutoBookingRuleMatch,
   saveAutoBookingRule,
+  describeAccountingRuleScope,
+  type AccountingRuleScope,
 } from "../accounting-rules.js";
+
+/** Payload of save_auto_booking_rule. */
+export interface SaveAutoBookingRulePayload extends AccountingRuleScope {
+  saved: true;
+  path: string;
+  action: "inserted" | "updated";
+  match: string;
+  category?: string;
+  note: string;
+}
 import { projectWorkflowResponse, remapHiddenGranularTool, remapHiddenGranularWorkflowEnvelope, workflowFromAccountingInboxPayload, type WorkflowEnvelope } from "../workflow-response.js";
 import { createPublicWorkflowStateDetail, WorkflowStateStoreError, type PublicWorkflowStateDetail } from "../workflow-state-store.js";
 import { runAccountingInboxDryRunPipeline } from "./accounting-inbox-autopilot-service.js";
@@ -3501,17 +3513,19 @@ export function registerAccountingInboxTools(
         reason: cleanReason,
       });
 
+      const payload: SaveAutoBookingRulePayload = {
+        saved: true,
+        path: result.path,
+        action: result.action,
+        match: result.match,
+        category: result.category,
+        ...describeAccountingRuleScope(),
+        note: "The accounting knowledge store was updated (see 'path'). Review the diff if you want to fine-tune the wording or IDs.",
+      };
       return {
         content: [{
           type: "text",
-          text: toMcpJson({
-            saved: true,
-            path: result.path,
-            action: result.action,
-            match: result.match,
-            category: result.category,
-            note: "The accounting knowledge store was updated (see 'path'). Review the diff if you want to fine-tune the wording or IDs.",
-          }),
+          text: toMcpJson(payload),
         }],
       };
     },
