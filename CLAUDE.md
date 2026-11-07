@@ -1,7 +1,7 @@
 # e-arveldaja MCP Server
 
 TypeScript MCP server for the Estonian e-arveldaja (RIK e-Financials) REST API.
-128 tools by default on the `standard` profile; opt-in `guided` / `guided-sales` expose 19 / 20 tools, and `full` exposes all 148. The prompt registry holds 16 workflow prompts (guided profiles register fewer — a prompt whose required tools are all absent is not registered) and there are 15 resources across 12 modules. Supports multiple companies/accounts.
+129 tools by default on the `standard` profile; opt-in `guided` / `guided-sales` expose 19 / 20 tools, and `full` exposes all 149. The prompt registry holds 16 workflow prompts (guided profiles register fewer — a prompt whose required tools are all absent is not registered) and there are 15 resources across 12 modules. Supports multiple companies/accounts.
 
 ## Quick Start
 
@@ -116,7 +116,12 @@ Liability working capital is 22xx (customer prepayments), 23xx and 25xx–27xx.
 enters both bridges) or `financing`; `isLiabilityWorkingCapitalAccount` is the
 single decision both bridges use. A rule-less 24xx account with cash movements
 gets a `cash_flow_account_reviews` entry (Estonian when-to-choose guidance and
-the rule row to add).
+the `save_annual_report_account_rule` call to make, file row as fallback). That
+tool (annual-report group, standard/full) writes `cash_flow_category` and
+`liability_classification` rows into the same table the readers parse (bundle
+concept file or single-file section), after checking the account against the
+active chart (cash flow: Varad/Kohustused/Omakapital; liability: Kohustused).
+Re-saving the same value is `unchanged`; a different value reports old → new.
 Exact invoice plus direct operating-account distributions are supported when
 their signed amounts and account/dimension slices cover the registered cash
 movement completely. Realized FX within an operating payment follows that
@@ -160,7 +165,7 @@ Opening balances are maintained in e-arveldaja. Statement-closing snapshots
 surface is a fixed per-session token cost. Eight env flags control optional
 parts of the surface (see `getToolExposureConfig()` in `src/config.ts`):
 
-`EARVELDAJA_PROFILE` provides one-choice surfaces: `guided` (19 merged daily-bookkeeping tools), `guided-sales` (those 19 plus the `manage_sale_invoice` sales façade — read plus the full prepare/execute mutation lifecycle: create/update/delete/confirm/invalidate/send/recurring and inline resolve-or-create customer, 20 total), `standard` (the absent-variable compatibility default, 128), or `full` (all 148, including granular/setup tools and the workflow-state paging tool `get_workflow_page`). Guided profiles are opt-in for this release. Any explicitly present legacy exposure flag forces the normalized profile to `custom` and preserves the flag combination below. Profile and catalog fingerprint are part of plan/file-reference scope: restart and obtain a fresh preview after changing them.
+`EARVELDAJA_PROFILE` provides one-choice surfaces: `guided` (19 merged daily-bookkeeping tools), `guided-sales` (those 19 plus the `manage_sale_invoice` sales façade — read plus the full prepare/execute mutation lifecycle: create/update/delete/confirm/invalidate/send/recurring and inline resolve-or-create customer, 20 total), `standard` (the absent-variable compatibility default, 129), or `full` (all 149, including granular/setup tools and the workflow-state paging tool `get_workflow_page`). Guided profiles are opt-in for this release. Any explicitly present legacy exposure flag forces the normalized profile to `custom` and preserves the flag combination below. Profile and catalog fingerprint are part of plan/file-reference scope: restart and obtain a fresh preview after changing them.
 
 The guided surface is sized for routing clarity, not token cost (per-tool measurement shows no cost cliff at 20). The **≤ 20** figure is a target, not a hard wall: 21–24 is a deliberate-exception band (allowed only with a recorded `CHANGELOG` rationale when no existing tool can absorb the capability), and 24 is the hard backstop above which the surface must be redesigned by merging tools rather than adding. Before adding any guided tool, apply the add/don't-add criteria in [`docs/guided-tool-policy.md`](docs/guided-tool-policy.md) — prefer a new `mode` on an existing façade, a `continue_accounting_workflow` continuation, or `standard`/`full` placement (as with `get_server_status`) over growing the daily surface.
 
@@ -228,8 +233,8 @@ without changing the default:
   up and managed in the e-arveldaja UI. Saves ≈1.7k tokens.
 - **`EARVELDAJA_DISABLE_ANNUAL_REPORT=1`** — do not register the annual-report /
   year-end tools (`prepare_year_end_close`, `generate_annual_report_data`,
-  `execute_year_end_close`). Use for the bulk of the year; re-enable at closing
-  time. Saves ≈0.4k tokens.
+  `execute_year_end_close`, `save_annual_report_account_rule`). Use for the bulk of the year; re-enable at closing
+  time. Saves ≈0.8k tokens.
 - **`EARVELDAJA_DISABLE_SALES=1`** — do not register the sales-invoicing side:
   the 11 sale-invoice tools (`list/get/create/update/delete/confirm/invalidate_sale_invoice`,
   `get_sale_invoice_delivery_options`, `send_sale_invoice`,
@@ -244,11 +249,11 @@ without changing the default:
   `DISABLE_SALES` deployment usually sets this too — but the flags are
   independent. Saves ≈1.3k tokens (7 tools).
 
-The standard surface is 128 tools; `DISABLE_LIGHTYEAR` in a custom profile drops it to 122.
+The standard surface is 129 tools; `DISABLE_LIGHTYEAR` in a custom profile drops it to 123.
 `EXPOSE_GRANULAR_TOOLS` adds the 10 granular tools, `EXPOSE_SETUP_TOOLS` the 3
-credential tools; enabling both (with `full`'s `get_workflow_page`) raises it to the full 148. The five opt-out
+credential tools; enabling both (with `full`'s `get_workflow_page`) raises it to the full 149. The five opt-out
 group flags trim the default further — `DISABLE_TAX_TOOLS` (−5),
-`DISABLE_REFERENCE_ADMIN` (−9), `DISABLE_ANNUAL_REPORT` (−3), `DISABLE_SALES`
+`DISABLE_REFERENCE_ADMIN` (−9), `DISABLE_ANNUAL_REPORT` (−4), `DISABLE_SALES`
 (−13), `DISABLE_PRODUCTS` (−7) — so a lean purchase-side-only deployment with
 every disable flag set (incl. Lightyear) lands at 85 tools. (The former
 `prepare_accounting_inbox` / `run_accounting_inbox_dry_runs` tools were
@@ -771,7 +776,7 @@ context.
 - MCP resources in `src/resources/accounting-knowledge-resources.ts`
   (`earveldaja://accounting_knowledge` and `…/{path}`) expose the OKF
   accounting-rules bundle. This is operator-curated configuration entering
-  only through the approval-gated `save_auto_booking_rule` path, so it is
+  only through the approval-gated `save_auto_booking_rule` / `save_annual_report_account_rule` paths, so it is
   treated as trusted and emitted unwrapped, same as static reference data.
   Concept reads are path-traversal-guarded (resolved/realpath must stay
   inside the bundle, `.md` only).
@@ -858,5 +863,5 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 const transport = new StdioClientTransport({ command: "node", args: ["dist/index.js"] });
 const client = new Client({ name: "test", version: "1.0.0" });
 await client.connect(transport);
-const { tools } = await client.listTools(); // 128 tools (standard profile)
+const { tools } = await client.listTools(); // 129 tools (standard profile)
 ```

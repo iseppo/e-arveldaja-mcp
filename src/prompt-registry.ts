@@ -189,7 +189,7 @@ const MONTH_END_VARIANTS: readonly PromptVariant[] = [
   LIMITED_VAT_VARIANT,
   { name: "sales", advertisedTools: ["confirm_sale_invoice"] },
   { name: "guided-sales", advertisedTools: ["manage_sale_invoice"], unlessTools: ["confirm_sale_invoice"] },
-  { name: "year-end", advertisedTools: ["prepare_year_end_close"] },
+  { name: "year-end", advertisedTools: ["prepare_year_end_close", "save_annual_report_account_rule"] },
 ];
 const CREDENTIAL_TOOL_VARIANTS: readonly PromptVariant[] = [
   { name: "credential-tools", advertisedTools: ["import_apikey_credentials", "list_stored_credentials", "remove_stored_credentials"] },

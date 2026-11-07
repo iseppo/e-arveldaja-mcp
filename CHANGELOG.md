@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- **When the annual report asks whether a debt account is everyday business debt or a loan, your answer can now be saved straight from the conversation.** Before, the choice had to be typed by hand into the company's accounting-rules file. Now the assistant saves it for you after you choose, tells you if it replaced an earlier choice, and the next annual-report run uses it. The same works for marking a liability as short- or long-term. Details: new `save_annual_report_account_rule` tool (annual-report group, removed by `EARVELDAJA_DISABLE_ANNUAL_REPORT`; `standard` 128 → 129 tools, `full` 148 → 149, guided unchanged). `rule_type` `cash_flow_category` (`operating` | `investing` | `financing`, any Varad/Kohustused/Omakapital account) or `liability_classification` (`current` | `non_current`, Kohustused only), `account_id` = account number checked against the active company's chart, `remove: true` deletes the rule. It edits the same `account_id | category/classification` table the readers parse — `annual-report/cash-flow-category.md` / `liability-classification.md` in the bundle (under the bundle lock, logged in `log.md`), or the `## Cash Flow Category` / `## Liability Classification` section in single-file mode — keeping any notes around the table. Results: `inserted`, `updated` (with `previous_value`), `unchanged` (nothing written), `removed`, `not_found`; refusals (`account_not_found`, `account_type_mismatch`, `invalid_rule_value`, `value_with_remove`) write nothing. The `cash_flow_account_reviews` action and the month-end year-end guidance now name this tool first, with the file row as the manual alternative.
+
 ## [0.41.0] - 2026-11-07
 
 ### Fixed

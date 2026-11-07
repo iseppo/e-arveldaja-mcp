@@ -1,10 +1,10 @@
 {
   "profile": "full",
   "measurement": {
-    "toolCount": 148,
-    "toolsListBytes": 190545,
-    "descriptionsBytes": 30343,
-    "inputSchemasBytes": 124472,
+    "toolCount": 149,
+    "toolsListBytes": 192050,
+    "descriptionsBytes": 30805,
+    "inputSchemasBytes": 125253,
     "largestTool": {
       "name": "import_wise_transactions",
       "bytes": 5734
@@ -4860,6 +4860,60 @@
       },
       "name": "limited_vat",
       "title": "Limited VAT Taxpayer"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "description": "Save, change or remove one company annual-report account rule after the owner has chosen: rule_type 'cash_flow_category' (operating | investing | financing; any balance-sheet account, e.g. a 24xx account from cash_flow_account_reviews) or 'liability_classification' (current | non_current; Kohustused accounts only). account_id is the account number. remove=true deletes the rule. Writes the accounting-rules store; re-run generate_annual_report_data afterwards.",
+      "execution": {
+        "taskSupport": "forbidden"
+      },
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "properties": {
+          "account_id": {
+            "description": "Account number in the active company's chart (e.g. 2430)",
+            "exclusiveMinimum": 0,
+            "maximum": 9007199254740991,
+            "type": "integer"
+          },
+          "remove": {
+            "description": "true deletes the account's rule instead of saving one",
+            "type": "boolean"
+          },
+          "rule_type": {
+            "description": "Which annual-report rule table to edit",
+            "enum": [
+              "cash_flow_category",
+              "liability_classification"
+            ],
+            "type": "string"
+          },
+          "value": {
+            "description": "cash_flow_category: operating | investing | financing; liability_classification: current | non_current. Omit with remove=true",
+            "enum": [
+              "operating",
+              "investing",
+              "financing",
+              "current",
+              "non_current"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "rule_type",
+          "account_id"
+        ],
+        "type": "object"
+      },
+      "name": "save_annual_report_account_rule",
+      "title": "Save Annual-Report Account Rule"
     },
     {
       "annotations": {

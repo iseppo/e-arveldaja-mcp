@@ -8,13 +8,16 @@ import { logAudit } from "../audit-log.js";
 import type { Account, Client, Journal, Posting, PurchaseInvoice, SaleInvoice, Transaction } from "../types/api.js";
 import { computeAllBalances, verifiedPostingEurAmount, type AccountBalance } from "./financial-statements.js";
 import { roundMoney, effectiveGross } from "../money.js";
-import { readOnly, batch } from "../annotations.js";
+import { readOnly, batch, mutate } from "../annotations.js";
 import { isProjectTransaction } from "../transaction-status.js";
 import { validateAccounts, validatePostingDimensions } from "../account-validation.js";
 import { toolError } from "../tool-error.js";
 import { isMutationIndeterminate } from "../mutation-outcome.js";
 import { companyLedgerLockScope, withBookingKeyLock } from "../booking-guard.js";
-import { getCashFlowCategoryRule, getCurrentYearProfitAccountRule, getLiabilityClassificationRule } from "../accounting-rules.js";
+import {
+  ANNUAL_REPORT_ACCOUNT_RULE_VALUES, getCashFlowCategoryRule, getCurrentYearProfitAccountRule, getLiabilityClassificationRule,
+  saveAnnualReportAccountRule, type AnnualReportAccountRuleType, type SaveAnnualReportAccountRuleResult,
+} from "../accounting-rules.js";
 import {
   resolveCalculatedResultAccount,
   resolveCurrentYearProfitAccount,
@@ -1122,10 +1125,11 @@ const CASH_FLOW_24XX_EXPLANATION =
   "Segu ühel kontol: eralda laen ja ärivõlg eri kontodele/dimensioonidele; kui ei saa, vali suurem osa ja kirjelda lisas.";
 
 function cashFlowAccountAction(accountId: number): string {
-  return `Lisa raamatupidamisreeglitesse rahavoo kategooria reegel kontole ${accountId}: rida "| ${accountId} | operating |" ` +
-    `(põhitegevus) või "| ${accountId} | financing |" (finantseerimine) tabelisse "account_id | category" — bundle'is fail ` +
-    `annual-report/cash-flow-category.md, ühefailirežiimis accounting-rules.md jaotis "## Cash Flow Category". ` +
-    `Seejärel käivita generate_annual_report_data uuesti.`;
+  return `Küsi omanikult valik ja salvesta see tööriistaga save_annual_report_account_rule ` +
+    `{ rule_type: "cash_flow_category", account_id: ${accountId}, value: "operating" } (põhitegevus) või ` +
+    `value: "financing" (finantseerimine). Seejärel käivita generate_annual_report_data uuesti. ` +
+    `Alternatiiv käsitsi: rida "| ${accountId} | operating |" või "| ${accountId} | financing |" tabelisse "account_id | category" — ` +
+    `bundle'is fail annual-report/cash-flow-category.md, ühefailirežiimis accounting-rules.md jaotis "## Cash Flow Category".`;
 }
 
 function buildCashFlowAccountReviews(
@@ -1822,7 +1826,81 @@ function refuseClosePlan(errorCode: string, message: string) {
   return toolError({ error: message, error_code: errorCode, note: "Nothing was written." });
 }
 
+/** Payload of save_annual_report_account_rule. */
+export interface SaveAnnualReportAccountRulePayload extends SaveAnnualReportAccountRuleResult {
+  saved: boolean;
+  rule_type: AnnualReportAccountRuleType;
+  account_id: number;
+  account_name: string | null;
+  note: string;
+}
+
+const ANNUAL_REPORT_RULE_ACCOUNT_TYPES: Readonly<Record<AnnualReportAccountRuleType, readonly string[]>> = {
+  cash_flow_category: ["Varad", "Kohustused", "Omakapital"],
+  liability_classification: ["Kohustused"],
+};
+
+function refuseAccountRule(errorCode: string, message: string, details?: Record<string, unknown>) {
+  return toolError({ error: message, error_code: errorCode, ...details, note: "Nothing was written." });
+}
+
 export function registerAnnualReportTools(server: McpServer, api: ApiContext, runtimeSafetyContext: RuntimeSafetyContext): void {
+  registerTool(server, "save_annual_report_account_rule",
+    "Save, change or remove one company annual-report account rule after the owner has chosen: rule_type 'cash_flow_category' " +
+    "(operating | investing | financing; any balance-sheet account, e.g. a 24xx account from cash_flow_account_reviews) or " +
+    "'liability_classification' (current | non_current; Kohustused accounts only). account_id is the account number. " +
+    "remove=true deletes the rule. Writes the accounting-rules store; re-run generate_annual_report_data afterwards.",
+    {
+      rule_type: z.enum(["cash_flow_category", "liability_classification"]).describe("Which annual-report rule table to edit"),
+      account_id: z.number().int().positive().describe("Account number in the active company's chart (e.g. 2430)"),
+      value: z.enum(["operating", "investing", "financing", "current", "non_current"]).optional()
+        .describe("cash_flow_category: operating | investing | financing; liability_classification: current | non_current. Omit with remove=true"),
+      remove: z.boolean().optional().describe("true deletes the account's rule instead of saving one"),
+    },
+    { ...mutate, title: "Save Annual-Report Account Rule" },
+    async ({ rule_type, account_id, value, remove }) => {
+      const removing = remove === true;
+      const allowed = ANNUAL_REPORT_ACCOUNT_RULE_VALUES[rule_type];
+      if (removing && value !== undefined) {
+        return refuseAccountRule("value_with_remove", "Pass either value or remove=true, not both.");
+      }
+      if (!removing && (value === undefined || !allowed.includes(value))) {
+        return refuseAccountRule("invalid_rule_value", `${rule_type} value must be one of: ${allowed.join(", ")}.`, { value: value ?? null });
+      }
+      const accounts = await api.readonly.getAccounts();
+      const account = accounts.find((candidate) => candidate.id === account_id);
+      if (!removing) {
+        if (!account) {
+          return refuseAccountRule("account_not_found", `Account ${account_id} is not in the active company's chart of accounts.`);
+        }
+        const types = ANNUAL_REPORT_RULE_ACCOUNT_TYPES[rule_type];
+        if (!types.includes(account.account_type_est)) {
+          return refuseAccountRule("account_type_mismatch",
+            `${rule_type} applies only to ${types.join("/")} accounts; account ${account_id} is ${account.account_type_est}.`,
+            { account_type: account.account_type_est });
+        }
+      }
+      let result: SaveAnnualReportAccountRuleResult;
+      try {
+        result = saveAnnualReportAccountRule({ rule_type, account_id, value, remove: removing });
+      } catch (error) {
+        return toolError(error);
+      }
+      const saved = result.action !== "unchanged" && result.action !== "not_found";
+      const note = result.action === "updated"
+        ? `Changed ${rule_type} for account ${account_id}: ${result.previous_value} → ${result.value}.`
+        : result.action === "inserted" ? `Saved ${rule_type} ${result.value} for account ${account_id}.`
+        : result.action === "unchanged" ? `Account ${account_id} already has ${rule_type} ${result.value}; nothing was written.`
+        : result.action === "removed" ? `Removed the ${rule_type} rule (${result.previous_value ?? "unreadable value"}) for account ${account_id}.`
+        : `Account ${account_id} has no ${rule_type} rule; nothing was written.`;
+      const payload: SaveAnnualReportAccountRulePayload = {
+        saved, rule_type, account_id, account_name: account?.name_est ?? null, ...result,
+        note: saved ? `${note} Re-run generate_annual_report_data to see the effect.` : note,
+      };
+      return { content: [{ type: "text", text: toMcpJson(payload) }] };
+    },
+  );
+
   registerTool(server, "prepare_year_end_close",
     "Dry-run calendar-year close per RIK's e-arveldaja method: unresolved items, balance check, existing-close detection, and " +
     "the two drafts — Dec 31 result entry (profit D 9000 / K 2970) and Jan 1 transfer (D 2970 / K 2960). Revenue/expense accounts are not zeroed. Returns a single-use plan_handle for execution after owner approval; changed options or proposals require a new preview.",
