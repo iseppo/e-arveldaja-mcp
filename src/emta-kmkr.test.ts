@@ -13,13 +13,13 @@ import { EMTA_FORM_HTML, EMTA_HEADER_ROW, FULL_ROW, LIMITED_ROW, emtaAnswerHtml,
 describe("EMTA KMKR answer parsing", () => {
   it("reads a limited taxpayer row (the span after the registry code)", () => {
     expect(parseEmtaKmkrTable(emtaAnswerHtml([LIMITED_ROW]))).toEqual([
-      { limited: true, registered_on: "2026-11-04", deleted_on: null, decision_on: "2026-11-04", vat_number: "EE103050067" },
+      { code: "14417608", limited: true, registered_on: "2026-11-04", deleted_on: null, decision_on: "2026-11-04", vat_number: "EE103050067" },
     ]);
   });
 
   it("reads a full VAT payer row (no span)", () => {
     expect(parseEmtaKmkrTable(emtaAnswerHtml([FULL_ROW]))).toEqual([
-      { limited: false, registered_on: "2024-12-16", deleted_on: null, decision_on: "2024-12-14", vat_number: "EE102809963" },
+      { code: "17133416", limited: false, registered_on: "2024-12-16", deleted_on: null, decision_on: "2024-12-14", vat_number: "EE102809963" },
     ]);
   });
 
@@ -42,7 +42,7 @@ describe("EMTA KMKR answer parsing", () => {
   it("walks the table structurally: tbody, attributes, comments and markup inside cells are fine", () => {
     const html = `<table class='data grid' id=result><!-- result --><tbody>\n${EMTA_HEADER_ROW}\n${emtaRow({ ...LIMITED_ROW, name: "<b>Näidis</b> OÜ" })}</tbody></table>`;
     expect(parseEmtaKmkrTable(html)).toEqual([
-      { limited: true, registered_on: "2026-11-04", deleted_on: null, decision_on: "2026-11-04", vat_number: "EE103050067" },
+      { code: "14417608", limited: true, registered_on: "2026-11-04", deleted_on: null, decision_on: "2026-11-04", vat_number: "EE103050067" },
     ]);
     const singleQuotedSpan = emtaAnswerHtml([LIMITED_ROW]).replace('class="boldblock"', "class='boldblock'");
     expect(parseEmtaKmkrTable(singleQuotedSpan)).toMatchObject([{ limited: true }]);
@@ -94,7 +94,7 @@ describe("lookupEmtaKmkr", () => {
   it("sends only the VAT number, with the form's CSRF token and session cookie, to the fixed EMTA URLs", async () => {
     const fake = fakeEmtaFetch(emtaAnswerHtml([LIMITED_ROW]));
     const outcome = await lookupEmtaKmkr(" ee103050067 ", { fetch: fake.impl });
-    expect(outcome).toEqual({ ok: true, registration: { limited: true, registered_on: "2026-11-04", decision_on: "2026-11-04", vat_number: "EE103050067" } });
+    expect(outcome).toEqual({ ok: true, registration: { limited: true, registered_on: "2026-11-04", decision_on: "2026-11-04", vat_number: "EE103050067" }, registry_code: "14417608" });
     expect(fake.calls.map(call => [call.method, call.url])).toEqual([["GET", EMTA_KMKR_FORM_URL], ["POST", EMTA_KMKR_QUERY_URL]]);
     const query = fake.calls[1]!;
     expect(Object.fromEntries(new URLSearchParams(query.body))).toEqual({ personCode: "EE103050067", p_submit: "Otsi", CSRFToken: "abc123-csrf-token" });

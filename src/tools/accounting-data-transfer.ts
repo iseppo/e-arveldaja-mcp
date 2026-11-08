@@ -24,7 +24,7 @@ import {
 } from "../accounting-rules.js";
 import { writePrivateFile } from "../config.js";
 import { getAllowedRoots, isPathWithinRoot, validateFilePath } from "../file-validation.js";
-import { normalizeCompanyName } from "../company-name.js";
+import { exactCompanyName, mappedCompany, unresolvedCompanyReason } from "../company-identity.js";
 import { normalizeVatValue } from "../document-identifiers.js";
 import { deriveOwnCompanyRegistryCode } from "./receipt-inbox.js";
 import { MAX_JSON_INPUT_SIZE } from "./crud/shared.js";
@@ -87,6 +87,8 @@ function isStateStoreFile(name: string): name is StateStoreFile {
 export interface CompanyDataIdentity {
   name: string | null;
   registry_code: string | null;
+  /** Where the registry code came from: a public register (emta_kmkr / ariregister_name) or the company's own client record. */
+  registry_code_source?: "emta_kmkr" | "ariregister_name" | "client_record" | null;
   vat_number: string | null;
   tax_refnumber: string | null;
 }
@@ -99,6 +101,7 @@ const exportFileSchema = z.object({
   company: z.object({
     name: z.string().max(500).nullable(),
     registry_code: z.string().max(64).nullable(),
+    registry_code_source: z.enum(["emta_kmkr", "ariregister_name", "client_record"]).nullable().optional(),
     vat_number: z.string().max(64).nullable(),
     tax_refnumber: z.string().max(64).nullable(),
   }).strict(),
@@ -153,8 +156,8 @@ export function compareCompanyIdentity(
   if (regLeft && regLeft === normalizeCode(active.company.registry_code)) return { match: true, basis: "registry_code" };
   const taxLeft = normalizeCode(exported.company.tax_refnumber);
   if (taxLeft && taxLeft === normalizeCode(active.company.tax_refnumber)) return { match: true, basis: "tax_refnumber" };
-  const nameLeft = exported.company.name ? normalizeCompanyName(exported.company.name) : "";
-  const nameRight = active.company.name ? normalizeCompanyName(active.company.name) : "";
+  const nameLeft = exported.company.name ? exactCompanyName(exported.company.name) : "";
+  const nameRight = active.company.name ? exactCompanyName(active.company.name) : "";
   if (nameLeft && nameLeft === nameRight && normalizeServer(exported.server) === normalizeServer(active.server)) {
     return { match: true, basis: "name_and_server" };
   }
@@ -178,15 +181,20 @@ async function readCompanyIdentity(api: ApiContext, required: boolean): Promise<
   } catch (error) {
     if (required) throw error;
   }
+  // The registry code resolved from a public register (EMTA KMKR, else the
+  // business register by exact name) for this connection, when known.
+  const mapped = mappedCompany(api.journals.connectionFingerprint);
+  if (mapped && normalizeServer(mapped.entry.server) === normalizeServer(api.journals.apiBaseUrl)) {
+    return { name, registry_code: mapped.entry.registry_code, registry_code_source: mapped.entry.source, vat_number: vatNumber, tax_refnumber: taxRef };
+  }
   let registryCode: string | null = null;
   try {
-    // Best effort: e-arveldaja has no field for the company's own registry
-    // code; it is derived from the company's own client record (VAT, then name).
+    // Fallback: derived from the company's own client record (VAT, then name).
     registryCode = deriveOwnCompanyRegistryCode(await api.clients.listAll(), vatNumber ?? undefined, name ?? undefined) ?? null;
   } catch {
     registryCode = null;
   }
-  return { name, registry_code: registryCode, vat_number: vatNumber, tax_refnumber: taxRef };
+  return { name, registry_code: registryCode, registry_code_source: registryCode ? "client_record" : null, vat_number: vatNumber, tax_refnumber: taxRef };
 }
 
 // ---------------------------------------------------------------------------
@@ -261,7 +269,7 @@ export interface AccountingDataExportPayload {
   mode: "export";
   status: "exported";
   path: string;
-  company: { name?: string; registry_code: string | null };
+  company: { name?: string; registry_code: string | null; registry_code_source: CompanyDataIdentity["registry_code_source"] };
   rule_scope: "this_company" | "shared";
   rule_files: string[];
   state_stores: Array<{ name: StateStoreFile; records: number; other_connection_records_left_out: number }>;
@@ -272,7 +280,7 @@ function resolveOutputPath(filePath: string): string {
   if (extname(filePath).toLowerCase() !== ".json") {
     throw new TransferRefusal("output_path_invalid", "The export file name must end with .json.");
   }
-  const target = isAbsolute(filePath) ? resolve(filePath) : resolve(process.cwd(), filePath);
+  const target = resolve(filePath);
   let realParent: string;
   try {
     realParent = realpathSync(dirname(target));
@@ -290,6 +298,7 @@ function resolveOutputPath(filePath: string): string {
 
 async function handleExport(api: ApiContext, filePath: string | undefined): Promise<CallToolResult> {
   if (!filePath) return refuse("file_path_required", "mode \"export\" needs file_path: the new .json file to write.");
+  if (!isAbsolute(filePath)) return refuse("file_path_not_absolute", "file_path must be an absolute path (export and import both take absolute paths).");
   const bundle = resolveActiveRulesBundle();
   if (!bundle) return refuse("bundle_storage_required", "Export needs bundle storage; single-file EARVELDAJA_RULES_FILE mode is not supported.");
   let target: string;
@@ -321,7 +330,12 @@ async function handleExport(api: ApiContext, filePath: string | undefined): Prom
   }
   const scope = describeAccountingRuleScope().rule_scope;
   if (scope === "shared") notes.push("The rules folder is shared by every connection of this server, so the exported rules may also apply to other companies.");
-  if (!company.registry_code) notes.push("The company's registry code could not be read (e-arveldaja has no field for it; it is derived from the company's own client record). The import checks the tax reference number, VAT number or company name instead.");
+  if (company.registry_code_source !== "emta_kmkr" && company.registry_code_source !== "ariregister_name") {
+    const reason = unresolvedCompanyReason(api.journals.connectionFingerprint);
+    notes.push(`The company's registry code is not resolved from a public register${reason ? ` (${reason})` : ""}${company.registry_code ? "; the one in the file comes from the company's own client record" : ""}. Rules and records stay in this API key's store; the import checks the registry code, tax reference number, VAT number or company name.`);
+  }
+  const storageNotice = describeAccountingRuleScope().storage_notice;
+  if (storageNotice) notes.push(storageNotice);
   const document: CompanyDataExportFile = {
     format: COMPANY_DATA_FORMAT,
     version: COMPANY_DATA_VERSION,
@@ -353,7 +367,7 @@ async function handleExport(api: ApiContext, filePath: string | undefined): Prom
     mode: "export",
     status: "exported",
     path: target,
-    company: { ...(company.name ? { name: wrapUntrustedOcr(company.name)! } : {}), registry_code: company.registry_code },
+    company: { ...(company.name ? { name: wrapUntrustedOcr(company.name)! } : {}), registry_code: company.registry_code, registry_code_source: company.registry_code_source ?? null },
     rule_scope: scope,
     rule_files: ruleFiles,
     state_stores: stateSummary,
@@ -606,6 +620,7 @@ function heldOf(plan: ImportPlan): AccountingDataImportPreviewPayload["held"] {
 
 async function handleImport(api: ApiContext, ctx: RuntimeSafetyContext, args: ImportArgs): Promise<CallToolResult> {
   if (!args.file_path) return refuse("file_path_required", "mode \"import\" needs file_path: the export .json file.");
+  if (!isAbsolute(args.file_path)) return refuse("file_path_not_absolute", "file_path must be an absolute path (export and import both take absolute paths).");
   const bundle = resolveActiveRulesBundle();
   if (!bundle) return refuse("bundle_storage_required", "Import needs bundle storage; single-file EARVELDAJA_RULES_FILE mode is not supported.");
   let realPath: string;
@@ -780,7 +795,7 @@ export function registerAccountingDataTransferTool(server: McpServer, api: ApiCo
     "Refused for another company (company_mismatch). Existing state is never overwritten unless named in replace_state_stores; a differing rule file is written only when named in apply_rule_files. Nothing is changed in e-arveldaja.",
     {
       mode: z.enum(["export", "import"]).describe("export | import"),
-      file_path: z.string().min(1).max(4096).describe("export: the new .json file to write; import: the export file to read"),
+      file_path: z.string().min(1).max(4096).describe("Absolute path. export: the new .json file to write; import: the export file to read"),
       apply_rule_files: z.array(z.string().max(200)).max(MAX_FILES).optional().describe("import: rule files (paths as listed by the dry run) whose imported version replaces a differing local one"),
       replace_state_stores: z.array(z.enum(STATE_STORE_FILES)).max(STATE_STORE_FILES.length).optional().describe("import: state stores whose existing records for this company are replaced by the imported ones"),
       execute: z.boolean().optional().describe("import: false (default) = dry run; true = execute an approved plan_handle"),

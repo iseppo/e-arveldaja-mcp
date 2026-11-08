@@ -156,8 +156,10 @@ describe("PublicToolRegistrar", () => {
       expect(fetchMock).not.toHaveBeenCalled();
       const response = await client.callTool({ name: "get_session_log", arguments: {} });
       expect(response.isError).not.toBe(true);
-      expect(fetchMock).toHaveBeenCalledTimes(1);
-      expect(String(fetchMock.mock.calls[0]![0])).toContain("/invoice_info");
+      // The audit-label lookup, then (key works) the one-time company identity
+      // lookup for the local rules store (/vat_info; this mock's reused body
+      // makes it fail, which leaves the per-key store).
+      expect(fetchMock.mock.calls.map(([url]) => new URL(String(url)).pathname)).toEqual(["/v1/invoice_info", "/v1/vat_info"]);
     } finally {
       await Promise.allSettled([client.close(), bootstrap.server.close()]);
       vi.unstubAllGlobals();
@@ -176,6 +178,8 @@ describe("PublicToolRegistrar", () => {
     try {
       const response = await metadataClient.callTool({ name: "get_session_log", arguments: {} });
       expect(response.isError).not.toBe(true);
+      // No audit-label lookup, and the company identity lookup already ran
+      // for this connection in this process (retried only after an hour).
       expect(shouldNotFetch).not.toHaveBeenCalled();
     } finally {
       await Promise.allSettled([metadataClient.close(), metadataBootstrap.server.close()]);

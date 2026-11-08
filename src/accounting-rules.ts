@@ -1,4 +1,4 @@
-import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync, writeSync } from "fs";
+import { closeSync, constants as fsConstants, copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync, writeSync } from "fs";
 import { createHash, randomUUID } from "crypto";
 import { dirname, isAbsolute, join, relative, resolve } from "path";
 import { z } from "zod";
@@ -95,11 +95,22 @@ export interface SaveAutoBookingRuleInput {
 
 let cachedRules: AccountingRules | undefined;
 let cachedRulesKey: string | undefined;
+/**
+ * The company a connection resolved to from a public register (registry
+ * code): `key` = sha256(server + registry code); `fingerprints` = every
+ * connection fingerprint the mapping file ties to that company (key rotation).
+ */
+export interface AccountingRulesCompany {
+  key: string;
+  fingerprints: readonly string[];
+}
 interface AccountingRulesConnection {
   name: string;
   stableIdentity: string;
   /** How many connections this server has configured (legacy-record gating). */
   connectionCount?: number;
+  /** Present when the connection's company is resolved; absent = today's fingerprint scope. */
+  company?: AccountingRulesCompany;
 }
 let accountingRulesConnectionGetter = (): AccountingRulesConnection => ({ name: "default", stableIdentity: "default" });
 
@@ -148,18 +159,23 @@ function resolveStorage(): RulesStorage {
     const dir = resolveAbsolute(configuredDir);
     return { mode: "bundle", dir, legacyFile: resolve(dirname(dir), LEGACY_FILE_NAME) };
   }
-  let connection: { name: string; stableIdentity: string };
+  let connection: AccountingRulesConnection;
   try {
     connection = accountingRulesConnectionGetter();
   } catch (error) {
     throw new Error("Accounting rules connection identity is unavailable.", { cause: error });
   }
-  return chooseDefaultBundleStorage(
-    getProjectRoot(),
-    getGlobalConfigDir(),
-    connection.name,
-    connection.stableIdentity,
-  );
+  const globalConfigDir = getGlobalConfigDir();
+  const company = connection.company && !failedCompanyMigrations.has(companyMigrationKey(globalConfigDir, connection.company.key))
+    ? connection.company
+    : undefined;
+  const storage = chooseDefaultBundleStorage(getProjectRoot(), globalConfigDir, connection.name, connection.stableIdentity, company);
+  if (company && storage.dir === companyBundleDir(globalConfigDir, company.key)) {
+    if (!ensureCompanyBundleMigrated(globalConfigDir, company)) {
+      return chooseDefaultBundleStorage(getProjectRoot(), globalConfigDir, connection.name, connection.stableIdentity);
+    }
+  }
+  return storage;
 }
 
 export function initAccountingRulesConnection(
@@ -177,9 +193,26 @@ export function initAccountingRulesConnection(
  * per-connection: `EARVELDAJA_RULES_DIR` and the kept-in-place project/global
  * bundle are shared by every connection of the server.
  */
-export function getBundleRecordIdentity(): { stableIdentity: string; connectionCount: number } {
+export function getBundleRecordIdentity(): { stableIdentity: string; connectionCount: number; acceptedIdentities: readonly string[] } {
   const connection = accountingRulesConnectionGetter();
-  return { stableIdentity: connection.stableIdentity, connectionCount: connection.connectionCount ?? 1 };
+  const connectionCount = connection.connectionCount ?? 1;
+  if (!connection.company) {
+    return { stableIdentity: connection.stableIdentity, connectionCount, acceptedIdentities: [connection.stableIdentity] };
+  }
+  // Records follow the company: new writes carry the company stamp; records a
+  // connection of the same company wrote (also before an API key rotation)
+  // are this company's too.
+  const stamp = companyRecordStamp(connection.company.key);
+  return {
+    stableIdentity: stamp,
+    connectionCount,
+    acceptedIdentities: [stamp, connection.stableIdentity, ...connection.company.fingerprints],
+  };
+}
+
+/** The record stamp of a resolved company. */
+export function companyRecordStamp(companyKey: string): string {
+  return `company:${companyKey}`;
 }
 
 export type BundleRecordIdentityVerdict =
@@ -197,6 +230,7 @@ function isPerConnectionBundleStorage(): boolean {
   const storage = resolveStorage();
   if (storage.mode !== "bundle") return false;
   const connection = accountingRulesConnectionGetter();
+  if (connection.company && storage.dir === companyBundleDir(getGlobalConfigDir(), connection.company.key)) return true;
   const scope = buildAccountingRulesConnectionScope(connection.name, connection.stableIdentity);
   return storage.dir === resolve(getGlobalConfigDir(), BUNDLE_DIR_NAME, scope);
 }
@@ -204,6 +238,8 @@ function isPerConnectionBundleStorage(): boolean {
 export interface AccountingRuleScope {
   rule_scope: "this_company" | "shared";
   rule_scope_warning?: string;
+  /** Set when other per-key stores of this company exist that were not merged into its store. */
+  storage_notice?: string;
 }
 
 /**
@@ -214,7 +250,10 @@ export interface AccountingRuleScope {
  * never refused.
  */
 export function describeAccountingRuleScope(): AccountingRuleScope {
-  if (isPerConnectionBundleStorage()) return { rule_scope: "this_company" };
+  if (isPerConnectionBundleStorage()) {
+    const notice = getCompanyStorageNotice();
+    return { rule_scope: "this_company", ...(notice ? { storage_notice: notice } : {}) };
+  }
   if (getBundleRecordIdentity().connectionCount <= 1) return { rule_scope: "shared" };
   return {
     rule_scope: "shared",
@@ -235,7 +274,7 @@ export function describeAccountingRuleScope(): AccountingRuleScope {
 export function checkBundleRecordIdentity(recordIdentity: unknown, label: string): BundleRecordIdentityVerdict {
   const current = getBundleRecordIdentity();
   if (typeof recordIdentity === "string" && recordIdentity !== "") {
-    if (recordIdentity === current.stableIdentity) return { accept: true };
+    if (current.acceptedIdentities.includes(recordIdentity)) return { accept: true };
     return {
       accept: false,
       warning: `Stored ${label} belong to a different connection (company) than the active one and were ignored. ` +
@@ -297,6 +336,7 @@ export function chooseDefaultBundleStorage(
   globalConfigDir: string,
   connectionName = "default",
   stableIdentity = connectionName,
+  company?: AccountingRulesCompany,
 ): { mode: "bundle"; dir: string; legacyFile: string } {
   const scope = buildAccountingRulesConnectionScope(connectionName, stableIdentity);
   const projectDir = resolve(projectRoot, BUNDLE_DIR_NAME);
@@ -309,11 +349,171 @@ export function chooseDefaultBundleStorage(
   if (isRootInitializedBundle(globalDir) || existingLegacyContainsUserData(globalLegacy)) {
     return { mode: "bundle", dir: globalDir, legacyFile: globalLegacy };
   }
+  if (company) {
+    return {
+      mode: "bundle",
+      dir: companyBundleDir(globalConfigDir, company.key),
+      legacyFile: resolve(globalConfigDir, companyScopeName(company.key), LEGACY_FILE_NAME),
+    };
+  }
   return {
     mode: "bundle",
     dir: resolve(globalDir, scope),
     legacyFile: resolve(globalConfigDir, scope, LEGACY_FILE_NAME),
   };
+}
+
+// ---- Company-scoped default store ------------------------------------------
+//
+// A connection whose company is resolved (registry code from a public
+// register) uses `accounting-rules/company-<sha256(server + registry code)>/`.
+// The first time it is used, the per-key store of a connection mapped to the
+// same company is COPIED into it (never moved or deleted; the per-key store
+// stays as a backup). With several per-key stores (API key rotation) the most
+// recently modified one is copied and the others are reported in a notice,
+// never merged. When the company store already exists, another per-key store
+// of the company that was not its migration source is likewise only reported.
+
+const COMPANY_MIGRATION_MARKER = "migration.json";
+const completedCompanyMigrations = new Set<string>();
+const failedCompanyMigrations = new Set<string>();
+const companyStorageNotices = new Map<string, string>();
+
+function companyScopeName(companyKey: string): string {
+  if (!/^[0-9a-f]{64}$/.test(companyKey)) throw new Error("Company key must be a sha256 hex digest.");
+  return `company-${companyKey}`;
+}
+
+export function companyBundleDir(globalConfigDir: string, companyKey: string): string {
+  return resolve(globalConfigDir, BUNDLE_DIR_NAME, companyScopeName(companyKey));
+}
+
+function companyMigrationKey(globalConfigDir: string, companyKey: string): string {
+  return `${globalConfigDir}\0${companyKey}`;
+}
+
+/** Test seam: forget which company stores were checked in this process. */
+export function resetCompanyBundleMigrationState(): void {
+  completedCompanyMigrations.clear();
+  failedCompanyMigrations.clear();
+  companyStorageNotices.clear();
+}
+
+/** The active company's notice about per-key stores that were not merged, if any. */
+export function getCompanyStorageNotice(): string | undefined {
+  let connection: AccountingRulesConnection;
+  try {
+    connection = accountingRulesConnectionGetter();
+  } catch {
+    return undefined;
+  }
+  if (!connection.company) return undefined;
+  return companyStorageNotices.get(companyMigrationKey(getGlobalConfigDir(), connection.company.key));
+}
+
+function newestMtime(path: string): number {
+  let newest = 0;
+  const visit = (current: string): void => {
+    const info = lstatSync(current);
+    newest = Math.max(newest, info.mtimeMs);
+    if (info.isDirectory()) for (const entry of readdirSync(current)) visit(resolve(current, entry));
+  };
+  if (existsSync(path)) visit(path);
+  return newest;
+}
+
+interface ConnectionStoreCandidate {
+  scope: string;
+  dir: string;
+  legacyFile: string;
+  mtime: number;
+}
+
+function connectionStoreCandidates(globalConfigDir: string, company: AccountingRulesCompany): ConnectionStoreCandidate[] {
+  const candidates: ConnectionStoreCandidate[] = [];
+  for (const fingerprint of new Set(company.fingerprints)) {
+    const scope = buildAccountingRulesConnectionScope("", fingerprint);
+    const dir = resolve(globalConfigDir, BUNDLE_DIR_NAME, scope);
+    const legacyFile = resolve(globalConfigDir, scope, LEGACY_FILE_NAME);
+    const hasDir = existsSync(dir) && lstatSync(dir).isDirectory();
+    const hasLegacy = existsSync(legacyFile) && lstatSync(legacyFile).isFile();
+    if (!hasDir && !hasLegacy) continue;
+    candidates.push({ scope, dir, legacyFile, mtime: Math.max(hasDir ? newestMtime(dir) : 0, hasLegacy ? lstatSync(legacyFile).mtimeMs : 0) });
+  }
+  // Most recently modified first; ties broken by scope for a stable choice.
+  return candidates.sort((a, b) => b.mtime - a.mtime || compareCodePoints(a.scope, b.scope));
+}
+
+function readMigrationSource(companyDir: string): string | undefined {
+  try {
+    const parsed = JSON.parse(readFileSync(resolve(companyDir, COMPANY_MIGRATION_MARKER), "utf8")) as { source_scope?: unknown };
+    return typeof parsed.source_scope === "string" ? parsed.source_scope : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function unmergedNotice(scopes: string[], globalConfigDir: string): string {
+  return `This company also has older rule stores from other API keys that were not merged: ${scopes.map(scope => resolve(globalConfigDir, BUNDLE_DIR_NAME, scope)).join(", ")}. ` +
+    "They are kept unchanged. Copy any rule you still need from them by hand, or export from that key and import here.";
+}
+
+/**
+ * Make sure the company store exists or is ready to be created, copying the
+ * newest per-key store of the company into it the first time. Returns false
+ * when the copy failed (the caller then keeps the per-key store for this
+ * process: never a half-empty company store).
+ */
+function ensureCompanyBundleMigrated(globalConfigDir: string, company: AccountingRulesCompany): boolean {
+  const key = companyMigrationKey(globalConfigDir, company.key);
+  if (completedCompanyMigrations.has(key)) return true;
+  if (failedCompanyMigrations.has(key)) return false;
+  const companyDir = companyBundleDir(globalConfigDir, company.key);
+  const companyLegacy = resolve(globalConfigDir, companyScopeName(company.key), LEGACY_FILE_NAME);
+  try {
+    withBundleLock(companyDir, () => {
+      const candidates = connectionStoreCandidates(globalConfigDir, company);
+      if (existsSync(companyDir) || existsSync(companyLegacy)) {
+        const source = readMigrationSource(companyDir);
+        const others = candidates.map(c => c.scope).filter(scope => scope !== source);
+        if (others.length > 0) companyStorageNotices.set(key, unmergedNotice(others, globalConfigDir));
+        return;
+      }
+      const chosen = candidates.at(0);
+      if (!chosen) return;
+      const staging = `${companyDir}.migrating`;
+      rmSync(staging, { recursive: true, force: true });
+      if (existsSync(chosen.dir)) {
+        // Symlinks are not followed or copied: the company store holds only real files.
+        cpSync(chosen.dir, staging, {
+          recursive: true,
+          errorOnExist: true,
+          force: false,
+          preserveTimestamps: true,
+          filter: source => !lstatSync(source).isSymbolicLink(),
+        });
+      } else {
+        mkdirSync(staging, { recursive: true, mode: PRIVATE_DIR_MODE });
+      }
+      writeFileSync(resolve(staging, COMPANY_MIGRATION_MARKER), `${JSON.stringify({
+        source_scope: chosen.scope,
+        migrated_at: isoNow(),
+        not_merged: candidates.slice(1).map(c => c.scope),
+      }, null, 2)}\n`, PRIVATE_FILE_OPTIONS);
+      if (existsSync(chosen.legacyFile)) {
+        mkdirSync(dirname(companyLegacy), { recursive: true, mode: PRIVATE_DIR_MODE });
+        copyFileSync(chosen.legacyFile, companyLegacy, fsConstants.COPYFILE_EXCL);
+      }
+      renameSync(staging, companyDir);
+      if (candidates.length > 1) companyStorageNotices.set(key, unmergedNotice(candidates.slice(1).map(c => c.scope), globalConfigDir));
+    });
+  } catch (error) {
+    failedCompanyMigrations.add(key);
+    process.stderr.write(`[accounting-rules] Could not prepare the company rules store ${companyDir} (${(error as Error).message}); this process keeps the per-key store.\n`);
+    return false;
+  }
+  completedCompanyMigrations.add(key);
+  return true;
 }
 
 // ---- Cross-process write lock --------------------------------------------
@@ -516,9 +716,9 @@ function isInitializedBundle(dir: string): boolean {
   }
 }
 
-const SCOPED_RULES_DIRECTORY_NAME = /^[0-9a-f]{64}$/;
-const SCOPED_RULES_LOCK_FILE_NAME = /^[0-9a-f]{64}\.lock(?:\.reclaim)?$/;
-const SCOPED_RULES_STAGING_DIRECTORY_NAME = /^[0-9a-f]{64}\.(?:migrating|replacing)$/;
+const SCOPED_RULES_DIRECTORY_NAME = /^(?:company-)?[0-9a-f]{64}$/;
+const SCOPED_RULES_LOCK_FILE_NAME = /^(?:company-)?[0-9a-f]{64}\.lock(?:\.reclaim)?$/;
+const SCOPED_RULES_STAGING_DIRECTORY_NAME = /^(?:company-)?[0-9a-f]{64}\.(?:migrating|replacing)$/;
 
 function isRootInitializedBundle(dir: string): boolean {
   try {

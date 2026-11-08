@@ -189,9 +189,11 @@ export class ReferenceDataApi {
   }
 
   // VAT info. `fresh` drops only this key first, as for invoice info.
-  async getVatInfo(options: { fresh?: boolean } = {}): Promise<CompanyVatInfo> {
+  async getVatInfo(options: { fresh?: boolean; excludeFromAuthBrake?: boolean } = {}): Promise<CompanyVatInfo> {
     if (options.fresh === true) readonlyCache.invalidateExact(readonlyCacheKey(this.client, "/vat_info"));
-    return readonlyCachedGet<CompanyVatInfo>(this.client, "/vat_info");
+    return readonlyCachedGet<CompanyVatInfo>(this.client, "/vat_info", {
+      excludeFromAuthBrake: options.excludeFromAuthBrake,
+    });
   }
 
   // Projects (read-only list)

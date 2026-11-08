@@ -27,6 +27,7 @@ import {
 } from "../accounting-rules.js";
 import { limitedVatStore, readLimitedVatRecords, type LimitedVatStoreRecord } from "../company-vat-status.js";
 import { defaultUsdPoolStore, type UsdPoolRecord } from "../lightyear/usd-pool.js";
+import { recordCompanyIdentity, resetCompanyIdentityState } from "../company-identity.js";
 import type { ApiContext } from "./crud-tools.js";
 import type { Client } from "../types/api.js";
 
@@ -116,6 +117,7 @@ afterEach(() => {
   resetAccountingRulesCache();
   limitedVatStore.reset();
   defaultUsdPoolStore.reset();
+  resetCompanyIdentityState();
 });
 
 describe("compareCompanyIdentity", () => {
@@ -327,5 +329,30 @@ describe("accounting_data_transfer export → import", () => {
     expect(result.isError).toBe(true);
     expect(text).toContain("output_exists");
     expect(readFileSync(out, "utf8")).toBe("keep");
+  });
+
+  it("refuses a relative file_path in both modes", async () => {
+    useMachine("a", "fp-a");
+    for (const mode of ["export", "import"]) {
+      const { result, text } = await setup(ACME).call({ mode, file_path: "export.json" });
+      expect(result.isError).toBe(true);
+      expect(text).toContain("file_path_not_absolute");
+    }
+  });
+
+  it("carries the registry code resolved from a public register and its source in the header", async () => {
+    useMachine("a", "fp-a");
+    const fingerprint = "a".repeat(64);
+    recordCompanyIdentity(fingerprint, { server: "https://rmp-api.rik.ee/v1", registry_code: "10234957", source: "ariregister_name", resolved_at: "2026-11-08T00:00:00.000Z" });
+    const api = fakeApi(ACME);
+    (api.journals as unknown as { connectionFingerprint: string }).connectionFingerprint = fingerprint;
+    const handlers = new Map<string, Handler>();
+    const server = { registerTool: vi.fn((name: string, _config: unknown, cb: Handler) => handlers.set(name, cb)) } as unknown as McpServer;
+    registerAccountingDataTransferTool(server, api, createTestRuntimeSafetyContext());
+    const out = join(work, "mapped.json");
+    const result = await handlers.get("accounting_data_transfer")!({ mode: "export", file_path: out });
+    expect(result.isError).toBeFalsy();
+    const doc = JSON.parse(readFileSync(out, "utf8")) as CompanyDataExportFile;
+    expect(doc.company).toMatchObject({ registry_code: "10234957", registry_code_source: "ariregister_name" });
   });
 });

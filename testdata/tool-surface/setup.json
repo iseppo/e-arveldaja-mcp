@@ -2,9 +2,9 @@
   "profile": "setup",
   "measurement": {
     "toolCount": 133,
-    "toolsListBytes": 161881,
+    "toolsListBytes": 161896,
     "descriptionsBytes": 25954,
-    "inputSchemasBytes": 103854,
+    "inputSchemasBytes": 103869,
     "largestTool": {
       "name": "import_wise_transactions",
       "bytes": 5734
@@ -6203,7 +6203,7 @@
             "type": "boolean"
           },
           "file_path": {
-            "description": "export: the new .json file to write; import: the export file to read",
+            "description": "Absolute path. export: the new .json file to write; import: the export file to read",
             "maxLength": 4096,
             "minLength": 1,
             "type": "string"

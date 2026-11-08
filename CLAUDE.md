@@ -84,20 +84,50 @@ shared = not `isPerConnectionBundleStorage()`), plus a plain-language
 `rule_scope_warning` when the store is shared and the server has more than one
 connection. The save is never refused.
 
-The default per-connection dir and the record stamps in connection-scoped stores
-are keyed by the connection fingerprint (baseUrl + API key id + public value),
-so an API key rotation starts an empty store. Re-keying by company was examined
-2026-11-08 and NOT done: no API field yields the company's registry code
-(`/invoice_info` and `/vat_info` have none; `deriveOwnCompanyRegistryCode` is a
-heuristic over the clients list). Candidate key: `/vat_info.tax_refnumber`
-(already the ledger-lock company key in `companyLedgerLockScope`) — owner decision pending.
+**Company-keyed default store** (`src/company-identity.ts`). The API has no
+registry-code field, so the company's registry code comes from public registers:
+(a) with `/vat_info.vat_number`: EMTA's KMKR query (the shared `src/emta-kmkr.ts`
+lookup/cache) — the "Isikukood/registrikood" cell of the one active row, accepted
+only with a valid 8-digit check digit (`isValidEstonianRegistryCode`, weights
+1..7 then 3..9, mod 11), source `emta_kmkr`; (b) no VAT number: the business
+register autocomplete (`GET https://ariregister.rik.ee/est/api/autocomplete?q=<name>`,
+10 s, 256 KiB) by `/invoice_info.invoice_company_name` — accepted automatically
+(official register, owner decision) only when exactly one ACTIVE company (status
+R/L/N; K = deleted excluded; historical names do not count) has a name exactly
+equal after `exactCompanyName` (NFC, whitespace collapsed, trimmed, lowercased),
+source `ariregister_name`; (c) anything else (none, several, only deleted, name
+null, network failure) is unresolved: the per-key store stays, with a reason
+(`unresolvedCompanyReason`) shown in the export notes. Never guessed.
+The mapping fingerprint → `{server, registry_code, source, resolved_at}` is
+persisted in `<globalConfigDir>/company-identity.json` (0600). Resolution runs
+lazily at the tool-invocation wrapper in `create-server.ts`, after the
+audit-label lookup and only once that lookup has succeeded for the connection
+(stale keys never send it), once per connection per process (an unresolved one is
+retried after 1 h); hidden requests are `/vat_info` then EMTA or the business
+register, never again once mapped. Rules reads never touch the network: the
+company is adopted from the mapping file (`adoptedCompany`) at tool-call start.
+A resolved company uses `accounting-rules/company-<sha256(server + "\n" + regcode)>/`
+(legacy file `<globalConfigDir>/company-<key>/accounting-rules.md`). First use
+copies (non-destructively, under the company dir's lock, via a `.migrating`
+staging dir, symlinks skipped) the most recently modified per-key store of any
+fingerprint mapped to the same company and writes `migration.json`
+(`source_scope`, `migrated_at`, `not_merged`); the other per-key stores are never
+merged and are reported as `storage_notice` in the save tools' `rule_scope`
+answer and the export notes. A per-key store that appears after the company
+store exists is reported the same way. A failed migration keeps the per-key
+store for the whole process. Record stamps: new writes carry `company:<key>`;
+reads accept that stamp, the current fingerprint and every fingerprint mapped to
+the same company (so records survive key rotation); every other stamp is still
+refused. `RULES_DIR` / `RULES_FILE` / kept-in-place root bundles are unchanged.
 
 **Company data export / import** (`accounting_data_transfer`,
 `src/tools/accounting-data-transfer.ts`; standard/full, workflow group, no
-opt-out flag): `mode: "export"` writes one new `.json` file (`file_path` under
+opt-out flag): `file_path` must be absolute in both modes
+(`file_path_not_absolute`). `mode: "export"` writes one new `.json` file (`file_path` under
 the allowed roots, `O_EXCL`, 0600; `output_exists` if present) with header
 `{format: "e-arveldaja-mcp-company-data", version: 1, exported_at, server,
-company: {name, registry_code (best effort), vat_number, tax_refnumber},
+company: {name, registry_code, registry_code_source (`emta_kmkr` |
+`ariregister_name` from the mapping, else `client_record` best effort), vat_number, tax_refnumber},
 source_identity, rule_scope}` and `files`: every transferable rule file of the
 active bundle (`isTransferableRuleFile`: index/log, `auto-booking/*.md`,
 `owner-expense/policy.md`, `annual-report/{settings,liability-classification,cash-flow-category}.md`

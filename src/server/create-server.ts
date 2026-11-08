@@ -18,6 +18,7 @@ import {
 import { runWithExtra } from "../progress.js";
 import { HttpClient } from "../http-client.js";
 import { buildConnectionFingerprint } from "../connection-fingerprint.js";
+import { adoptedCompany, ensureCompanyIdentity } from "../company-identity.js";
 import { ClientsApi } from "../api/clients.api.js";
 import { ProductsApi } from "../api/products.api.js";
 import { JournalsApi } from "../api/journals.api.js";
@@ -283,10 +284,15 @@ export async function createMcpServer(
     const snapshot = invocationStorage.getStore();
     if (snapshot) assertSnapshotCurrent(connectionState, snapshot);
     const config = allConfigs[snapshot?.index ?? connectionState.activeIndex];
+    const fingerprint = config ? buildConnectionFingerprint(config.config) : "setup";
+    // The company store is used only once the connection's company is
+    // resolved from a public register (mapping file, no network here).
+    const company = config ? adoptedCompany(fingerprint) : undefined;
     return {
       name: config?.name ?? "setup",
-      stableIdentity: config ? buildConnectionFingerprint(config.config) : "setup",
+      stableIdentity: fingerprint,
       connectionCount: allConfigs.length,
+      ...(company ? { company } : {}),
     };
   });
   const connectionFingerprints = Object.fromEntries(
@@ -446,6 +452,18 @@ export async function createMcpServer(
         return await invocationStorage.run(snapshot, async () => {
           if (resolvesAuditLabel) {
             await auditResolver.ensureAuditLogLabelResolved(snapshot.index);
+            // Which company's local rules and state this call uses: resolved
+            // once per connection from public registers (persisted, so later
+            // starts send nothing), fixed for the call. Skipped while the
+            // company-name lookup is failing (a stale key must not send more
+            // hidden requests); the mapping file is still read.
+            const config = allConfigs[snapshot.index];
+            const context = connectionContexts[snapshot.index];
+            if (config && context) {
+              await ensureCompanyIdentity(buildConnectionFingerprint(config.config), config.config.baseUrl, context, {
+                network: auditResolver.isAuditLogLabelResolved(snapshot.index),
+              });
+            }
           }
           const runInExtra = extra
             ? () => runWithExtra(extra, () => handler(...args))

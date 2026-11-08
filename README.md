@@ -121,7 +121,7 @@ By default these rules are stored as an [Open Knowledge Format](https://github.c
 
 The bundle is also browsable as MCP resources under `earveldaja://accounting_knowledge`. When several MCP clients share one bundle directory, concurrent rule writes are serialized with a lock file so the index never drifts out of sync with the concepts.
 
-To move a company's saved rules and local state (statement balances, receipt digests, CAMT acknowledgements, limited-VAT settings, Lightyear USD pool) to another machine, or before rotating its API key (the default store is tied to the key), use `accounting_data_transfer`: `mode: "export"` writes one JSON file (no credentials); `mode: "import"` on the target shows a dry run, refuses another company's file, never overwrites existing state unless you name it, and writes only after your approval.
+To move a company's saved rules and local state (statement balances, receipt digests, CAMT acknowledgements, limited-VAT settings, Lightyear USD pool) to another machine, use `accounting_data_transfer` (`file_path` must be an absolute path): `mode: "export"` writes one JSON file (no credentials); `mode: "import"` on the target shows a dry run, refuses another company's file, never overwrites existing state unless you name it, and writes only after your approval. The default rules store follows the company, not the API key: the server finds the company's registry code once from public registers (EMTA's VAT-number query, or the business register by the exact company name when there is no VAT number) and keeps rules and records in a per-company folder, so a new API key for the same company keeps them. When the code cannot be found for certain, the store stays tied to the key.
 
 ### 4. Opening balances (algbilanss)
 
