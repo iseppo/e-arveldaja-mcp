@@ -95,30 +95,51 @@ register autocomplete (`GET https://ariregister.rik.ee/est/api/autocomplete?q=<n
 (official register, owner decision) only when exactly one ACTIVE company (status
 R/L/N; K = deleted excluded; historical names do not count) has a name exactly
 equal after `exactCompanyName` (NFC, whitespace collapsed, trimmed, lowercased),
-source `ariregister_name`; (c) anything else (none, several, only deleted, name
-null, network failure) is unresolved: the per-key store stays, with a reason
-(`unresolvedCompanyReason`) shown in the export notes. Never guessed.
-The mapping fingerprint → `{server, registry_code, source, resolved_at}` is
-persisted in `<globalConfigDir>/company-identity.json` (0600). Resolution runs
-lazily at the tool-invocation wrapper in `create-server.ts`, after the
-audit-label lookup and only once that lookup has succeeded for the connection
-(stale keys never send it), once per connection per process (an unresolved one is
-retried after 1 h); hidden requests are `/vat_info` then EMTA or the business
-register, never again once mapped. Rules reads never touch the network: the
+source `ariregister_name`. A name match is also refused when the company's own
+client record carries another registry code (`ariregister_client_record_mismatch`;
+an unreadable clients list is `client_record_unavailable`) or another mapped
+connection on the same server has that code with a VAT number or another name
+(`ariregister_conflicting_mapping`). (c) Anything else (none, several, only
+deleted, name null, network failure) is unresolved: the per-key store stays,
+with a reason (`unresolvedCompanyReason`) shown in the export notes. Never guessed.
+The mapping fingerprint → `{server, registry_code, source, resolved_at,
+vat_number, company_name}` is persisted in `<globalConfigDir>/company-identity.json`
+(0600), written under `withBundleLock(<file>)` after a fresh re-read. A damaged
+file (bad JSON, unknown version, an invalid entry, > 1 MiB) is logged and never
+overwritten: its valid entries are still used, new connections stay unresolved
+(`company_identity_file_unreadable`). A company already adopted in this process
+is never dropped or switched (stores never change mid-process). Resolution runs
+lazily at the tool-invocation wrapper in `create-server.ts`, only once a signed
+request of that key got a 2xx answer in this process (`hasAuthenticatedSuccess`,
+`src/api-health.ts`; startup metadata does not count, so stale keys never send
+it), once per connection per process (an unresolved one is retried after 1 h);
+hidden requests are `/vat_info`, then EMTA, or the business register plus the
+clients list, never again once mapped. Rules reads never touch the network: the
 company is adopted from the mapping file (`adoptedCompany`) at tool-call start.
-A resolved company uses `accounting-rules/company-<sha256(server + "\n" + regcode)>/`
-(legacy file `<globalConfigDir>/company-<key>/accounting-rules.md`). First use
-copies (non-destructively, under the company dir's lock, via a `.migrating`
-staging dir, symlinks skipped) the most recently modified per-key store of any
-fingerprint mapped to the same company and writes `migration.json`
-(`source_scope`, `migrated_at`, `not_merged`); the other per-key stores are never
+A resolved company uses `accounting-rules/<company key>/`, company key =
+sha256("company\0" + server + "\n" + regcode): plain 64-hex like a per-key dir
+(domain-separated), because released versions (≤ 0.41.x) treat any other child
+of `accounting-rules/` as a shared root bundle; its lock/staging siblings
+(`<key>.lock`, `<key>.migrating`) match their scoped-name patterns too (pinned by
+a test that runs the released `chooseDefaultBundleStorage`,
+`src/__fixtures__/released-rules-storage.ts`). Legacy file:
+`<globalConfigDir>/<company key>/accounting-rules.md`. First use copies
+(non-destructively, under the company dir's lock and the source store's lock,
+symlinks skipped) the most recently modified per-key store of any fingerprint
+mapped to the same company into `<key>.migrating`, stages its legacy file inside
+(`legacy-accounting-rules.pending`), writes `migration.json` (`kind: "company"`,
+`company_key`, `source_scope`, `migrated_at`, `not_merged`), renames the staging
+dir into place, then moves the legacy file out (finished on the next use after a
+crash; a leftover staging dir is redone). The other per-key stores are never
 merged and are reported as `storage_notice` in the save tools' `rule_scope`
-answer and the export notes. A per-key store that appears after the company
-store exists is reported the same way. A failed migration keeps the per-key
-store for the whole process. Record stamps: new writes carry `company:<key>`;
-reads accept that stamp, the current fingerprint and every fingerprint mapped to
-the same company (so records survive key rotation); every other stamp is still
-refused. `RULES_DIR` / `RULES_FILE` / kept-in-place root bundles are unchanged.
+answer and the export notes; so are a per-key store that appears after the
+company store exists and a source store modified after `migrated_at`. A failed
+migration keeps the per-key store for the whole process. Record stamps: new
+writes carry `company:<key>`; reads accept that stamp, the current fingerprint
+and every fingerprint mapped to the same company (so records survive key
+rotation); every other stamp is still refused. Read caches key on the sorted
+accepted-stamp list (`bundleRecordIdentityCacheKey`). `RULES_DIR` / `RULES_FILE`
+/ kept-in-place root bundles are unchanged.
 
 **Company data export / import** (`accounting_data_transfer`,
 `src/tools/accounting-data-transfer.ts`; standard/full, workflow group, no
@@ -135,7 +156,9 @@ active bundle (`isTransferableRuleFile`: index/log, `auto-booking/*.md`,
 stores (`statement-balances.json`, `receipt-attachment-digests.json`,
 `camt-review-acknowledgements.json`, `limited-vat.json`,
 `lightyear-usd-pool.json`) holding only this connection's records, unstamped.
-`mode: "import"`: strict schema, 16 MiB cap, known relative paths only
+`mode: "import"`: strict schema (echoed values strictly shaped: ISO `exported_at`,
+`https://` `server`, 8-digit `registry_code`, plain VAT/tax numbers; the
+`company_mismatch` reason is sandboxed), 16 MiB cap, known relative paths only
 (`import_path_refused`), per-store record shape check; `compareCompanyIdentity`
 refuses `company_mismatch` when any identifier both sides have differs or none
 of equal registry code / equal tax reference number / equal name on the same
@@ -147,7 +170,13 @@ digest of the touched local files; execute re-checks both under `withBundleLock`
 `apply_rule_files`; a state store with existing records for this connection is
 held (`state_store_exists`) unless named in `replace_state_stores`. Imported
 state records are restamped to the active connection; other connections'
-records stay. Single-file mode refuses (`bundle_storage_required`).
+records stay. Single-file mode refuses (`bundle_storage_required`). An export
+from another API server (demo vs live) has its state stores held
+(`state_store_server_mismatch`, not lifted by `replace_state_stores`); its rule
+files can still be imported. A `rule_scope: "shared"` export imported into a
+company's own store gets a warning note listing the rule files. The import is
+not atomic (files are written one by one); every import answer says to rerun the
+dry run to see what is in place after an interruption.
 
 ### Opening balances (algbilanss)
 

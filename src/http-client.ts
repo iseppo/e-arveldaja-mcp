@@ -2,7 +2,7 @@ import type { Config } from "./config.js";
 import { createAuthHeaders } from "./auth.js";
 import { wrapUntrustedOcr } from "./mcp-json.js";
 import { buildConnectionFingerprint } from "./connection-fingerprint.js";
-import { AUTH_BRAKE, authBrakeFor, type AuthBrake } from "./api-health.js";
+import { AUTH_BRAKE, authBrakeFor, recordAuthenticatedSuccess, type AuthBrake } from "./api-health.js";
 
 export type HttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 
@@ -391,6 +391,7 @@ export class HttpClient {
       throw HttpClient.enrichFailure(error);
     }
     this.authBrake.recordSuccess(this.cacheNamespace);
+    recordAuthenticatedSuccess(this.connectionFingerprint);
     return result;
   }
 

@@ -210,6 +210,16 @@ export function getBundleRecordIdentity(): { stableIdentity: string; connectionC
   };
 }
 
+/**
+ * Cache key for records read under the active identity: the stamp new records
+ * get plus every stamp accepted on read (a newly mapped key of the company
+ * changes what is visible).
+ */
+export function bundleRecordIdentityCacheKey(): string {
+  const identity = getBundleRecordIdentity();
+  return `${identity.stableIdentity}\n${[...new Set(identity.acceptedIdentities)].sort().join(",")}`;
+}
+
 /** The record stamp of a resolved company. */
 export function companyRecordStamp(companyKey: string): string {
   return `company:${companyKey}`;
@@ -366,22 +376,29 @@ export function chooseDefaultBundleStorage(
 // ---- Company-scoped default store ------------------------------------------
 //
 // A connection whose company is resolved (registry code from a public
-// register) uses `accounting-rules/company-<sha256(server + registry code)>/`.
+// register) uses `accounting-rules/<company key>/`, where the company key is
+// sha256("company\0" + server + "\n" + registry code) — plain 64-hex like a
+// per-key dir, so released versions (≤ 0.41.x), which treat any other child of
+// `accounting-rules/` as a sign of a shared root bundle, still see per-key
+// scopes only. `migration.json` inside it marks it as a company store.
 // The first time it is used, the per-key store of a connection mapped to the
 // same company is COPIED into it (never moved or deleted; the per-key store
 // stays as a backup). With several per-key stores (API key rotation) the most
 // recently modified one is copied and the others are reported in a notice,
 // never merged. When the company store already exists, another per-key store
-// of the company that was not its migration source is likewise only reported.
+// of the company that was not its migration source, or a source changed after
+// the copy, is likewise only reported.
 
 const COMPANY_MIGRATION_MARKER = "migration.json";
+/** A per-key legacy `accounting-rules.md`, staged inside the copy and moved out last. */
+const STAGED_LEGACY_FILE = "legacy-accounting-rules.pending";
 const completedCompanyMigrations = new Set<string>();
 const failedCompanyMigrations = new Set<string>();
 const companyStorageNotices = new Map<string, string>();
 
 function companyScopeName(companyKey: string): string {
   if (!/^[0-9a-f]{64}$/.test(companyKey)) throw new Error("Company key must be a sha256 hex digest.");
-  return `company-${companyKey}`;
+  return companyKey;
 }
 
 export function companyBundleDir(globalConfigDir: string, companyKey: string): string {
@@ -444,12 +461,15 @@ function connectionStoreCandidates(globalConfigDir: string, company: AccountingR
   return candidates.sort((a, b) => b.mtime - a.mtime || compareCodePoints(a.scope, b.scope));
 }
 
-function readMigrationSource(companyDir: string): string | undefined {
+function readMigrationMarker(companyDir: string): { source_scope?: string; migrated_at?: string } {
   try {
-    const parsed = JSON.parse(readFileSync(resolve(companyDir, COMPANY_MIGRATION_MARKER), "utf8")) as { source_scope?: unknown };
-    return typeof parsed.source_scope === "string" ? parsed.source_scope : undefined;
+    const parsed = JSON.parse(readFileSync(resolve(companyDir, COMPANY_MIGRATION_MARKER), "utf8")) as { source_scope?: unknown; migrated_at?: unknown };
+    return {
+      ...(typeof parsed.source_scope === "string" ? { source_scope: parsed.source_scope } : {}),
+      ...(typeof parsed.migrated_at === "string" ? { migrated_at: parsed.migrated_at } : {}),
+    };
   } catch {
-    return undefined;
+    return {};
   }
 }
 
@@ -458,11 +478,31 @@ function unmergedNotice(scopes: string[], globalConfigDir: string): string {
     "They are kept unchanged. Copy any rule you still need from them by hand, or export from that key and import here.";
 }
 
+function sourceChangedNotice(source: ConnectionStoreCandidate): string {
+  return `The rule store ${source.dir} was changed after it was copied into this company's store; those later changes were not copied. ` +
+    "Copy any rule you still need from it by hand, or export from that key and import here.";
+}
+
+/** Move a staged per-key legacy file out of the company store (the last migration step; also finishes an interrupted one). */
+function finishStagedLegacyFile(companyDir: string, companyLegacy: string): void {
+  const staged = resolve(companyDir, STAGED_LEGACY_FILE);
+  if (!existsSync(staged)) return;
+  if (existsSync(companyLegacy)) return; // never overwrite; the staged copy stays as a backup
+  mkdirSync(dirname(companyLegacy), { recursive: true, mode: PRIVATE_DIR_MODE });
+  renameSync(staged, companyLegacy);
+}
+
 /**
  * Make sure the company store exists or is ready to be created, copying the
  * newest per-key store of the company into it the first time. Returns false
  * when the copy failed (the caller then keeps the per-key store for this
  * process: never a half-empty company store).
+ *
+ * The copy is built in `<company dir>.migrating` (under the source store's own
+ * lock, so no write of the old key lands half-way) with the legacy file staged
+ * inside it, then renamed into place in one step; the legacy file is moved out
+ * last. A crash leaves either no company store (the copy is redone) or a
+ * complete one whose staged legacy file is moved out on the next use.
  */
 function ensureCompanyBundleMigrated(globalConfigDir: string, company: AccountingRulesCompany): boolean {
   const key = companyMigrationKey(globalConfigDir, company.key);
@@ -473,38 +513,48 @@ function ensureCompanyBundleMigrated(globalConfigDir: string, company: Accountin
   try {
     withBundleLock(companyDir, () => {
       const candidates = connectionStoreCandidates(globalConfigDir, company);
-      if (existsSync(companyDir) || existsSync(companyLegacy)) {
-        const source = readMigrationSource(companyDir);
-        const others = candidates.map(c => c.scope).filter(scope => scope !== source);
-        if (others.length > 0) companyStorageNotices.set(key, unmergedNotice(others, globalConfigDir));
+      if (existsSync(companyDir)) {
+        finishStagedLegacyFile(companyDir, companyLegacy);
+        const marker = readMigrationMarker(companyDir);
+        const notices: string[] = [];
+        const others = candidates.map(c => c.scope).filter(scope => scope !== marker.source_scope);
+        if (others.length > 0) notices.push(unmergedNotice(others, globalConfigDir));
+        const source = candidates.find(c => c.scope === marker.source_scope);
+        const migratedAt = marker.migrated_at ? Date.parse(marker.migrated_at) : Number.NaN;
+        if (source && Number.isFinite(migratedAt) && source.mtime > migratedAt) notices.push(sourceChangedNotice(source));
+        if (notices.length > 0) companyStorageNotices.set(key, notices.join(" "));
         return;
       }
       const chosen = candidates.at(0);
       if (!chosen) return;
       const staging = `${companyDir}.migrating`;
       rmSync(staging, { recursive: true, force: true });
-      if (existsSync(chosen.dir)) {
-        // Symlinks are not followed or copied: the company store holds only real files.
-        cpSync(chosen.dir, staging, {
-          recursive: true,
-          errorOnExist: true,
-          force: false,
-          preserveTimestamps: true,
-          filter: source => !lstatSync(source).isSymbolicLink(),
-        });
-      } else {
-        mkdirSync(staging, { recursive: true, mode: PRIVATE_DIR_MODE });
-      }
+      withBundleLock(chosen.dir, () => {
+        if (existsSync(chosen.dir)) {
+          // Symlinks are not followed or copied: the company store holds only real files.
+          cpSync(chosen.dir, staging, {
+            recursive: true,
+            errorOnExist: true,
+            force: false,
+            preserveTimestamps: true,
+            filter: source => !lstatSync(source).isSymbolicLink(),
+          });
+        } else {
+          mkdirSync(staging, { recursive: true, mode: PRIVATE_DIR_MODE });
+        }
+        if (existsSync(chosen.legacyFile)) {
+          copyFileSync(chosen.legacyFile, resolve(staging, STAGED_LEGACY_FILE), fsConstants.COPYFILE_EXCL);
+        }
+      });
       writeFileSync(resolve(staging, COMPANY_MIGRATION_MARKER), `${JSON.stringify({
+        kind: "company",
+        company_key: company.key,
         source_scope: chosen.scope,
         migrated_at: isoNow(),
         not_merged: candidates.slice(1).map(c => c.scope),
       }, null, 2)}\n`, PRIVATE_FILE_OPTIONS);
-      if (existsSync(chosen.legacyFile)) {
-        mkdirSync(dirname(companyLegacy), { recursive: true, mode: PRIVATE_DIR_MODE });
-        copyFileSync(chosen.legacyFile, companyLegacy, fsConstants.COPYFILE_EXCL);
-      }
       renameSync(staging, companyDir);
+      finishStagedLegacyFile(companyDir, companyLegacy);
       if (candidates.length > 1) companyStorageNotices.set(key, unmergedNotice(candidates.slice(1).map(c => c.scope), globalConfigDir));
     });
   } catch (error) {
@@ -716,9 +766,9 @@ function isInitializedBundle(dir: string): boolean {
   }
 }
 
-const SCOPED_RULES_DIRECTORY_NAME = /^(?:company-)?[0-9a-f]{64}$/;
-const SCOPED_RULES_LOCK_FILE_NAME = /^(?:company-)?[0-9a-f]{64}\.lock(?:\.reclaim)?$/;
-const SCOPED_RULES_STAGING_DIRECTORY_NAME = /^(?:company-)?[0-9a-f]{64}\.(?:migrating|replacing)$/;
+const SCOPED_RULES_DIRECTORY_NAME = /^[0-9a-f]{64}$/;
+const SCOPED_RULES_LOCK_FILE_NAME = /^[0-9a-f]{64}\.lock(?:\.reclaim)?$/;
+const SCOPED_RULES_STAGING_DIRECTORY_NAME = /^[0-9a-f]{64}\.(?:migrating|replacing)$/;
 
 function isRootInitializedBundle(dir: string): boolean {
   try {

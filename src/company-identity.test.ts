@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, utimesSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join, resolve } from "path";
 import { createHash } from "crypto";
@@ -8,12 +8,14 @@ import {
   adoptedCompany,
   companyKeyOf,
   ensureCompanyIdentity,
+  recordCompanyIdentity,
   readCompanyIdentityMapping,
   resetCompanyIdentityState,
   unresolvedCompanyReason,
 } from "./company-identity.js";
 import { isValidEstonianRegistryCode, resetEmtaKmkrCache, type EmtaFetch } from "./emta-kmkr.js";
 import { emtaAnswerHtml, fakeEmtaFetch, LIMITED_ROW } from "./__fixtures__/emta-kmkr.js";
+import { releasedChooseDefaultBundleStorage } from "./__fixtures__/released-rules-storage.js";
 import {
   companyBundleDir,
   companyRecordStamp,
@@ -33,12 +35,13 @@ const SERVER = "https://rmp-api.rik.ee/v1";
 const fp = (label: string) => createHash("sha256").update(label).digest("hex");
 const scopeOf = (fingerprint: string) => createHash("sha256").update(fingerprint).digest("hex");
 
-function api(vat: string | undefined, name: string | null, calls: string[] = []): ApiContext {
+function api(vat: string | undefined, name: string | null, calls: string[] = [], clients: unknown[] = []): ApiContext {
   return {
     readonly: {
       getVatInfo: async () => { calls.push("vat_info"); return { vat_number: vat }; },
       getInvoiceInfo: async () => { calls.push("invoice_info"); return { invoice_company_name: name }; },
     },
+    clients: { listAll: async () => { calls.push("clients"); return clients; } },
   } as unknown as ApiContext;
 }
 
@@ -154,6 +157,51 @@ describe("company identity resolution", () => {
     expect(bCalls.filter(c => c === "vat_info")).toHaveLength(2);
   });
 
+  it("refuses a name match that the company's own client record contradicts", async () => {
+    const a = fp("a");
+    const clients = [{ id: 1, name: "Acme OÜ", code: "14417608", is_deleted: false }];
+    await ensureCompanyIdentity(a, SERVER, api(undefined, "Acme OÜ", [], clients), { fetch: registerFetch([{ name: "Acme OÜ", status: "R", reg_code: 10234957 }]) });
+    expect(readCompanyIdentityMapping()).toEqual({});
+    expect(unresolvedCompanyReason(a)).toBe("ariregister_client_record_mismatch");
+  });
+
+  it("accepts a name match the company's own client record confirms", async () => {
+    const a = fp("a");
+    const clients = [{ id: 1, name: "Acme OÜ", code: "10234957", is_deleted: false }];
+    await ensureCompanyIdentity(a, SERVER, api(undefined, "Acme OÜ", [], clients), { fetch: registerFetch([{ name: "Acme OÜ", status: "R", reg_code: 10234957 }]) });
+    expect(readCompanyIdentityMapping()[a]).toMatchObject({ registry_code: "10234957", source: "ariregister_name", company_name: "Acme OÜ", vat_number: null });
+  });
+
+  it.each([
+    ["has a VAT number", { vat_number: "EE100000001", company_name: null }],
+    ["has another name", { vat_number: null, company_name: "Other OÜ" }],
+  ])("refuses a name match when another connection mapped to that code %s", async (_label, other) => {
+    const b = fp("b");
+    recordCompanyIdentity(b, { server: SERVER, registry_code: "10234957", source: "emta_kmkr", resolved_at: "2026-11-01T00:00:00.000Z", ...other });
+    const a = fp("a");
+    await ensureCompanyIdentity(a, SERVER, api(undefined, "Acme OÜ"), { fetch: registerFetch([{ name: "Acme OÜ", status: "R", reg_code: 10234957 }]) });
+    expect(readCompanyIdentityMapping()[a]).toBeUndefined();
+    expect(unresolvedCompanyReason(a)).toBe("ariregister_conflicting_mapping");
+  });
+
+  it("never overwrites a damaged mapping file and keeps a company already adopted", async () => {
+    const a = fp("a");
+    await ensureCompanyIdentity(a, SERVER, api("EE103050067", "x"), { emta: emta(emtaAnswerHtml([LIMITED_ROW])) });
+    const key = adoptedCompany(a)?.key;
+    expect(key).toBe(companyKeyOf(SERVER, "14417608"));
+    const path = join(config, COMPANY_IDENTITY_FILE);
+    writeFileSync(path, "{ damaged");
+    // The adopted company survives the damaged file in this process.
+    await ensureCompanyIdentity(a, SERVER, api("EE103050067", "x"), { emta: emta(emtaAnswerHtml([LIMITED_ROW])) });
+    expect(adoptedCompany(a)?.key).toBe(key);
+    // A new connection is not recorded and the damaged file is left as it is.
+    const b = fp("b");
+    await ensureCompanyIdentity(b, SERVER, api("EE103050067", "x"), { emta: emta(emtaAnswerHtml([LIMITED_ROW])) });
+    expect(readFileSync(path, "utf8")).toBe("{ damaged");
+    expect(adoptedCompany(b)).toBeUndefined();
+    expect(unresolvedCompanyReason(b)).toBe("company_identity_file_unreadable");
+  });
+
   it("never sends a request with network: false, but still adopts the mapping", async () => {
     const a = fp("a");
     const calls: string[] = [];
@@ -239,6 +287,68 @@ describe("company-keyed rules store", () => {
     expect(describeAccountingRuleScope().storage_notice).not.toContain(scopeOf(k1));
   });
 
+  it("leaves released versions on their per-key store next to a company store (no shared root bundle)", () => {
+    const old = fp("old");
+    useConnection(old);
+    saveAnnualReportAccountRule({ rule_type: "cash_flow_category", account_id: 2410, value: "financing" });
+    useConnection(old, { key, fingerprints: [old] });
+    expect(getCashFlowCategoryRule(2410)).toBe("financing");
+    const companyDir = companyBundleDir(config, key);
+    expect(existsSync(companyDir)).toBe(true);
+    // Leftovers of an interrupted company write or migration, as this version names them.
+    writeFileSync(`${companyDir}.lock`, "123:token\n");
+    mkdirSync(`${companyDir}.migrating`);
+    const project = join(config, "project");
+    mkdirSync(project);
+    expect(releasedChooseDefaultBundleStorage(project, config, "acme", old).dir).toBe(fingerprintDir(old));
+    expect(releasedChooseDefaultBundleStorage(project, config, "acme", fp("other")).dir).toBe(fingerprintDir(fp("other")));
+    expect(JSON.parse(readFileSync(join(companyDir, "migration.json"), "utf8"))).toMatchObject({ kind: "company", company_key: key, source_scope: scopeOf(old) });
+  });
+
+  it("reports a per-key source store changed after it was copied", () => {
+    const old = fp("old");
+    useConnection(old);
+    saveAnnualReportAccountRule({ rule_type: "cash_flow_category", account_id: 2410, value: "financing" });
+    useConnection(old, { key, fingerprints: [old] });
+    expect(describeAccountingRuleScope().storage_notice).toBeUndefined();
+    const later = new Date(Date.now() + 60_000);
+    utimesSync(join(fingerprintDir(old), "annual-report", "cash-flow-category.md"), later, later);
+    resetCompanyBundleMigrationState(); // a later process
+    useConnection(old, { key, fingerprints: [old] });
+    expect(describeAccountingRuleScope().storage_notice).toContain(`${fingerprintDir(old)} was changed after it was copied`);
+  });
+
+  it("finishes a migration interrupted after the copy was put in place, and redoes one interrupted before", () => {
+    const k1 = fp("k1");
+    mkdirSync(join(config, scopeOf(k1)), { recursive: true });
+    const legacy = "# Accounting Rules\n\n## Cash Flow Category\n| account_id | category |\n| --- | --- |\n| 2410 | investing |\n";
+    writeFileSync(join(config, scopeOf(k1), "accounting-rules.md"), legacy);
+    useConnection(k1, { key, fingerprints: [k1] });
+    expect(getCashFlowCategoryRule(2410)).toBe("investing");
+    const companyDir = companyBundleDir(config, key);
+    const companyLegacy = join(config, key, "accounting-rules.md");
+    expect(readFileSync(companyLegacy, "utf8")).toBe(legacy);
+    expect(existsSync(join(companyDir, "legacy-accounting-rules.pending"))).toBe(false);
+
+    // Crash after the rename, before the legacy file was moved out.
+    renameSync(companyLegacy, join(companyDir, "legacy-accounting-rules.pending"));
+    resetCompanyBundleMigrationState();
+    useConnection(k1, { key, fingerprints: [k1] });
+    expect(getCashFlowCategoryRule(2410)).toBe("investing");
+    expect(readFileSync(companyLegacy, "utf8")).toBe(legacy);
+
+    // Crash before the rename: only the staging dir exists; the copy is redone.
+    rmSync(companyDir, { recursive: true });
+    rmSync(join(config, key), { recursive: true });
+    mkdirSync(`${companyDir}.migrating`);
+    writeFileSync(join(`${companyDir}.migrating`, "partial.md"), "partial");
+    resetCompanyBundleMigrationState();
+    useConnection(k1, { key, fingerprints: [k1] });
+    expect(getCashFlowCategoryRule(2410)).toBe("investing");
+    expect(existsSync(join(companyDir, "partial.md"))).toBe(false);
+    expect(existsSync(`${companyDir}.migrating`)).toBe(false);
+  });
+
   it("keeps an unresolved connection on its per-key store next to company stores", () => {
     const k1 = fp("k1");
     useConnection(k1, { key, fingerprints: [k1] });
@@ -313,7 +423,7 @@ describe("server wiring", () => {
       const saved = await client.callTool({ name: "save_auto_booking_rule", arguments: { match: "Zone Media", purchase_accounts_id: 5230 } });
       expect(saved.isError).not.toBe(true);
       const text = (saved.content as Array<{ text: string }>)[0]!.text;
-      expect(text).toContain(`company-${key14417608()}`);
+      expect(text).toContain(join("accounting-rules", key14417608()));
       expect(text).toContain("this_company");
       expect(Object.values(readCompanyIdentityMapping())).toEqual([expect.objectContaining({ registry_code: "14417608", source: "emta_kmkr" })]);
     } finally {

@@ -93,17 +93,22 @@ export interface CompanyDataIdentity {
   tax_refnumber: string | null;
 }
 
+const ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
+const API_SERVER_URL = /^https:\/\/[A-Za-z0-9.-]+(?::\d{1,5})?(?:\/[A-Za-z0-9._~-]+)*\/?$/;
+const PLAIN_IDENTIFIER = /^[A-Za-z0-9 .-]*$/;
+
 const exportFileSchema = z.object({
   format: z.literal(COMPANY_DATA_FORMAT),
   version: z.literal(COMPANY_DATA_VERSION),
-  exported_at: z.string().max(64),
-  server: z.string().max(500),
+  // Values echoed back to the client are strictly shaped (the name is sandboxed).
+  exported_at: z.string().max(40).regex(ISO_TIMESTAMP).refine(value => Number.isFinite(Date.parse(value))),
+  server: z.string().max(200).regex(API_SERVER_URL),
   company: z.object({
     name: z.string().max(500).nullable(),
-    registry_code: z.string().max(64).nullable(),
+    registry_code: z.string().regex(/^\d{8}$/).nullable(),
     registry_code_source: z.enum(["emta_kmkr", "ariregister_name", "client_record"]).nullable().optional(),
-    vat_number: z.string().max(64).nullable(),
-    tax_refnumber: z.string().max(64).nullable(),
+    vat_number: z.string().max(32).regex(PLAIN_IDENTIFIER).nullable(),
+    tax_refnumber: z.string().max(32).regex(PLAIN_IDENTIFIER).nullable(),
   }).strict(),
   source_identity: z.string().max(128),
   rule_scope: z.enum(["this_company", "shared"]),
@@ -194,6 +199,8 @@ async function readCompanyIdentity(api: ApiContext, required: boolean): Promise<
   } catch {
     registryCode = null;
   }
+  // Only a plain 8-digit code is carried (the import accepts nothing else).
+  if (registryCode !== null && !/^\d{8}$/.test(registryCode)) registryCode = null;
   return { name, registry_code: registryCode, registry_code_source: registryCode ? "client_record" : null, vat_number: vatNumber, tax_refnumber: taxRef };
 }
 
@@ -402,7 +409,7 @@ export interface ImportStateStorePlan {
   name: StateStoreFile;
   status: "new" | "identical" | "differs";
   action: "write" | "none" | "replace" | "held";
-  hold?: "state_store_exists";
+  hold?: "state_store_exists" | "state_store_server_mismatch";
   imported_records: number;
   local_records: number;
 }
@@ -414,6 +421,8 @@ interface ImportPlan {
   stateWrites: Array<{ name: StateStoreFile; records: Record<string, unknown>[] }>;
 }
 
+export type ImportHoldCode = "rule_file_differs" | "state_store_exists" | "state_store_server_mismatch";
+
 export interface AccountingDataImportPreviewPayload {
   mode: "import";
   status: "ready_for_approval";
@@ -422,7 +431,7 @@ export interface AccountingDataImportPreviewPayload {
   rule_files: ImportRuleFilePlan[];
   state_stores: ImportStateStorePlan[];
   will_write: { rule_files: string[]; state_stores: StateStoreFile[] };
-  held: Array<{ path: string; code: "rule_file_differs" | "state_store_exists" }>;
+  held: Array<{ path: string; code: ImportHoldCode }>;
   diffs_truncated?: true;
   notes: string[];
   next_step_summary: string;
@@ -432,7 +441,7 @@ export interface AccountingDataImportResultPayload {
   mode: "import";
   status: "imported" | "nothing_to_import";
   written: { rule_files: string[]; state_stores: Array<{ name: StateStoreFile; records: number }> };
-  held: Array<{ path: string; code: "rule_file_differs" | "state_store_exists" }>;
+  held: Array<{ path: string; code: ImportHoldCode }>;
   notes: string[];
 }
 
@@ -524,6 +533,7 @@ function buildImportPlan(
   doc: CompanyDataExportFile,
   applyRuleFiles: ReadonlySet<string>,
   replaceStateStores: ReadonlySet<string>,
+  serverMismatch: boolean,
 ): ImportPlan {
   const plan: ImportPlan = { rules: [], state: [], ruleWrites: [], stateWrites: [] };
   for (const file of doc.files) {
@@ -557,6 +567,14 @@ function buildImportPlan(
       const imported = parseStateContent(name, file.content);
       const local = readOwnStateRecords(dir, name).own;
       const base = { name, imported_records: imported.length, local_records: local.length };
+      // Records of another API server (live vs demo) never describe this server's ledger.
+      if (serverMismatch && imported.length > 0) {
+        const same = canonicalPlanJson(local as never) === canonicalPlanJson(imported as never);
+        plan.state.push(same
+          ? { ...base, status: "identical", action: "none" }
+          : { ...base, status: local.length === 0 ? "new" : "differs", action: "held", hold: "state_store_server_mismatch" });
+        continue;
+      }
       if (local.length === 0) {
         if (imported.length === 0) plan.state.push({ ...base, status: "identical", action: "none" });
         else {
@@ -614,9 +632,11 @@ interface ImportArgs {
 function heldOf(plan: ImportPlan): AccountingDataImportPreviewPayload["held"] {
   return [
     ...plan.rules.filter(r => r.hold).map(r => ({ path: r.path, code: "rule_file_differs" as const })),
-    ...plan.state.filter(s => s.hold).map(s => ({ path: s.name, code: "state_store_exists" as const })),
+    ...plan.state.filter(s => s.hold).map(s => ({ path: s.name, code: s.hold! })),
   ];
 }
+
+const IMPORT_NOT_ATOMIC_NOTE = "The import writes its files one by one. If it stops part-way (an error or a crash), run the dry run again: it shows what is already in place and what is still to write.";
 
 async function handleImport(api: ApiContext, ctx: RuntimeSafetyContext, args: ImportArgs): Promise<CallToolResult> {
   if (!args.file_path) return refuse("file_path_required", "mode \"import\" needs file_path: the export .json file.");
@@ -658,8 +678,9 @@ async function handleImport(api: ApiContext, ctx: RuntimeSafetyContext, args: Im
     { server: normalizeServer(api.journals.apiBaseUrl), company: active },
   );
   if (!verdict.match) {
-    return refuse("company_mismatch", `This export belongs to another company: ${verdict.reason}. Switch to the right connection or use the right file.`);
+    return refuse("company_mismatch", `This export belongs to another company: ${wrapUntrustedOcr(verdict.reason)}. Switch to the right connection or use the right file.`);
   }
+  const serverMismatch = normalizeServer(doc.server) !== normalizeServer(api.journals.apiBaseUrl);
 
   const normalizedArgs: PlanRecord = {
     file_path: realPath,
@@ -672,14 +693,20 @@ async function handleImport(api: ApiContext, ctx: RuntimeSafetyContext, args: Im
   const notes: string[] = [];
   if (describeAccountingRuleScope().rule_scope === "shared") {
     notes.push("The rules folder is shared by every connection of this server, so imported rules apply to every company it uses.");
+  } else if (doc.rule_scope === "shared" && ruleNames.size > 0) {
+    notes.push(`Warning: this export came from a rules folder shared by every company of that server, so these rules may belong to other companies: ${[...ruleNames].filter(rel => rel !== "index.md" && rel !== "log.md").sort().join(", ")}. Check them before approving; they are imported into this company's own store.`);
   }
+  if (serverMismatch) {
+    notes.push("The export comes from another e-arveldaja server (for example demo vs live), so its local records are held (state_store_server_mismatch); rule files can still be imported.");
+  }
+  notes.push(IMPORT_NOT_ATOMIC_NOTE);
 
   if (!args.execute) {
     let plan: ImportPlan;
     let digest: string;
     try {
       ({ plan, digest } = withBundleLock(bundle.dir, () => ({
-        plan: buildImportPlan(bundle.dir, doc, new Set(applyRuleFiles), new Set(replaceStateStores)),
+        plan: buildImportPlan(bundle.dir, doc, new Set(applyRuleFiles), new Set(replaceStateStores), serverMismatch),
         digest: localDigest(bundle.dir, touchedRules, touchedState),
       })));
     } catch (error) {
@@ -743,7 +770,7 @@ async function handleImport(api: ApiContext, ctx: RuntimeSafetyContext, args: Im
   try {
     outcome = withBundleLock(bundle.dir, () => {
       if (localDigest(bundle.dir, touchedRules, touchedState) !== bound?.local_digest) return { drift: true as const };
-      const plan = buildImportPlan(bundle.dir, doc, new Set(applyRuleFiles), new Set(replaceStateStores));
+      const plan = buildImportPlan(bundle.dir, doc, new Set(applyRuleFiles), new Set(replaceStateStores), serverMismatch);
       if (plan.ruleWrites.length > 0) {
         writeImportedRuleFiles(bundle, plan.ruleWrites, plan.ruleWrites.map(w => `imported ${w.rel} (company data import)`));
       }

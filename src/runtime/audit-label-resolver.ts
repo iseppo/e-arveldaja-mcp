@@ -25,8 +25,6 @@ export interface AuditLabelResolver {
   ensureAuditLogLabelResolved(index: number): Promise<void>;
   /** Verified company identity for a connection index, or null if not yet resolved. */
   getVerifiedCompanyIdentity(index: number): string | null;
-  /** True once the connection's company name is known (startup metadata or a successful lookup): the key works. */
-  isAuditLogLabelResolved(index: number): boolean;
 }
 
 /**
@@ -122,6 +120,5 @@ export function createAuditLabelResolver(opts: {
     applyAuditLogLabels,
     ensureAuditLogLabelResolved,
     getVerifiedCompanyIdentity: (index) => resolvedAuditCompanyNames.get(index) ?? null,
-    isAuditLogLabelResolved: (index) => resolvedAuditCompanyNames.has(index),
   };
 }

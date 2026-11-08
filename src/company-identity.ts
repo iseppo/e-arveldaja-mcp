@@ -3,8 +3,9 @@ import { existsSync, readFileSync, statSync } from "fs";
 import { resolve } from "path";
 import { getGlobalConfigDir, writePrivateFile } from "./config.js";
 import { isValidEstonianRegistryCode, lookupEmtaKmkrCached, normalizeEstonianVatNumber, type EmtaKmkrDeps } from "./emta-kmkr.js";
-import type { AccountingRulesCompany } from "./accounting-rules.js";
+import { withBundleLock, type AccountingRulesCompany } from "./accounting-rules.js";
 import type { ApiContext } from "./tools/crud-tools.js";
+import { deriveOwnCompanyRegistryCode } from "./tools/receipt-inbox.js";
 import { log } from "./logger.js";
 
 /**
@@ -14,8 +15,10 @@ import { log } from "./logger.js";
  *     registry code of its one active registration (check digit verified).
  *  2. No VAT number → the business register (äriregister) autocomplete by the
  *     company name (`/invoice_info.invoice_company_name`): accepted only when
- *     exactly one not-deleted company has exactly that name (names are unique
- *     among registered companies).
+ *     exactly one active company has exactly that name (names are unique
+ *     among active companies), the company's own client record (if any) has
+ *     the same registry code, and no other connection mapped to that code has
+ *     a VAT number or another name.
  *  3. Anything else is unresolved: the connection keeps its per-key store.
  *     Never a guess.
  *
@@ -33,6 +36,10 @@ export interface CompanyIdentityEntry {
   registry_code: string;
   source: CompanyIdentitySource;
   resolved_at: string;
+  /** The connection's VAT number at resolution (EMTA path), else null. */
+  vat_number?: string | null;
+  /** The connection's company name at resolution (business-register path), else null. */
+  company_name?: string | null;
 }
 
 export const COMPANY_IDENTITY_FILE = "company-identity.json";
@@ -48,9 +55,12 @@ export function normalizeCompanyServer(server: string): string {
   return server.trim().replace(/\/+$/, "");
 }
 
-/** sha256(server + registry code): the company store's key. */
+/**
+ * sha256("company\0" + server + "\n" + registry code): the company store's key,
+ * domain-separated from the per-key store hashes.
+ */
 export function companyKeyOf(server: string, registryCode: string): string {
-  return createHash("sha256").update(`${normalizeCompanyServer(server)}\n${registryCode}`).digest("hex");
+  return createHash("sha256").update(`company\0${normalizeCompanyServer(server)}\n${registryCode}`).digest("hex");
 }
 
 /** Exact name comparison: case, Unicode form and whitespace only (legal forms count). */
@@ -63,7 +73,8 @@ export function exactCompanyName(name: string): string {
 // ---------------------------------------------------------------------------
 
 type Mapping = Record<string, CompanyIdentityEntry>;
-let mappingCache: { key: string; value: Mapping } | undefined;
+let mappingCache: { key: string; value: Mapping; problem: string | undefined } | undefined;
+const reportedMappingProblems = new Set<string>();
 
 function mappingPath(): string {
   return resolve(getGlobalConfigDir(), COMPANY_IDENTITY_FILE);
@@ -75,42 +86,78 @@ function isEntry(value: unknown): value is CompanyIdentityEntry {
   return typeof entry.server === "string" && entry.server !== ""
     && typeof entry.registry_code === "string" && isValidEstonianRegistryCode(entry.registry_code)
     && (entry.source === "emta_kmkr" || entry.source === "ariregister_name")
-    && typeof entry.resolved_at === "string";
+    && typeof entry.resolved_at === "string"
+    && (entry.vat_number === undefined || entry.vat_number === null || typeof entry.vat_number === "string")
+    && (entry.company_name === undefined || entry.company_name === null || typeof entry.company_name === "string");
 }
 
-/** The persisted mapping fingerprint → company; an absent or unreadable file is empty (never throws). */
-export function readCompanyIdentityMapping(): Mapping {
+function readMappingState(): { value: Mapping; problem: string | undefined } {
   const path = mappingPath();
   let stamp: string;
   try {
-    if (!existsSync(path)) return {};
+    if (!existsSync(path)) return { value: {}, problem: undefined };
     const info = statSync(path);
-    if (info.size > MAX_MAPPING_BYTES) return {};
+    if (info.size > MAX_MAPPING_BYTES) return { value: {}, problem: "file too large" };
     stamp = `${path}:${info.mtimeMs}:${info.size}`;
-  } catch {
-    return {};
+  } catch (error) {
+    return { value: {}, problem: error instanceof Error ? error.message : String(error) };
   }
-  if (mappingCache?.key === stamp) return mappingCache.value;
+  if (mappingCache?.key === stamp) return mappingCache;
   const value: Mapping = {};
+  let problem: string | undefined;
   try {
-    const parsed = JSON.parse(readFileSync(path, "utf8")) as { entries?: unknown };
-    const entries = parsed.entries;
-    if (entries && typeof entries === "object") {
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as { version?: unknown; entries?: unknown };
+    const entries = parsed?.entries;
+    if (parsed?.version !== MAPPING_VERSION || !entries || typeof entries !== "object" || Array.isArray(entries)) {
+      problem = "unknown format";
+    } else {
       for (const [fingerprint, entry] of Object.entries(entries as Record<string, unknown>)) {
         if (/^[0-9a-f]{64}$/.test(fingerprint) && isEntry(entry)) value[fingerprint] = entry;
+        else problem = "invalid entry";
       }
     }
   } catch {
-    log("warning", `Could not read ${path}; companies are resolved again.`);
+    problem = "not valid JSON";
   }
-  mappingCache = { key: stamp, value };
-  return value;
+  if (problem && !reportedMappingProblems.has(stamp)) {
+    reportedMappingProblems.add(stamp);
+    log("warning", `${path} cannot be read (${problem}); it is left unchanged and no new company is recorded until it is fixed or removed.`);
+  }
+  mappingCache = { key: stamp, value, problem };
+  return mappingCache;
 }
 
-export function recordCompanyIdentity(fingerprint: string, entry: CompanyIdentityEntry): void {
-  const entries = { ...readCompanyIdentityMapping(), [fingerprint]: entry };
-  writePrivateFile(mappingPath(), `${JSON.stringify({ version: MAPPING_VERSION, entries }, null, 2)}\n`);
-  mappingCache = undefined;
+/** The persisted mapping fingerprint → company; valid entries of a damaged file are still used (never throws). */
+export function readCompanyIdentityMapping(): Mapping {
+  return readMappingState().value;
+}
+
+/** Why the mapping file cannot be updated (damaged), if so. */
+export function companyIdentityMappingProblem(): string | undefined {
+  return readMappingState().problem;
+}
+
+/**
+ * Add one entry under the mapping file's lock, re-reading it first. A damaged
+ * file is never overwritten (throws). `check` may veto the write against the
+ * fresh mapping by returning a reason (then nothing is written).
+ */
+export function recordCompanyIdentity(
+  fingerprint: string,
+  entry: CompanyIdentityEntry,
+  check?: (mapping: Mapping) => string | undefined,
+): string | undefined {
+  return withBundleLock(mappingPath(), () => {
+    mappingCache = undefined;
+    const state = readMappingState();
+    if (state.problem) throw new Error(`${COMPANY_IDENTITY_FILE} cannot be read (${state.problem}); not overwritten`);
+    const veto = check?.(state.value);
+    if (veto) return veto;
+    const entries = { ...state.value, [fingerprint]: entry };
+    writePrivateFile(mappingPath(), `${JSON.stringify({ version: MAPPING_VERSION, entries }, null, 2)}\n`);
+    mappingCache = undefined;
+    return undefined;
+  });
 }
 
 /** The company the mapping ties this fingerprint to, with every fingerprint of that company. */
@@ -148,6 +195,7 @@ export function resetCompanyIdentityState(): void {
   lastReason.clear();
   inFlight.clear();
   mappingCache = undefined;
+  reportedMappingProblems.clear();
 }
 
 /** Why this fingerprint's company is not resolved in this process (after an attempt), if known. */
@@ -157,6 +205,10 @@ export function unresolvedCompanyReason(fingerprint: string): string | undefined
 
 function adopt(fingerprint: string): AccountingRulesCompany | null {
   const company = mappedCompany(fingerprint);
+  const previous = adopted.get(slot(fingerprint));
+  // Never downgrade or switch a company already adopted in this process (a
+  // mapping file damaged or edited meanwhile): stores never change mid-process.
+  if (previous && (!company || company.key !== previous.key)) return previous;
   const value = company ? { key: company.key, fingerprints: company.fingerprints } : null;
   adopted.set(slot(fingerprint), value);
   return value;
@@ -173,7 +225,7 @@ export function adoptedCompany(fingerprint: string): AccountingRulesCompany | un
 }
 
 export type RegistryCodeResolution =
-  | { ok: true; registry_code: string; source: CompanyIdentitySource }
+  | { ok: true; registry_code: string; source: CompanyIdentitySource; vat_number: string | null; company_name: string | null }
   | { ok: false; reason: string };
 
 export interface CompanyIdentityDeps {
@@ -216,7 +268,7 @@ export async function resolveRegistryCode(api: ApiContext, deps: CompanyIdentity
     const { outcome } = await lookupEmtaKmkrCached(normalized, (deps.now ?? Date.now)(), deps.emta ?? {});
     if (!outcome.ok) return { ok: false, reason: outcome.code };
     if (!outcome.registry_code) return { ok: false, reason: "emta_no_registry_code" };
-    return { ok: true, registry_code: outcome.registry_code, source: "emta_kmkr" };
+    return { ok: true, registry_code: outcome.registry_code, source: "emta_kmkr", vat_number: normalized, company_name: null };
   }
   let name: string | undefined;
   try {
@@ -238,7 +290,30 @@ export async function resolveRegistryCode(api: ApiContext, deps: CompanyIdentity
   if (matches.length !== 1) return { ok: false, reason: matches.length === 0 ? "ariregister_no_exact_match" : "ariregister_ambiguous" };
   const code = String(matches[0]!.reg_code ?? "");
   if (!isValidEstonianRegistryCode(code)) return { ok: false, reason: "ariregister_invalid_registry_code" };
-  return { ok: true, registry_code: code, source: "ariregister_name" };
+  // The company's own client record, when it carries a registry code, must agree.
+  let ownCode: string | undefined;
+  try {
+    ownCode = deriveOwnCompanyRegistryCode(await api.clients.listAll(), undefined, name)?.replace(/\s+/g, "");
+  } catch {
+    return { ok: false, reason: "client_record_unavailable" };
+  }
+  if (ownCode && ownCode !== code) return { ok: false, reason: "ariregister_client_record_mismatch" };
+  return { ok: true, registry_code: code, source: "ariregister_name", vat_number: null, company_name: name };
+}
+
+/**
+ * A name-based mapping is refused when another connection on the same server
+ * is mapped to the same registry code with a VAT number (this company has
+ * none) or with another company name.
+ */
+function nameMappingConflict(fingerprint: string, server: string, registryCode: string, name: string | null, mapping: Mapping): string | undefined {
+  for (const [otherFingerprint, other] of Object.entries(mapping)) {
+    if (otherFingerprint === fingerprint) continue;
+    if (normalizeCompanyServer(other.server) !== server || other.registry_code !== registryCode) continue;
+    if (other.vat_number) return "ariregister_conflicting_mapping";
+    if (other.company_name && name && exactCompanyName(other.company_name) !== exactCompanyName(name)) return "ariregister_conflicting_mapping";
+  }
+  return undefined;
 }
 
 /**
@@ -262,19 +337,29 @@ export async function ensureCompanyIdentity(
           try {
             const resolution = await resolveRegistryCode(api, deps);
             if (resolution.ok) {
-              lastReason.delete(slot(fingerprint));
-              recordCompanyIdentity(fingerprint, {
-                server: normalizeCompanyServer(server),
+              const normalizedServer = normalizeCompanyServer(server);
+              const veto = recordCompanyIdentity(fingerprint, {
+                server: normalizedServer,
                 registry_code: resolution.registry_code,
                 source: resolution.source,
                 resolved_at: new Date(now).toISOString(),
-              });
+                vat_number: resolution.vat_number,
+                company_name: resolution.company_name,
+              }, mapping => resolution.source === "ariregister_name"
+                ? nameMappingConflict(fingerprint, normalizedServer, resolution.registry_code, resolution.company_name, mapping)
+                : undefined);
+              if (veto) {
+                lastReason.set(slot(fingerprint), veto);
+                log("info", `Company registry code not resolved (${veto}); local rules stay in the per-key store.`);
+              } else {
+                lastReason.delete(slot(fingerprint));
+              }
             } else {
               lastReason.set(slot(fingerprint), resolution.reason);
               log("info", `Company registry code not resolved (${resolution.reason}); local rules stay in the per-key store.`);
             }
           } catch (error) {
-            lastReason.set(slot(fingerprint), "resolution_failed");
+            lastReason.set(slot(fingerprint), companyIdentityMappingProblem() ? "company_identity_file_unreadable" : "resolution_failed");
             log("warning", `Company identity resolution failed: ${error instanceof Error ? error.message : String(error)}`);
           } finally {
             lastAttempt.set(slot(fingerprint), now);

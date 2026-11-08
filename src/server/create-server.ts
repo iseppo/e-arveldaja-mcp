@@ -19,6 +19,7 @@ import { runWithExtra } from "../progress.js";
 import { HttpClient } from "../http-client.js";
 import { buildConnectionFingerprint } from "../connection-fingerprint.js";
 import { adoptedCompany, ensureCompanyIdentity } from "../company-identity.js";
+import { hasAuthenticatedSuccess } from "../api-health.js";
 import { ClientsApi } from "../api/clients.api.js";
 import { ProductsApi } from "../api/products.api.js";
 import { JournalsApi } from "../api/journals.api.js";
@@ -460,8 +461,11 @@ export async function createMcpServer(
             const config = allConfigs[snapshot.index];
             const context = connectionContexts[snapshot.index];
             if (config && context) {
-              await ensureCompanyIdentity(buildConnectionFingerprint(config.config), config.config.baseUrl, context, {
-                network: auditResolver.isAuditLogLabelResolved(snapshot.index),
+              const fingerprint = buildConnectionFingerprint(config.config);
+              // Hidden lookups only once a signed request of this key really
+              // succeeded in this process (stale keys never send them).
+              await ensureCompanyIdentity(fingerprint, config.config.baseUrl, context, {
+                network: hasAuthenticatedSuccess(fingerprint),
               });
             }
           }
