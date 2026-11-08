@@ -1,7 +1,7 @@
 # e-arveldaja MCP Server
 
 TypeScript MCP server for the Estonian e-arveldaja (RIK e-Financials) REST API.
-129 tools by default on the `standard` profile; opt-in `guided` / `guided-sales` expose 19 / 20 tools, and `full` exposes all 149. The prompt registry holds 16 workflow prompts (guided profiles register fewer — a prompt whose required tools are all absent is not registered) and there are 15 resources across 12 modules. Supports multiple companies/accounts.
+130 tools by default on the `standard` profile; opt-in `guided` / `guided-sales` expose 19 / 20 tools, and `full` exposes all 150. The prompt registry holds 16 workflow prompts (guided profiles register fewer — a prompt whose required tools are all absent is not registered) and there are 15 resources across 12 modules. Supports multiple companies/accounts.
 
 ## Quick Start
 
@@ -83,6 +83,41 @@ of saving: `rule_scope: "this_company" | "shared"` (`describeAccountingRuleScope
 shared = not `isPerConnectionBundleStorage()`), plus a plain-language
 `rule_scope_warning` when the store is shared and the server has more than one
 connection. The save is never refused.
+
+The default per-connection dir and the record stamps in connection-scoped stores
+are keyed by the connection fingerprint (baseUrl + API key id + public value),
+so an API key rotation starts an empty store. Re-keying by company was examined
+2026-11-08 and NOT done: no API field yields the company's registry code
+(`/invoice_info` and `/vat_info` have none; `deriveOwnCompanyRegistryCode` is a
+heuristic over the clients list). Candidate key: `/vat_info.tax_refnumber`
+(already the ledger-lock company key in `companyLedgerLockScope`) — owner decision pending.
+
+**Company data export / import** (`accounting_data_transfer`,
+`src/tools/accounting-data-transfer.ts`; standard/full, workflow group, no
+opt-out flag): `mode: "export"` writes one new `.json` file (`file_path` under
+the allowed roots, `O_EXCL`, 0600; `output_exists` if present) with header
+`{format: "e-arveldaja-mcp-company-data", version: 1, exported_at, server,
+company: {name, registry_code (best effort), vat_number, tax_refnumber},
+source_identity, rule_scope}` and `files`: every transferable rule file of the
+active bundle (`isTransferableRuleFile`: index/log, `auto-booking/*.md`,
+`owner-expense/policy.md`, `annual-report/{settings,liability-classification,cash-flow-category}.md`
+— other connections' hashed subdirs are never included) plus the five state
+stores (`statement-balances.json`, `receipt-attachment-digests.json`,
+`camt-review-acknowledgements.json`, `limited-vat.json`,
+`lightyear-usd-pool.json`) holding only this connection's records, unstamped.
+`mode: "import"`: strict schema, 16 MiB cap, known relative paths only
+(`import_path_refused`), per-store record shape check; `compareCompanyIdentity`
+refuses `company_mismatch` when any identifier both sides have differs or none
+of equal registry code / equal tax reference number / equal name on the same
+server holds. Dry run lists per file `new | identical | differs | skipped`
+(index/log are regenerated/kept), row-level rule diffs (sandboxed) and state
+record counts, issuing a `plan_handle` bound to the file digest, the args and a
+digest of the touched local files; execute re-checks both under `withBundleLock`
+(`plan_drift`). A differing rule file is replaced only when named in
+`apply_rule_files`; a state store with existing records for this connection is
+held (`state_store_exists`) unless named in `replace_state_stores`. Imported
+state records are restamped to the active connection; other connections'
+records stay. Single-file mode refuses (`bundle_storage_required`).
 
 ### Opening balances (algbilanss)
 
@@ -174,7 +209,7 @@ Opening balances are maintained in e-arveldaja. Statement-closing snapshots
 surface is a fixed per-session token cost. Eight env flags control optional
 parts of the surface (see `getToolExposureConfig()` in `src/config.ts`):
 
-`EARVELDAJA_PROFILE` provides one-choice surfaces: `guided` (19 merged daily-bookkeeping tools), `guided-sales` (those 19 plus the `manage_sale_invoice` sales façade — read plus the full prepare/execute mutation lifecycle: create/update/delete/confirm/invalidate/send/recurring and inline resolve-or-create customer, 20 total), `standard` (the absent-variable compatibility default, 129), or `full` (all 149, including granular/setup tools and the workflow-state paging tool `get_workflow_page`). Guided profiles are opt-in for this release. Any explicitly present legacy exposure flag forces the normalized profile to `custom` and preserves the flag combination below. Profile and catalog fingerprint are part of plan/file-reference scope: restart and obtain a fresh preview after changing them.
+`EARVELDAJA_PROFILE` provides one-choice surfaces: `guided` (19 merged daily-bookkeeping tools), `guided-sales` (those 19 plus the `manage_sale_invoice` sales façade — read plus the full prepare/execute mutation lifecycle: create/update/delete/confirm/invalidate/send/recurring and inline resolve-or-create customer, 20 total), `standard` (the absent-variable compatibility default, 130), or `full` (all 150, including granular/setup tools and the workflow-state paging tool `get_workflow_page`). Guided profiles are opt-in for this release. Any explicitly present legacy exposure flag forces the normalized profile to `custom` and preserves the flag combination below. Profile and catalog fingerprint are part of plan/file-reference scope: restart and obtain a fresh preview after changing them.
 
 The guided surface is sized for routing clarity, not token cost (per-tool measurement shows no cost cliff at 20). The **≤ 20** figure is a target, not a hard wall: 21–24 is a deliberate-exception band (allowed only with a recorded `CHANGELOG` rationale when no existing tool can absorb the capability), and 24 is the hard backstop above which the surface must be redesigned by merging tools rather than adding. Before adding any guided tool, apply the add/don't-add criteria in [`docs/guided-tool-policy.md`](docs/guided-tool-policy.md) — prefer a new `mode` on an existing façade, a `continue_accounting_workflow` continuation, or `standard`/`full` placement (as with `get_server_status`) over growing the daily surface.
 
@@ -258,13 +293,13 @@ without changing the default:
   `DISABLE_SALES` deployment usually sets this too — but the flags are
   independent. Saves ≈1.3k tokens (7 tools).
 
-The standard surface is 129 tools; `DISABLE_LIGHTYEAR` in a custom profile drops it to 123.
+The standard surface is 130 tools; `DISABLE_LIGHTYEAR` in a custom profile drops it to 124.
 `EXPOSE_GRANULAR_TOOLS` adds the 10 granular tools, `EXPOSE_SETUP_TOOLS` the 3
-credential tools; enabling both (with `full`'s `get_workflow_page`) raises it to the full 149. The five opt-out
+credential tools; enabling both (with `full`'s `get_workflow_page`) raises it to the full 150. The five opt-out
 group flags trim the default further — `DISABLE_TAX_TOOLS` (−5),
 `DISABLE_REFERENCE_ADMIN` (−9), `DISABLE_ANNUAL_REPORT` (−4), `DISABLE_SALES`
 (−13), `DISABLE_PRODUCTS` (−7) — so a lean purchase-side-only deployment with
-every disable flag set (incl. Lightyear) lands at 85 tools. (The former
+every disable flag set (incl. Lightyear) lands at 86 tools. (The former
 `prepare_accounting_inbox` / `run_accounting_inbox_dry_runs` tools were
 exact aliases of `accounting_inbox` `mode="scan"` / `mode="dry_run"` and have
 been removed — use `accounting_inbox` with the matching `mode`.)
@@ -872,5 +907,5 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 const transport = new StdioClientTransport({ command: "node", args: ["dist/index.js"] });
 const client = new Client({ name: "test", version: "1.0.0" });
 await client.connect(transport);
-const { tools } = await client.listTools(); // 129 tools (standard profile)
+const { tools } = await client.listTools(); // 130 tools (standard profile)
 ```

@@ -3,7 +3,7 @@ import { createHash, randomUUID } from "crypto";
 import { dirname, isAbsolute, join, relative, resolve } from "path";
 import { z } from "zod";
 import { getProjectRoot } from "./paths.js";
-import { getGlobalConfigDir } from "./config.js";
+import { getGlobalConfigDir, writePrivateFile } from "./config.js";
 import { normalizeCompanyName } from "./company-name.js";
 import { canonicalBusinessText } from "./mcp-json.js";
 import { MAX_JSON_INPUT_SIZE, safeJsonParse } from "./tools/crud/shared.js";
@@ -2184,4 +2184,69 @@ export function readAccountingKnowledgeConcept(rel: string): { rel: string; text
     // rather than leaking an internal error through the resource handler.
     return undefined;
   }
+}
+
+// ---- Company data transfer (export / import) -------------------------------
+
+/**
+ * Bundle-relative rule file paths a company export may carry: the reserved
+ * index/log plus the concept files this module writes. Anything else in the
+ * bundle dir (other connections' hashed subdirs, stray files) is never
+ * exported and an import naming it is refused.
+ */
+const TRANSFERABLE_RULE_FILE = /^(?:index\.md|log\.md|owner-expense\/policy\.md|annual-report\/(?:settings|liability-classification|cash-flow-category)\.md|auto-booking\/[a-z0-9][a-z0-9-]{0,160}\.md)$/;
+
+export function isTransferableRuleFile(rel: string): boolean {
+  return TRANSFERABLE_RULE_FILE.test(rel);
+}
+
+/** The active bundle (dir + sibling legacy file); null in single-file EARVELDAJA_RULES_FILE mode. */
+export function resolveActiveRulesBundle(): { dir: string; legacyFile: string } | null {
+  const storage = resolveStorage();
+  return storage.mode === "bundle" ? { dir: storage.dir, legacyFile: storage.legacyFile } : null;
+}
+
+/** Transferable rule files of a bundle dir, "/"-separated and sorted; [] when the dir is absent. */
+export function listTransferableRuleFiles(dir: string): string[] {
+  if (!existsSync(dir)) return [];
+  return listBundleMarkdownFiles(dir)
+    .map(rel => rel.replace(/\\/g, "/"))
+    .filter(isTransferableRuleFile)
+    .sort();
+}
+
+/** Frontmatter fields and table rows of a rule file, for row-level import diffs. */
+export function parseRuleFileContent(content: string): { frontmatter: Record<string, string>; rows: Array<Record<string, string>> } {
+  const { frontmatter, body } = parseFrontmatter(content);
+  return { frontmatter, rows: parseMarkdownTable(body.split(/\r?\n/)) };
+}
+
+/**
+ * Write imported rule files into the bundle. The caller holds the bundle lock.
+ * A legacy single file is migrated first (never lost), each file is written
+ * atomically 0600 (never through a symlink), then the log gets one entry per
+ * message and index.md is regenerated.
+ */
+export function writeImportedRuleFiles(
+  bundle: { dir: string; legacyFile: string },
+  files: ReadonlyArray<{ rel: string; content: string }>,
+  messages: string[],
+): void {
+  ensureBundle(bundle.dir, bundle.legacyFile);
+  for (const file of files) {
+    if (!isTransferableRuleFile(file.rel) || file.rel === "index.md" || file.rel === "log.md") {
+      throw new Error(`Refusing to import rule file ${file.rel}.`);
+    }
+    const target = resolve(bundle.dir, file.rel);
+    const parent = dirname(target);
+    mkdirSync(parent, { recursive: true, mode: PRIVATE_DIR_MODE });
+    const relParent = relative(realpathSync(bundle.dir), realpathSync(parent));
+    if (relParent.startsWith("..") || isAbsolute(relParent)) {
+      throw new Error(`Refusing to import rule file ${file.rel}: its folder resolves outside the rules bundle.`);
+    }
+    writePrivateFile(target, file.content);
+  }
+  appendBundleLog(bundle.dir, messages);
+  regenerateBundleIndex(bundle.dir);
+  resetAccountingRulesCache();
 }

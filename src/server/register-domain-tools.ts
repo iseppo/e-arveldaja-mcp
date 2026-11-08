@@ -15,6 +15,7 @@ import { registerRecurringInvoiceTools } from "../tools/recurring-invoices.js";
 import { registerEstonianTaxTools } from "../tools/estonian-tax.js";
 import { registerLimitedVatTool } from "../tools/limited-vat.js";
 import { registerAnnualReportTools } from "../tools/annual-report.js";
+import { registerAccountingDataTransferTool } from "../tools/accounting-data-transfer.js";
 import { registerDocumentAuditTools } from "../tools/document-audit.js";
 import { registerReceiptInboxTools } from "../tools/receipt-inbox.js";
 import { registerLightyearTools } from "../tools/lightyear-investments.js";
@@ -102,6 +103,7 @@ export function registerDomainTools(ctx: RegisterDomainToolsContext): void {
   if (toolExposure.enableSales) registerManageSaleInvoiceTool(publicServer, api, runtimeSafetyContext);
   registerAccountingInboxTools(publicServer, api, runtimeSafetyContext, toolExposure);
   registerAnalyzeUnconfirmedTools(publicServer, api);
+  registerAccountingDataTransferTool(publicServer, api, runtimeSafetyContext);
   registerWorkflowRecommendationTools(publicServer, toolExposure, { setupMode });
   registerPlanTools(publicServer, runtimeSafetyContext, { profile: toolProfile });
   registerOperationResultTools(publicServer, runtimeSafetyContext);
