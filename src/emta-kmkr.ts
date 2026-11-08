@@ -39,7 +39,8 @@ const EXPECTED_HEADER = [
 
 /**
  * One active KMKR registration as EMTA shows it (dates YYYY-MM-DD). The name
- * and the registry or personal code are not kept.
+ * and the registry or personal code are not kept here (the outcome carries a
+ * checksum-valid registry code separately).
  */
 export interface EmtaKmkrRegistration {
   vat_number: string;
@@ -67,7 +68,12 @@ export type EmtaKmkrFailureCode =
   | "emta_registration_ambiguous";
 
 export type EmtaKmkrOutcome =
-  | { ok: true; registration: EmtaKmkrRegistration }
+  | {
+      ok: true;
+      registration: EmtaKmkrRegistration;
+      /** The row's 8-digit registry code when its check digit is valid; null for a personal code or an invalid one. */
+      registry_code: string | null;
+    }
   | {
       ok: false;
       code: EmtaKmkrFailureCode;
@@ -92,6 +98,20 @@ export interface EmtaKmkrDeps {
   fetch?: EmtaFetch;
   /** Test seam: the per-request deadline (headers and body), default 10 s. */
   timeoutMs?: number;
+}
+
+/**
+ * Whether `code` is an Estonian registry code: 8 digits whose last is the
+ * check digit (weights 1..7 mod 11; on 10, weights 3..9; on 10 again, 0).
+ */
+export function isValidEstonianRegistryCode(code: string): boolean {
+  if (!/^\d{8}$/.test(code)) return false;
+  const digits = [...code].map(Number);
+  const check = (weights: number[]) => digits.slice(0, 7).reduce((sum, digit, index) => sum + digit * weights[index]!, 0) % 11;
+  let value = check([1, 2, 3, 4, 5, 6, 7]);
+  if (value === 10) value = check([3, 4, 5, 6, 7, 8, 9]);
+  if (value === 10) value = 0;
+  return value === digits[7];
 }
 
 /** The VAT number as EMTA expects it (EE + 9 digits, no spaces), or null. */
@@ -190,6 +210,8 @@ function tableRows(html: string, start: number): string[][] | null {
 }
 
 interface ParsedRow {
+  /** The registry (8 digits) or personal (11 digits) code. */
+  code: string;
   limited: boolean;
   registered_on: string;
   deleted_on: string | null;
@@ -249,7 +271,7 @@ export function parseEmtaKmkrTable(html: string): ParsedRow[] | null {
     const decision = decisionText === "" ? null : strictDate(decisionText);
     const vatNumber = cellText(cells[6]!);
     if (!codeMatch || !registered || (deletedText !== "" && !deleted) || (decisionText !== "" && !decision) || !VAT_NUMBER_RE.test(vatNumber)) return null;
-    parsed.push({ limited: limitedSpan, registered_on: registered, deleted_on: deleted, decision_on: decision, vat_number: vatNumber });
+    parsed.push({ code: codeCell.split(" ")[0]!, limited: limitedSpan, registered_on: registered, deleted_on: deleted, decision_on: decision, vat_number: vatNumber });
   }
   if (marks !== parsed.filter(row => row.limited).length) return null;
   return parsed;
@@ -260,8 +282,8 @@ export function selectEmtaRegistration(rows: readonly ParsedRow[], vatNumber: st
   const matching = rows.filter(row => row.vat_number === vatNumber);
   const active = matching.filter(row => row.deleted_on === null);
   if (active.length === 1) {
-    const { deleted_on: _deleted, ...registration } = active[0]!;
-    return { ok: true, registration };
+    const { deleted_on: _deleted, code, ...registration } = active[0]!;
+    return { ok: true, registration, registry_code: isValidEstonianRegistryCode(code) ? code : null };
   }
   if (active.length > 1) return { ok: false, code: "emta_registration_ambiguous", detail: `EMTA shows ${active.length} active registrations for ${vatNumber}` };
   if (matching.length > 0) return { ok: false, code: "emta_registration_deleted", detail: `EMTA shows the registration of ${vatNumber} as deleted (${matching.map(row => row.deleted_on).join(", ")})` };

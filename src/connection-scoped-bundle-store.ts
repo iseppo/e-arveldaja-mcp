@@ -2,6 +2,7 @@ import { statSync } from "fs";
 import { dirname } from "path";
 import {
   checkBundleRecordIdentity,
+  bundleRecordIdentityCacheKey,
   getBundleRecordIdentity,
   readBoundedBundleJson,
   resolveBundleStorePath,
@@ -109,7 +110,7 @@ export function createConnectionScopedBundleStore<T extends object>(options: {
     read() {
       const path = resolveBundleStorePath(options.fileName);
       if (!path) return null;
-      const key = `${path}\n${getBundleRecordIdentity().stableIdentity}`;
+      const key = `${path}\n${bundleRecordIdentityCacheKey()}`;
       if (cache && cache.key === key) return cache.value;
       const value = storeFileExists(path) ? strip(readPersisted(path)) : [];
       cache = { key, value };

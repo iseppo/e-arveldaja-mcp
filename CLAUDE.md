@@ -1,7 +1,7 @@
 # e-arveldaja MCP Server
 
 TypeScript MCP server for the Estonian e-arveldaja (RIK e-Financials) REST API.
-129 tools by default on the `standard` profile; opt-in `guided` / `guided-sales` expose 19 / 20 tools, and `full` exposes all 149. The prompt registry holds 16 workflow prompts (guided profiles register fewer — a prompt whose required tools are all absent is not registered) and there are 15 resources across 12 modules. Supports multiple companies/accounts.
+130 tools by default on the `standard` profile; opt-in `guided` / `guided-sales` expose 19 / 20 tools, and `full` exposes all 150. The prompt registry holds 16 workflow prompts (guided profiles register fewer — a prompt whose required tools are all absent is not registered) and there are 15 resources across 12 modules. Supports multiple companies/accounts.
 
 ## Quick Start
 
@@ -83,6 +83,100 @@ of saving: `rule_scope: "this_company" | "shared"` (`describeAccountingRuleScope
 shared = not `isPerConnectionBundleStorage()`), plus a plain-language
 `rule_scope_warning` when the store is shared and the server has more than one
 connection. The save is never refused.
+
+**Company-keyed default store** (`src/company-identity.ts`). The API has no
+registry-code field, so the company's registry code comes from public registers:
+(a) with `/vat_info.vat_number`: EMTA's KMKR query (the shared `src/emta-kmkr.ts`
+lookup/cache) — the "Isikukood/registrikood" cell of the one active row, accepted
+only with a valid 8-digit check digit (`isValidEstonianRegistryCode`, weights
+1..7 then 3..9, mod 11), source `emta_kmkr`; (b) no VAT number: the business
+register autocomplete (`GET https://ariregister.rik.ee/est/api/autocomplete?q=<name>`,
+10 s, 256 KiB) by `/invoice_info.invoice_company_name` — accepted automatically
+(official register, owner decision) only when exactly one ACTIVE company (status
+R/L/N; K = deleted excluded; historical names do not count) has a name exactly
+equal after `exactCompanyName` (NFC, whitespace collapsed, trimmed, lowercased),
+source `ariregister_name`. A name match is also refused when the company's own
+client record carries another registry code (`ariregister_client_record_mismatch`;
+an unreadable clients list is `client_record_unavailable`) or another mapped
+connection on the same server has that code with a VAT number or another name
+(`ariregister_conflicting_mapping`). (c) Anything else (none, several, only
+deleted, name null, network failure) is unresolved: the per-key store stays,
+with a reason (`unresolvedCompanyReason`) shown in the export notes. Never guessed.
+The mapping fingerprint → `{server, registry_code, source, resolved_at,
+vat_number, company_name}` is persisted in `<globalConfigDir>/company-identity.json`
+(0600), written under `withBundleLock(<file>)` after a fresh re-read. A damaged
+file (bad JSON, unknown version, an invalid entry, > 1 MiB) is logged and never
+overwritten: its valid entries are still used, new connections stay unresolved
+(`company_identity_file_unreadable`). A company already adopted in this process
+is never dropped or switched (stores never change mid-process). Resolution runs
+lazily at the tool-invocation wrapper in `create-server.ts`, only once a signed
+request of that key got a 2xx answer in this process (`hasAuthenticatedSuccess`,
+`src/api-health.ts`; startup metadata does not count, so stale keys never send
+it), once per connection per process (an unresolved one is retried after 1 h);
+hidden requests are `/vat_info`, then EMTA, or the business register plus the
+clients list, never again once mapped. Rules reads never touch the network: the
+company is adopted from the mapping file (`adoptedCompany`) at tool-call start.
+A resolved company uses `accounting-rules/<company key>/`, company key =
+sha256("company\0" + server + "\n" + regcode): plain 64-hex like a per-key dir
+(domain-separated), because released versions (≤ 0.41.x) treat any other child
+of `accounting-rules/` as a shared root bundle; its lock/staging siblings
+(`<key>.lock`, `<key>.migrating`) match their scoped-name patterns too (pinned by
+a test that runs the released `chooseDefaultBundleStorage`,
+`src/__fixtures__/released-rules-storage.ts`). Legacy file:
+`<globalConfigDir>/<company key>/accounting-rules.md`. First use copies
+(non-destructively, under the company dir's lock and the source store's lock,
+symlinks skipped) the most recently modified per-key store of any fingerprint
+mapped to the same company into `<key>.migrating`, stages its legacy file inside
+(`legacy-accounting-rules.pending`), writes `migration.json` (`kind: "company"`,
+`company_key`, `source_scope`, `migrated_at`, `not_merged`), renames the staging
+dir into place, then moves the legacy file out (finished on the next use after a
+crash; a leftover staging dir is redone). The other per-key stores are never
+merged and are reported as `storage_notice` in the save tools' `rule_scope`
+answer and the export notes; so are a per-key store that appears after the
+company store exists and a source store modified after `migrated_at`. A failed
+migration keeps the per-key store for the whole process. Record stamps: new
+writes carry `company:<key>`; reads accept that stamp, the current fingerprint
+and every fingerprint mapped to the same company (so records survive key
+rotation); every other stamp is still refused. Read caches key on the sorted
+accepted-stamp list (`bundleRecordIdentityCacheKey`). `RULES_DIR` / `RULES_FILE`
+/ kept-in-place root bundles are unchanged.
+
+**Company data export / import** (`accounting_data_transfer`,
+`src/tools/accounting-data-transfer.ts`; standard/full, workflow group, no
+opt-out flag): `file_path` must be absolute in both modes
+(`file_path_not_absolute`). `mode: "export"` writes one new `.json` file (`file_path` under
+the allowed roots, `O_EXCL`, 0600; `output_exists` if present) with header
+`{format: "e-arveldaja-mcp-company-data", version: 1, exported_at, server,
+company: {name, registry_code, registry_code_source (`emta_kmkr` |
+`ariregister_name` from the mapping, else `client_record` best effort), vat_number, tax_refnumber},
+source_identity, rule_scope}` and `files`: every transferable rule file of the
+active bundle (`isTransferableRuleFile`: index/log, `auto-booking/*.md`,
+`owner-expense/policy.md`, `annual-report/{settings,liability-classification,cash-flow-category}.md`
+— other connections' hashed subdirs are never included) plus the five state
+stores (`statement-balances.json`, `receipt-attachment-digests.json`,
+`camt-review-acknowledgements.json`, `limited-vat.json`,
+`lightyear-usd-pool.json`) holding only this connection's records, unstamped.
+`mode: "import"`: strict schema (echoed values strictly shaped: ISO `exported_at`,
+`https://` `server`, 8-digit `registry_code`, plain VAT/tax numbers; the
+`company_mismatch` reason is sandboxed), 16 MiB cap, known relative paths only
+(`import_path_refused`), per-store record shape check; `compareCompanyIdentity`
+refuses `company_mismatch` when any identifier both sides have differs or none
+of equal registry code / equal tax reference number / equal name on the same
+server holds. Dry run lists per file `new | identical | differs | skipped`
+(index/log are regenerated/kept), row-level rule diffs (sandboxed) and state
+record counts, issuing a `plan_handle` bound to the file digest, the args and a
+digest of the touched local files; execute re-checks both under `withBundleLock`
+(`plan_drift`). A differing rule file is replaced only when named in
+`apply_rule_files`; a state store with existing records for this connection is
+held (`state_store_exists`) unless named in `replace_state_stores`. Imported
+state records are restamped to the active connection; other connections'
+records stay. Single-file mode refuses (`bundle_storage_required`). An export
+from another API server (demo vs live) has its state stores held
+(`state_store_server_mismatch`, not lifted by `replace_state_stores`); its rule
+files can still be imported. A `rule_scope: "shared"` export imported into a
+company's own store gets a warning note listing the rule files. The import is
+not atomic (files are written one by one); every import answer says to rerun the
+dry run to see what is in place after an interruption.
 
 ### Opening balances (algbilanss)
 
@@ -174,7 +268,7 @@ Opening balances are maintained in e-arveldaja. Statement-closing snapshots
 surface is a fixed per-session token cost. Eight env flags control optional
 parts of the surface (see `getToolExposureConfig()` in `src/config.ts`):
 
-`EARVELDAJA_PROFILE` provides one-choice surfaces: `guided` (19 merged daily-bookkeeping tools), `guided-sales` (those 19 plus the `manage_sale_invoice` sales façade — read plus the full prepare/execute mutation lifecycle: create/update/delete/confirm/invalidate/send/recurring and inline resolve-or-create customer, 20 total), `standard` (the absent-variable compatibility default, 129), or `full` (all 149, including granular/setup tools and the workflow-state paging tool `get_workflow_page`). Guided profiles are opt-in for this release. Any explicitly present legacy exposure flag forces the normalized profile to `custom` and preserves the flag combination below. Profile and catalog fingerprint are part of plan/file-reference scope: restart and obtain a fresh preview after changing them.
+`EARVELDAJA_PROFILE` provides one-choice surfaces: `guided` (19 merged daily-bookkeeping tools), `guided-sales` (those 19 plus the `manage_sale_invoice` sales façade — read plus the full prepare/execute mutation lifecycle: create/update/delete/confirm/invalidate/send/recurring and inline resolve-or-create customer, 20 total), `standard` (the absent-variable compatibility default, 130), or `full` (all 150, including granular/setup tools and the workflow-state paging tool `get_workflow_page`). Guided profiles are opt-in for this release. Any explicitly present legacy exposure flag forces the normalized profile to `custom` and preserves the flag combination below. Profile and catalog fingerprint are part of plan/file-reference scope: restart and obtain a fresh preview after changing them.
 
 The guided surface is sized for routing clarity, not token cost (per-tool measurement shows no cost cliff at 20). The **≤ 20** figure is a target, not a hard wall: 21–24 is a deliberate-exception band (allowed only with a recorded `CHANGELOG` rationale when no existing tool can absorb the capability), and 24 is the hard backstop above which the surface must be redesigned by merging tools rather than adding. Before adding any guided tool, apply the add/don't-add criteria in [`docs/guided-tool-policy.md`](docs/guided-tool-policy.md) — prefer a new `mode` on an existing façade, a `continue_accounting_workflow` continuation, or `standard`/`full` placement (as with `get_server_status`) over growing the daily surface.
 
@@ -258,13 +352,13 @@ without changing the default:
   `DISABLE_SALES` deployment usually sets this too — but the flags are
   independent. Saves ≈1.3k tokens (7 tools).
 
-The standard surface is 129 tools; `DISABLE_LIGHTYEAR` in a custom profile drops it to 123.
+The standard surface is 130 tools; `DISABLE_LIGHTYEAR` in a custom profile drops it to 124.
 `EXPOSE_GRANULAR_TOOLS` adds the 10 granular tools, `EXPOSE_SETUP_TOOLS` the 3
-credential tools; enabling both (with `full`'s `get_workflow_page`) raises it to the full 149. The five opt-out
+credential tools; enabling both (with `full`'s `get_workflow_page`) raises it to the full 150. The five opt-out
 group flags trim the default further — `DISABLE_TAX_TOOLS` (−5),
 `DISABLE_REFERENCE_ADMIN` (−9), `DISABLE_ANNUAL_REPORT` (−4), `DISABLE_SALES`
 (−13), `DISABLE_PRODUCTS` (−7) — so a lean purchase-side-only deployment with
-every disable flag set (incl. Lightyear) lands at 85 tools. (The former
+every disable flag set (incl. Lightyear) lands at 86 tools. (The former
 `prepare_accounting_inbox` / `run_accounting_inbox_dry_runs` tools were
 exact aliases of `accounting_inbox` `mode="scan"` / `mode="dry_run"` and have
 been removed — use `accounting_inbox` with the matching `mode`.)
@@ -872,5 +966,5 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 const transport = new StdioClientTransport({ command: "node", args: ["dist/index.js"] });
 const client = new Client({ name: "test", version: "1.0.0" });
 await client.connect(transport);
-const { tools } = await client.listTools(); // 129 tools (standard profile)
+const { tools } = await client.listTools(); // 130 tools (standard profile)
 ```

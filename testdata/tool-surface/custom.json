@@ -1,10 +1,10 @@
 {
   "profile": "custom",
   "measurement": {
-    "toolCount": 85,
-    "toolsListBytes": 97814,
-    "descriptionsBytes": 14074,
-    "inputSchemasBytes": 63340,
+    "toolCount": 86,
+    "toolsListBytes": 99908,
+    "descriptionsBytes": 14749,
+    "inputSchemasBytes": 64507,
     "largestTool": {
       "name": "import_wise_transactions",
       "bytes": 5734
@@ -3853,6 +3853,77 @@
       },
       "name": "analyze_unconfirmed_transactions",
       "title": "Analyze Unconfirmed Transactions"
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "description": "Move this company's local MCP data (saved booking and annual-report rules, plus local state: statement balances, receipt digests, CAMT acknowledgements, limited-VAT settings, Lightyear USD pool) to another machine or a new API key. export = write one .json file (new file only, 0600; no credentials). import = dry run (per file new / identical / differs, row-level rule diffs, state record counts) → owner approval → execute:true + plan_handle. Refused for another company (company_mismatch). Existing state is never overwritten unless named in replace_state_stores; a differing rule file is written only when named in apply_rule_files. Nothing is changed in e-arveldaja.",
+      "execution": {
+        "taskSupport": "forbidden"
+      },
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "properties": {
+          "apply_rule_files": {
+            "description": "import: rule files (paths as listed by the dry run) whose imported version replaces a differing local one",
+            "items": {
+              "maxLength": 200,
+              "type": "string"
+            },
+            "maxItems": 5000,
+            "type": "array"
+          },
+          "execute": {
+            "description": "import: false (default) = dry run; true = execute an approved plan_handle",
+            "type": "boolean"
+          },
+          "file_path": {
+            "description": "Absolute path. export: the new .json file to write; import: the export file to read",
+            "maxLength": 4096,
+            "minLength": 1,
+            "type": "string"
+          },
+          "mode": {
+            "description": "export | import",
+            "enum": [
+              "export",
+              "import"
+            ],
+            "type": "string"
+          },
+          "plan_handle": {
+            "description": "import with execute:true: the handle from the dry run",
+            "type": "string"
+          },
+          "replace_state_stores": {
+            "description": "import: state stores whose existing records for this company are replaced by the imported ones",
+            "items": {
+              "enum": [
+                "statement-balances.json",
+                "receipt-attachment-digests.json",
+                "camt-review-acknowledgements.json",
+                "limited-vat.json",
+                "lightyear-usd-pool.json"
+              ],
+              "type": "string"
+            },
+            "maxItems": 5,
+            "type": "array"
+          }
+        },
+        "required": [
+          "mode",
+          "file_path"
+        ],
+        "type": "object"
+      },
+      "name": "accounting_data_transfer",
+      "title": "Export / Import Company Data"
     },
     {
       "annotations": {

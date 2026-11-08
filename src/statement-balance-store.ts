@@ -2,6 +2,7 @@ import { existsSync } from "fs";
 import { dirname } from "path";
 import {
   checkBundleRecordIdentity,
+  bundleRecordIdentityCacheKey,
   getBundleRecordIdentity,
   readBoundedBundleJson,
   resolveStatementBalanceStorePath,
@@ -54,7 +55,7 @@ function readPersisted(path: string): PersistedStatementBalanceRecord[] {
 export function readStatementBalances(): StatementBalanceRecord[] | null {
   const path = resolveStatementBalanceStorePath();
   if (!path) { lastIdentityWarning = null; return null; } // single-file mode: persistence unavailable
-  const key = `${path}\n${getBundleRecordIdentity().stableIdentity}`;
+  const key = `${path}\n${bundleRecordIdentityCacheKey()}`;
   if (cache && cache.key === key) { lastIdentityWarning = cache.warning; return cache.value; }
   if (!existsSync(path)) { cache = { key, value: [], warning: null }; lastIdentityWarning = null; return []; }
   let persisted: PersistedStatementBalanceRecord[];

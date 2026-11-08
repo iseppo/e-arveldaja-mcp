@@ -118,7 +118,20 @@ export function getAuthBrakeStates(now = Date.now()): AuthBrakeState[] {
     .filter(state => state.cooldown_until !== null || state.distinct_connections_401 > 0);
 }
 
+/** Connection fingerprints that got a successful (2xx) authenticated answer in this process. */
+const authenticatedConnections = new Set<string>();
+
+export function recordAuthenticatedSuccess(connectionFingerprint: string): void {
+  authenticatedConnections.add(connectionFingerprint);
+}
+
+/** True once a signed request of this connection succeeded in this process (startup metadata does not count). */
+export function hasAuthenticatedSuccess(connectionFingerprint: string): boolean {
+  return authenticatedConnections.has(connectionFingerprint);
+}
+
 /** Test hook: forget every brake. */
 export function resetAuthBrakes(): void {
   brakes.clear();
+  authenticatedConnections.clear();
 }

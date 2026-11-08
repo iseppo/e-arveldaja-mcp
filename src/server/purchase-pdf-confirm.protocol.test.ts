@@ -74,8 +74,14 @@ describe("actual public PDF create → reviewed confirm registration", () => {
     try {
       const invalid = await server.client.callTool({ name: "confirm_purchase_invoice", arguments: { id: 123, plan_handle: "a".repeat(43) } });
       expect(invalid.isError).toBe(true);
-      expect(urls()).toEqual([{ method: "GET", path: "/v1/invoice_info" }]);
-      expect(fake.state.calls).toHaveLength(0);
+      // Identity metadata only: the audit label, then the one-time company
+      // identity lookup (no VAT number → business register by name).
+      expect(urls()).toEqual([
+        { method: "GET", path: "/v1/invoice_info" },
+        { method: "GET", path: "/v1/vat_info" },
+        { method: "GET", path: "/est/api/autocomplete" },
+      ]);
+      expect(fake.state.calls.map(call => `${call.method} ${call.path}`)).toEqual(["GET /vat_info", "GET /est/api/autocomplete"]);
       expect(fake.writes()).toHaveLength(0);
 
       const created = payload(await server.client.callTool({ name: "create_purchase_invoice_from_pdf", arguments: sourceArgs("UNVERIFIED-PLAN") }));
