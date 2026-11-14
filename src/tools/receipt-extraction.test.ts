@@ -5136,6 +5136,17 @@ describe("supplier identity from a page-column identity block (Telia footer live
     expect(extract(page(block, "Näidis")).supplier_reg_code).toBeUndefined();
   });
 
+  it("a logo glyph read as a lone leading letter does not hide the letterhead (live Telia on liteparse 2.19)", () => {
+    const block = footer(["Näidis Side AS", "Registrikood 10000018", "KMKR number EE100000010"]);
+    const result = extract(page(block, "Ä Näidis"));
+    expect(result.supplier_name).toBe("Näidis Side AS");
+    expect(result.supplier_reg_code).toBe("10000018");
+    expect(result.supplier_from_footer_block).toBe(true);
+    // The skipped letter never corroborates on its own, and a non-leading word still has to lead the name.
+    expect(extract(page(footer(["Ä Side AS", "Registrikood 10000018"]), "Ä")).supplier_reg_code).toBeUndefined();
+    expect(extract(page(footer(["Teine Näidis AS", "Registrikood 10000018"]), "Ä Näidis")).supplier_reg_code).toBeUndefined();
+  });
+
   it("a distinctive letterhead word still corroborates", () => {
     const block = footer(["Näidis Side AS", "Registrikood 10000018", "KMKR number EE100000010"]);
     expect(extract(page(block, "Näidis Side")).supplier_reg_code).toBe("10000018");

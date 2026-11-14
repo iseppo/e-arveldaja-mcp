@@ -60,22 +60,22 @@
     "test:integration": "npm run build && vitest run --config vitest.integration.config.ts"
   },
   "dependencies": {
-    "@llamaindex/liteparse": "^2.18.0",
+    "@llamaindex/liteparse": "^2.19.0",
     "@modelcontextprotocol/sdk": "^1.32.2",
     "@toon-format/toon": "^4.4.0",
-    "dotenv": "^18.0.9",
-    "fast-xml-parser": "^5.12.0",
+    "dotenv": "^18.0.10",
+    "fast-xml-parser": "^5.12.1",
     "fastest-levenshtein": "^1.0.16",
     "ibantools": "^4.5.4",
     "jsvat": "^2.5.4",
     "zod": "^4.6.7"
   },
   "devDependencies": {
-    "@babel/parser": "^8.1.0",
+    "@babel/parser": "^8.1.2",
     "@types/node": "^26.6.6",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2",
-    "vite": "^8.3.6",
+    "vite": "^8.3.8",
     "vitest": "^5.1.0"
   }
 }

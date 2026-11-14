@@ -3415,6 +3415,9 @@ function letterheadNamesEntity(textItems: readonly LayoutTextItem[], name: strin
     .map(item => item.text)
     .join(" ");
   const letterheadTokens = normalizeCompanyNameShared(letterhead, { stripNonAlphanumeric: true }).split(" ").filter(Boolean);
+  // A logo drawn as a glyph reads as a lone leading character (liteparse 2.19 reads Telia's logo as "Ä Telia");
+  // one letter names nobody, so leading single-character tokens are skipped.
+  while (letterheadTokens.length > 1 && letterheadTokens[0]!.length === 1) letterheadTokens.shift();
   const nameTokens = normalizeCompanyNameShared(name, { stripNonAlphanumeric: true }).split(" ").filter(Boolean);
   if (letterheadTokens.length === 0 || nameTokens.length === 0) return false;
   const [shorter, longer] = letterheadTokens.length <= nameTokens.length ? [letterheadTokens, nameTokens] : [nameTokens, letterheadTokens];
