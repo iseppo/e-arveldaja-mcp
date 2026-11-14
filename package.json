@@ -60,7 +60,7 @@
     "test:integration": "npm run build && vitest run --config vitest.integration.config.ts"
   },
   "dependencies": {
-    "@llamaindex/liteparse": "^2.18.0",
+    "@llamaindex/liteparse": "^2.19.0",
     "@modelcontextprotocol/sdk": "^1.32.2",
     "@toon-format/toon": "^4.4.0",
     "dotenv": "^18.0.10",

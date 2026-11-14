@@ -111,23 +111,28 @@ describe("lost-value image path end to end: read → verify with real render and
   }, SLOW);
 
   it("two_numbers: a number cell printing two numbers holds", async () => {
+    // liteparse 2.18 loses both numbers and OCR sees two (ocr_ambiguous); 2.19 keeps the second number in the text
+    // layer, so the row is no longer a lost row and the conflicting text holds the field (field_has_other_holds).
+    // Either way the number is never agreed.
     const { verify } = await readThenVerify({ variant: "two_numbers" }, {
       invoice_number: { line: NUMBER_LINE, printed: "1234567890" },
       invoice_date: { line: DATE_LINE, printed: "31. juuli 2026" },
     });
-    expect(statusOf(verify!.lostValues, "invoice_number")).toBe("ocr_ambiguous");
+    expect(["ocr_ambiguous", "field_has_other_holds"]).toContain(statusOf(verify!.lostValues, "invoice_number"));
     expect(verify!.values!.invoice_number).toBeNull();
   }, SLOW);
 
   it("label_first: the leader dots paint over the label, so the crop's label cannot be proved and nothing is agreed", async () => {
-    // Crops are made (the label item still places the row), but OCR of a dotted-over label does not reproduce it:
+    // Crops are made for the cited rows (the label item still places the row), but OCR of a dotted-over label does not reproduce it:
     // the position check fails on at least one field (locally: the number, ocr_row_mismatch), and a date alone is
     // never applied while the number stays lost.
     const { read, verify } = await readThenVerify({ variant: "label_first" }, {
       invoice_number: { line: NUMBER_LINE, printed: "1234567890" },
       invoice_date: { line: DATE_LINE, printed: "31. juuli 2026" },
     });
-    expect(read.lostValueImages!.map((image) => image.line)).toEqual(["p1:002", "p1:003", "p1:004", "p1:005"]);
+    // Which rows get a crop depends on how liteparse groups the dotted-over labels (2.19 merges dots into some labels
+    // and places no crop on the last row), so only the cited rows are pinned.
+    expect(read.lostValueImages!.map((image) => image.line)).toEqual(expect.arrayContaining([NUMBER_LINE, DATE_LINE]));
     expect(verify!.lostValues!.map((entry) => entry.status)).not.toContain("image_ocr_agreed");
     expect(verify!.values).toMatchObject({ invoice_date: null, invoice_number: null });
   }, SLOW);
