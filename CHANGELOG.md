@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Telia invoices are again read with Telia as the supplier.** Before, with the newer PDF reader the Telia logo came out as an extra letter in front of the name ("Ä Telia"), so the supplier was no longer recognised and the invoice went to review without a supplier. Details: `letterheadNamesEntity` skips leading single-character letterhead tokens before the token-for-token comparison; a lone letter still corroborates nothing.
+
+### Changed
+
+- **Dependency updates, including a security fix in the server's web layer.** Details: `npm audit fix` (hono 4.13.18, @hono/node-server 2.1.8; 2 moderate advisories → 0); @llamaindex/liteparse 2.19.0, dotenv 18.0.10, fast-xml-parser 5.12.1, @babel/parser 8.1.2, vite 8.3.8, with declared floors equal to the tested versions. On the 71-document owner corpus, liteparse 2.19 gives the same extracted fields, holds and lost-value crops as 2.18 (after the Telia fix), and the Google dot-leader date is agreed from the image on 7/7 invoices with every wrong date refused. Two synthetic lost-value e2e tests now assert the hold rather than liteparse's text grouping.
+
 ## [0.42.0] - 2026-11-08
 
 ### Added
